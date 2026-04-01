@@ -210,9 +210,13 @@ function rehydrateState(results) {
       const snap = JSON.parse(_rfs(STATE_SNAPSHOT_FILE, 'utf8'));
       if (snap.baselineHistory?.length) state.baselineHistory = snap.baselineHistory;
       if (snap.nodeSpeedHistory?.length) state.nodeSpeedHistory = snap.nodeSpeedHistory;
-      if (snap.spentUdvpn) state.spentUdvpn = snap.spentUdvpn;
+      // Don't restore spentUdvpn from snapshot — it accumulates across restarts
+      // and causes negative balance display. Balance is queried fresh from chain on audit start.
+      // Only restore for display purposes, capped to prevent negative.
       if (snap.balanceUdvpn) state.balanceUdvpn = snap.balanceUdvpn;
-      if (snap.balance) state.balance = snap.balance;
+      if (snap.spentUdvpn) state.spentUdvpn = Math.min(snap.spentUdvpn, state.balanceUdvpn);
+      const remaining = Math.max(0, state.balanceUdvpn - state.spentUdvpn);
+      state.balance = `${(remaining / 1_000_000).toFixed(4)} DVPN`;
       if (snap.estimatedTotalCost) state.estimatedTotalCost = snap.estimatedTotalCost;
       if (snap.startedAt) state.startedAt = snap.startedAt;
       if (snap.baselineMbps) state.baselineMbps = snap.baselineMbps;
@@ -747,7 +751,9 @@ app.listen(PORT, async () => {
       );
       const bal = await tmpClient.getBalance(acc.address, DENOM);
       state.balanceUdvpn = parseInt(bal?.amount || '0', 10);
+      state.spentUdvpn = 0; // Real chain balance is the truth — reset estimate
       state.balance = `${(state.balanceUdvpn / 1_000_000).toFixed(4)} DVPN`;
+      state.estimatedTotalCost = '0 DVPN';
       tmpClient.disconnect();
       console.log(`Wallet: ${acc.address} | Balance: ${state.balance}`);
     } catch (err) {

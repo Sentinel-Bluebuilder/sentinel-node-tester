@@ -263,7 +263,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
     }
 
     state.spentUdvpn += thisCostUdvpn + 200000;
-    state.balance = `${((state.balanceUdvpn - state.spentUdvpn) / 1_000_000).toFixed(4)} DVPN (est. remaining)`;
+    state.balance = `${(Math.max(0, state.balanceUdvpn - state.spentUdvpn) / 1_000_000).toFixed(4)} DVPN (est. remaining)`;
     state.estimatedTotalCost = `${(state.spentUdvpn / 1_000_000).toFixed(4)} DVPN`;
     if (broadcast) broadcast('state', { state });
 
@@ -319,7 +319,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
     sessionId = newId;
     addToSessionMap(node.address, sessionId);
     state.spentUdvpn += thisCostUdvpn + 200000;
-    state.balance = `${((state.balanceUdvpn - state.spentUdvpn) / 1_000_000).toFixed(4)} DVPN (est. remaining)`;
+    state.balance = `${(Math.max(0, state.balanceUdvpn - state.spentUdvpn) / 1_000_000).toFixed(4)} DVPN (est. remaining)`;
     state.estimatedTotalCost = `${(state.spentUdvpn / 1_000_000).toFixed(4)} DVPN`;
     if (broadcast) broadcast('state', { state });
     if (broadcast) broadcast('log', { msg: `  Fresh session ${sessionId} — waiting for chain + node indexing...` });
