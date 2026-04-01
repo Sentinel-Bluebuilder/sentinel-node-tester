@@ -391,9 +391,24 @@ export async function runAudit(resume, state, broadcast) {
   }
   broadcast('log', { msg: `\n💳 Phase 3: ${batches.length} payment batches × ${BATCH_SIZE} nodes.` });
 
+  let _lastBalanceRefresh = Date.now();
+  const BALANCE_REFRESH_INTERVAL = 5 * 60_000; // Refresh real balance every 5 minutes
+
   for (let b = 0; b < batches.length; b++) {
     if (state.stopRequested) { broadcast('log', { msg: '⏹ Stop requested.' }); break; }
     const batch = batches[b];
+
+    // Periodic real balance refresh (prevents stale estimate drift)
+    if (Date.now() - _lastBalanceRefresh > BALANCE_REFRESH_INTERVAL) {
+      try {
+        const freshBal = await client.getBalance(account.address, DENOM);
+        const realBalance = parseInt(freshBal?.amount || '0', 10);
+        state.balanceUdvpn = realBalance;
+        state.spentUdvpn = 0; // Reset spent — real balance is the truth
+        state.balance = `${(realBalance / 1_000_000).toFixed(4)} DVPN`;
+        _lastBalanceRefresh = Date.now();
+      } catch { /* non-critical — estimate continues */ }
+    }
 
     // VPN interference check before each batch
     const canProceed = await checkAndPauseIfInterference(broadcast, state);
