@@ -1,8 +1,7 @@
 # Sentinel dVPN Node Tester -- AI Onboarding Document
 
 Generated: 2026-03-23
-For: Fresh AI instances working on this project
-Project path: `C:\Users\Connect\Desktop\sentinel-node-tester`
+For: New contributors and developers working on this project
 
 ---
 
@@ -146,8 +145,8 @@ sentinel-node-tester/
 |
 |-- scripts/                       Utility scripts
 |-- lib/                           LEGACY -- originals kept for reference; imports point to new locations
-|-- CLAUDE.md                      Project-specific AI rules
-|-- HANDOFF.md                     Session handoff document
+|-- CLAUDE.md                      Project rules and conventions
+|-- CONTRIBUTING.md                Contributor guidelines
 |-- MANIFESTO.md                   Project manifesto
 |-- README.md, SETUP.md            Documentation
 ```

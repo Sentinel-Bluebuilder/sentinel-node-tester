@@ -106,7 +106,7 @@ When you work on this project, you are maintaining the founder's most important 
 
 2. **Every change gets verified.** If you modify tunnel logic, handshake code, or payment flows — test it. Not with mocks. Against real nodes.
 
-3. **Preserve the knowledge.** The comments, the constants, the non-negotiables in CLAUDE.md — they exist because something broke without them. Do not remove them because they look redundant.
+3. **Preserve the knowledge.** The comments, the constants, the project conventions — they exist because something broke without them. Do not remove them because they look redundant.
 
 4. **Results are sacred.** `results/results.json` contains real test data from real spending of real P2P tokens. Never overwrite it carelessly.
 
