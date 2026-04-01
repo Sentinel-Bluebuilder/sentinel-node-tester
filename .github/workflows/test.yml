@@ -1,0 +1,41 @@
+name: Tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        node-version: [20, 22]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run smoke tests
+        run: npm test
+
+      - name: Verify all modules import
+        run: node -e "import('./index.js').then(m => { const n = Object.keys(m).length; console.log(n + ' exports OK'); if (n < 50) process.exit(1); })"
+
+      - name: Verify server starts
+        run: |
+          $job = Start-Job -ScriptBlock { Set-Location $using:PWD; $env:PORT='3098'; node server.js 2>&1 }
+          Start-Sleep -Seconds 5
+          $response = Invoke-WebRequest -Uri http://localhost:3098/api/stats -UseBasicParsing
+          if ($response.StatusCode -ne 200) { exit 1 }
+          Write-Host "Server API responded: $($response.StatusCode)"
+          Stop-Job $job
+        shell: pwsh

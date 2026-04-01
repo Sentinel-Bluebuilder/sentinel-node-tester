@@ -140,6 +140,120 @@ async function run() {
   await sleep(50);
   assert(Date.now() - start >= 45, 'sleep(50) takes ~50ms');
 
+  // ─── 10. Session Functions ─────────────────────────────────────────────
+  console.log('10. Session functions...');
+  const session = await import('../core/session.js');
+  // Credential CRUD
+  session.saveCredential('sentnode1test', { type: 'wireguard', key: 'test123' });
+  assert(session.getCredential('sentnode1test')?.key === 'test123', 'saveCredential + getCredential');
+  session.clearCredential('sentnode1test');
+  assert(session.getCredential('sentnode1test') === null, 'clearCredential');
+
+  // Session poisoning
+  session.markSessionPoisoned('sentnode1abc', '999');
+  assert(session.isSessionPoisoned('sentnode1abc', '999') === true, 'markSessionPoisoned');
+  assert(session.isSessionPoisoned('sentnode1abc', '888') === false, 'unpoisoned session');
+  session.clearPoisonedSessions();
+  assert(session.isSessionPoisoned('sentnode1abc', '999') === false, 'clearPoisonedSessions');
+
+  // Duplicate payment guard
+  session.markPaid('sentnode1xyz');
+  assert(session.isPaid('sentnode1xyz') === true, 'markPaid');
+  assert(session.isPaid('sentnode1zzz') === false, 'unpaid node');
+  session.clearPaidNodes();
+  assert(session.isPaid('sentnode1xyz') === false, 'clearPaidNodes');
+
+  // Price parser
+  assert(session.parseNodePriceUdvpn([{ denom: 'udvpn', quote_value: '40152030' }]) === 40152030, 'parseNodePriceUdvpn array');
+  assert(session.parseNodePriceUdvpn(null) === 0, 'parseNodePriceUdvpn null');
+
+  // Session cache control
+  session.invalidateSessionCache();
+  session.addToSessionMap('sentnode1map', 12345n);
+  assert(true, 'addToSessionMap no throw');
+
+  // ─── 11. Wallet Functions ──────────────────────────────────────────────
+  console.log('11. Wallet functions...');
+  const wallet = await import('../core/wallet.js');
+  assert(typeof wallet.cachedWalletSetup === 'function', 'cachedWalletSetup exists');
+  assert(typeof wallet.privKeyFromMnemonic === 'function', 'privKeyFromMnemonic exists');
+  assert(typeof wallet.createFreshClient === 'function', 'createFreshClient exists');
+  assert(typeof wallet.signAndBroadcastRetry === 'function', 'signAndBroadcastRetry exists');
+  assert(typeof wallet.buildV3Registry === 'function', 'buildV3Registry exists');
+  const registry = wallet.buildV3Registry();
+  assert(registry !== null && typeof registry === 'object', 'buildV3Registry returns object');
+
+  // ─── 12. Chain Functions ───────────────────────────────────────────────
+  console.log('12. Chain functions...');
+  const chain = await import('../core/chain.js');
+  assert(typeof chain.findWorkingLcd === 'function', 'findWorkingLcd');
+  assert(typeof chain.ensureLcd === 'function', 'ensureLcd');
+  assert(typeof chain.getAllNodes === 'function', 'getAllNodes');
+  assert(typeof chain.queryNodeStatusDirect === 'function', 'queryNodeStatusDirect');
+  assert(typeof chain.fetchPlanMembership === 'function', 'fetchPlanMembership');
+  assert(typeof chain.discoverPlans === 'function', 'discoverPlans');
+  assert(typeof chain.querySubscriptions === 'function', 'querySubscriptions');
+  assert(typeof chain.invalidateNodeCache === 'function', 'invalidateNodeCache');
+  chain.setActiveLcd('https://lcd.sentinel.co');
+  assert(chain.getActiveLcd() === 'https://lcd.sentinel.co', 'get/setActiveLcd');
+
+  // ─── 13. Protocol Functions ────────────────────────────────────────────
+  console.log('13. Protocol functions...');
+  const proto = await import('../protocol/v3protocol.js');
+  assert(typeof proto.nodeStatusV3 === 'function', 'nodeStatusV3');
+  assert(typeof proto.generateWgKeyPair === 'function', 'generateWgKeyPair');
+  assert(typeof proto.initHandshakeV3 === 'function', 'initHandshakeV3');
+  assert(typeof proto.initHandshakeV3V2Ray === 'function', 'initHandshakeV3V2Ray');
+  assert(typeof proto.buildV2RayClientConfig === 'function', 'buildV2RayClientConfig');
+  assert(typeof proto.writeWgConfig === 'function', 'writeWgConfig');
+  assert(typeof proto.extractSessionId === 'function', 'extractSessionId');
+  assert(typeof proto.waitForPort === 'function', 'waitForPort');
+  assert(typeof proto.validateCIDR === 'function', 'validateCIDR');
+
+  // CIDR validation
+  assert(proto.validateCIDR('10.8.0.2/32') === true, 'validateCIDR valid IPv4');
+  assert(proto.validateCIDR('garbage') === false, 'validateCIDR invalid');
+
+  // WireGuard key generation
+  const keys = proto.generateWgKeyPair();
+  assert(keys.privateKey.length === 32, 'WG private key 32 bytes');
+  assert(keys.publicKey.length === 32, 'WG public key 32 bytes');
+
+  // ─── 14. Subpath Imports ───────────────────────────────────────────────
+  console.log('14. Subpath imports...');
+  const subpaths = [
+    'sentinel-node-tester/audit/pipeline',
+    'sentinel-node-tester/core/errors',
+    'sentinel-node-tester/core/constants',
+    'sentinel-node-tester/protocol/v3protocol',
+    'sentinel-node-tester/protocol/speedtest',
+    'sentinel-node-tester/protocol/diagnostics',
+    'sentinel-node-tester/core/wallet',
+    'sentinel-node-tester/core/chain',
+    'sentinel-node-tester/core/session',
+  ];
+  for (const sp of subpaths) {
+    try { await import(sp); assert(true, 'subpath: ' + sp); }
+    catch (e) { assert(false, `subpath ${sp}: ${e.message.split('\n')[0]}`); }
+  }
+
+  // ─── 15. Error Hierarchy ───────────────────────────────────────────────
+  console.log('15. Error hierarchy...');
+  const errors = await import('../core/errors.js');
+  const errorClasses = ['AuditError', 'ChainError', 'HandshakeError', 'TunnelError',
+    'PaymentError', 'VpnInterferenceError', 'NodeUnreachableError',
+    'InsufficientBalanceError', 'SpeedTestError'];
+  for (const cls of errorClasses) {
+    assert(typeof errors[cls] === 'function', `error class: ${cls}`);
+    // AuditError needs (msg, code, diag), subclasses need (msg, diag)
+    const instance = cls === 'AuditError'
+      ? new errors[cls]('test', 'TEST', {})
+      : new errors[cls]('test');
+    assert(instance instanceof Error, `${cls} extends Error`);
+    assert(typeof instance.code === 'string', `${cls} has .code`);
+    assert(typeof instance.diag === 'object', `${cls} has .diag`);
+  }
+
   // ─── Results ──────────────────────────────────────────────────────────
   console.log(`\n${'='.repeat(50)}`);
   console.log(`RESULTS: ${results.pass} passed, ${results.fail} failed (${results.pass + results.fail} total)`);
