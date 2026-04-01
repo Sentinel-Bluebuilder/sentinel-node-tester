@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dictator Mode — Sentinel Network Audit</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-base: #060608;
+      --bg-elevated: #0c0c10;
+      --glass-bg: rgba(12, 12, 18, 0.9);
+      --glass-border: rgba(255, 255, 255, 0.06);
+      --text-primary: #e8e8ec;
+      --text-secondary: #6a6a78;
+      --text-dim: #3a3a48;
+      --accent-green: #00c853;
+      --accent-green-dim: rgba(0, 200, 83, 0.12);
+      --accent-red: #ff1744;
+      --accent-red-dim: rgba(255, 23, 68, 0.12);
+      --accent-amber: #ffa726;
+      --accent-amber-dim: rgba(255, 167, 38, 0.12);
+      --accent-blue: #448aff;
+      --mono: 'JetBrains Mono', monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg-base);
+      color: var(--text-primary);
+      font-family: 'Outfit', sans-serif;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ─── Scanline overlay ─── */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 9999;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0, 0, 0, 0.03) 2px,
+        rgba(0, 0, 0, 0.03) 4px
+      );
+    }
+
+    /* ─── Header ─── */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 20px 36px;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(6, 6, 8, 0.97);
+      border-bottom: 1px solid var(--glass-border);
+      backdrop-filter: blur(12px);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .brand-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, var(--accent-red) 0%, #b71c1c 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      box-shadow: 0 0 20px rgba(255, 23, 68, 0.25);
+    }
+
+    .brand h1 {
+      font-weight: 800;
+      font-size: 18px;
+      letter-spacing: 4px;
+      text-transform: uppercase;
+      background: linear-gradient(90deg, var(--accent-red), #ff6b6b);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .brand-sub {
+      font-size: 11px;
+      color: var(--text-dim);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      font-weight: 400;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .refresh-indicator {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-dim);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .refresh-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent-green);
+      animation: blink 3s infinite;
+    }
+
+    @keyframes blink {
+      0%, 90% { opacity: 1; }
+      95% { opacity: 0.2; }
+      100% { opacity: 1; }
+    }
+
+    .back-link {
+      font-size: 13px;
+      color: var(--text-secondary);
+      text-decoration: none;
+      padding: 6px 14px;
+      border: 1px solid var(--glass-border);
+      border-radius: 6px;
+      transition: all 0.2s;
+      font-weight: 500;
+    }
+
+    .back-link:hover {
+      color: var(--text-primary);
+      border-color: rgba(255, 255, 255, 0.15);
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    /* ─── Stats bar ─── */
+    .stats-bar {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 1px;
+      background: var(--glass-border);
+      margin: 24px 36px 0;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .stat-card {
+      background: var(--bg-elevated);
+      padding: 20px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .stat-card:first-child { border-radius: 12px 0 0 12px; }
+    .stat-card:last-child { border-radius: 0 12px 12px 0; }
+
+    .stat-label {
+      font-size: 10px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      font-weight: 600;
+    }
+
+    .stat-value {
+      font-family: var(--mono);
+      font-size: 28px;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    .stat-value.green { color: var(--accent-green); }
+    .stat-value.red { color: var(--accent-red); }
+    .stat-value.amber { color: var(--accent-amber); }
+    .stat-value.blue { color: var(--accent-blue); }
+
+    .stat-detail {
+      font-size: 11px;
+      color: var(--text-secondary);
+      font-family: var(--mono);
+    }
+
+    /* ─── Main content ─── */
+    .content {
+      padding: 24px 36px 48px;
+    }
+
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 16px;
+    }
+
+    .section-title {
+      font-size: 12px;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      font-weight: 600;
+    }
+
+    .section-count {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    /* ─── Country table ─── */
+    .country-table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0 2px;
+    }
+
+    .country-table thead th {
+      font-size: 10px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      font-weight: 600;
+      padding: 12px 16px;
+      text-align: left;
+      position: sticky;
+      top: 73px;
+      background: var(--bg-base);
+      z-index: 10;
+      border-bottom: 1px solid var(--glass-border);
+    }
+
+    .country-table thead th:last-child { text-align: center; }
+    .country-table thead th:nth-child(3),
+    .country-table thead th:nth-child(4),
+    .country-table thead th:nth-child(5),
+    .country-table thead th:nth-child(6) { text-align: right; }
+
+    .country-row {
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .country-row:hover { background: rgba(255, 255, 255, 0.02); }
+
+    .country-row td {
+      padding: 14px 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+      font-size: 14px;
+    }
+
+    .country-name {
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .country-flag {
+      font-size: 20px;
+      line-height: 1;
+    }
+
+    .node-count {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    .google-stat {
+      font-family: var(--mono);
+      font-size: 13px;
+      text-align: right;
+    }
+
+    .google-stat.accessible { color: var(--accent-green); }
+    .google-stat.blocked { color: var(--accent-red); }
+    .google-stat.unknown { color: var(--text-dim); }
+
+    .pct-bar {
+      display: flex;
+      height: 4px;
+      border-radius: 2px;
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.04);
+      min-width: 80px;
+    }
+
+    .pct-fill-green {
+      background: var(--accent-green);
+      transition: width 0.4s ease;
+    }
+
+    .pct-fill-red {
+      background: var(--accent-red);
+      transition: width 0.4s ease;
+    }
+
+    /* ─── Status badge ─── */
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 4px 12px;
+      border-radius: 4px;
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+
+    .status-badge.open {
+      background: var(--accent-green-dim);
+      color: var(--accent-green);
+      border: 1px solid rgba(0, 200, 83, 0.2);
+    }
+
+    .status-badge.blocked {
+      background: var(--accent-red-dim);
+      color: var(--accent-red);
+      border: 1px solid rgba(255, 23, 68, 0.2);
+    }
+
+    .status-badge.mixed {
+      background: var(--accent-amber-dim);
+      color: var(--accent-amber);
+      border: 1px solid rgba(255, 167, 38, 0.2);
+    }
+
+    .status-badge.no-data {
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--text-dim);
+      border: 1px solid var(--glass-border);
+    }
+
+    td:last-child { text-align: center; }
+
+    /* ─── Node detail rows ─── */
+    .node-details {
+      display: none;
+    }
+
+    .node-details.expanded {
+      display: table-row;
+    }
+
+    .node-details td {
+      padding: 0 16px 16px 52px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    }
+
+    .node-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+      gap: 6px;
+    }
+
+    .node-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.02);
+      font-size: 12px;
+      transition: background 0.15s;
+    }
+
+    .node-item:hover { background: rgba(255, 255, 255, 0.04); }
+
+    .node-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .node-dot.green { background: var(--accent-green); box-shadow: 0 0 6px rgba(0, 200, 83, 0.4); }
+    .node-dot.red { background: var(--accent-red); box-shadow: 0 0 6px rgba(255, 23, 68, 0.4); }
+    .node-dot.gray { background: var(--text-dim); }
+
+    .node-addr {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: color 0.15s;
+    }
+
+    .node-addr:hover { color: var(--accent-green); }
+
+    .node-meta {
+      margin-left: auto;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-dim);
+      white-space: nowrap;
+    }
+
+    .node-meta .speed { color: var(--text-secondary); }
+
+    /* ─── Empty state ─── */
+    .empty-state {
+      text-align: center;
+      padding: 80px 40px;
+      color: var(--text-dim);
+    }
+
+    .empty-state h2 {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+
+    .empty-state p {
+      font-size: 13px;
+      color: var(--text-dim);
+    }
+
+    /* ─── Loading ─── */
+    .loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 60px;
+      gap: 12px;
+      color: var(--text-dim);
+      font-size: 13px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+
+    .loading-bar {
+      width: 40px;
+      height: 3px;
+      background: rgba(255, 255, 255, 0.06);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    .loading-bar::after {
+      content: '';
+      display: block;
+      width: 60%;
+      height: 100%;
+      background: var(--accent-red);
+      border-radius: 2px;
+      animation: loading-slide 1.2s ease-in-out infinite;
+    }
+
+    @keyframes loading-slide {
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(200%); }
+    }
+
+    /* ─── Responsive ─── */
+    @media (max-width: 900px) {
+      .stats-bar { grid-template-columns: repeat(3, 1fr); margin: 16px 16px 0; }
+      .content { padding: 16px 16px 48px; }
+      header { padding: 16px; }
+      .node-list { grid-template-columns: 1fr; }
+    }
+
+    /* ─── Summary row ─── */
+    .summary-row td {
+      background: rgba(68, 138, 255, 0.06);
+      border-bottom: 2px solid rgba(68, 138, 255, 0.2) !important;
+      font-weight: 700;
+    }
+
+    .summary-row .country-name {
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      font-size: 12px;
+      color: var(--accent-blue);
+    }
+
+    /* ─── Data refresh flash ─── */
+    @keyframes data-flash {
+      0% { background: rgba(0, 200, 83, 0.08); }
+      100% { background: transparent; }
+    }
+
+    .data-flash .stat-card {
+      animation: data-flash 0.8s ease-out;
+    }
+
+    .data-flash .country-row td,
+    .data-flash .summary-row td {
+      animation: data-flash 0.8s ease-out;
+    }
+
+    /* ─── Avg latency column ─── */
+    .latency-stat {
+      font-family: var(--mono);
+      font-size: 13px;
+      text-align: right;
+      color: var(--text-secondary);
+    }
+
+    .latency-stat.fast { color: var(--accent-green); }
+    .latency-stat.medium { color: var(--accent-amber); }
+    .latency-stat.slow { color: var(--accent-red); }
+
+    /* ─── Copied tooltip ─── */
+    .copied-toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: var(--accent-green);
+      color: #000;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 600;
+      opacity: 0;
+      transform: translateY(8px);
+      transition: all 0.2s;
+      z-index: 1000;
+      pointer-events: none;
+    }
+
+    .copied-toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <div class="brand">
+      <div class="brand-icon">&#9678;</div>
+      <div>
+        <h1>Dictator Mode</h1>
+        <div class="brand-sub">Sentinel Network &middot; Google Accessibility Audit</div>
+      </div>
+      <span style="display:inline-flex;align-items:center;gap:6px;margin-left:12px;padding:4px 10px;border:1px solid rgba(255,255,255,0.08);border-radius:5px">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="opacity:0.5"><path d="M0 0h11.4v11.4H0zm12.6 0H24v11.4H12.6zM0 12.6h11.4V24H0zm12.6 12.6H24V12.6H12.6z" fill="#00adef"/></svg>
+        <span style="color:#666;font-size:11px;letter-spacing:1px">WINDOWS</span>
+      </span>
+      <span id="sdkBadge" style="display:inline-flex;align-items:center;gap:5px;margin-left:4px;padding:4px 10px;border-radius:5px;font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:1px;background:rgba(0,200,83,0.1);color:var(--accent-green);border:1px solid rgba(0,200,83,0.2)">
+        JS SDK
+      </span>
+    </div>
+    <div class="header-right">
+      <div class="refresh-indicator">
+        <div class="refresh-dot"></div>
+        <span id="refreshTimer">Live</span>
+      </div>
+      <button id="exportCsvBtn" onclick="exportCSV()" style="font-size:12px;color:var(--text-secondary);background:transparent;border:1px solid var(--glass-border);border-radius:6px;padding:6px 14px;cursor:pointer;font-weight:500;font-family:'Outfit',sans-serif;transition:all 0.2s" onmouseover="this.style.color='var(--text-primary)';this.style.borderColor='rgba(255,255,255,0.15)';this.style.background='rgba(255,255,255,0.03)'" onmouseout="this.style.color='var(--text-secondary)';this.style.borderColor='var(--glass-border)';this.style.background='transparent'">Export CSV</button>
+      <a href="/" class="back-link">&larr; Dashboard</a>
+    </div>
+  </header>
+
+  <div class="stats-bar">
+    <div class="stat-card">
+      <div class="stat-label">Countries</div>
+      <div class="stat-value blue" id="statCountries">—</div>
+      <div class="stat-detail" id="statCountriesDetail">loading</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Google Open</div>
+      <div class="stat-value green" id="statOpen">—</div>
+      <div class="stat-detail" id="statOpenDetail">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Google Blocked</div>
+      <div class="stat-value red" id="statBlocked">—</div>
+      <div class="stat-detail" id="statBlockedDetail">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Mixed / Unknown</div>
+      <div class="stat-value amber" id="statMixed">—</div>
+      <div class="stat-detail" id="statMixedDetail">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Total Nodes</div>
+      <div class="stat-value" id="statNodes">—</div>
+      <div class="stat-detail" id="statNodesDetail">—</div>
+    </div>
+  </div>
+
+  <div class="content">
+    <div class="section-header">
+      <div class="section-title">Countries by Google Accessibility</div>
+      <div class="section-count" id="sectionCount"></div>
+    </div>
+
+    <div id="tableContainer">
+      <div class="loading">
+        <div class="loading-bar"></div>
+        <span>Loading audit data</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="copied-toast" id="copiedToast">Copied</div>
+
+  <script>
+    // ─── State ─────────────────────────────────────────────────────────────────
+    let expandedCountry = null;
+    let lastData = null;
+    let refreshCountdown = 30;
+    let lastFetchTime = Date.now();
+    let sdkName = 'JS SDK';
+
+    // ─── Country code → flag emoji mapping ─────────────────────────────────────
+    const COUNTRY_CODES = {
+      'Afghanistan': 'AF', 'Albania': 'AL', 'Algeria': 'DZ', 'Argentina': 'AR',
+      'Armenia': 'AM', 'Australia': 'AU', 'Austria': 'AT', 'Azerbaijan': 'AZ',
+      'Bangladesh': 'BD', 'Belarus': 'BY', 'Belgium': 'BE', 'Bolivia': 'BO',
+      'Bosnia and Herzegovina': 'BA', 'Brazil': 'BR', 'Bulgaria': 'BG',
+      'Cambodia': 'KH', 'Canada': 'CA', 'Chile': 'CL', 'China': 'CN',
+      'Colombia': 'CO', 'Costa Rica': 'CR', 'Croatia': 'HR', 'Cuba': 'CU',
+      'Cyprus': 'CY', 'Czech Republic': 'CZ', 'Czechia': 'CZ',
+      'Denmark': 'DK', 'Dominican Republic': 'DO',
+      'Ecuador': 'EC', 'Egypt': 'EG', 'El Salvador': 'SV', 'Estonia': 'EE',
+      'Ethiopia': 'ET', 'Finland': 'FI', 'France': 'FR',
+      'Georgia': 'GE', 'Germany': 'DE', 'Ghana': 'GH', 'Greece': 'GR',
+      'Guatemala': 'GT', 'Honduras': 'HN', 'Hong Kong': 'HK', 'Hungary': 'HU',
+      'Iceland': 'IS', 'India': 'IN', 'Indonesia': 'ID', 'Iran': 'IR',
+      'Iraq': 'IQ', 'Ireland': 'IE', 'Israel': 'IL', 'Italy': 'IT',
+      'Jamaica': 'JM', 'Japan': 'JP', 'Jordan': 'JO', 'Kazakhstan': 'KZ',
+      'Kenya': 'KE', 'Kosovo': 'XK', 'Kuwait': 'KW', 'Kyrgyzstan': 'KG',
+      'Latvia': 'LV', 'Lebanon': 'LB', 'Libya': 'LY', 'Lithuania': 'LT',
+      'Luxembourg': 'LU', 'Malaysia': 'MY', 'Malta': 'MT', 'Mexico': 'MX',
+      'Moldova': 'MD', 'Mongolia': 'MN', 'Montenegro': 'ME', 'Morocco': 'MA',
+      'Myanmar': 'MM', 'Nepal': 'NP', 'Netherlands': 'NL', 'New Zealand': 'NZ',
+      'Nigeria': 'NG', 'North Korea': 'KP', 'North Macedonia': 'MK',
+      'Norway': 'NO', 'Oman': 'OM', 'Pakistan': 'PK', 'Panama': 'PA',
+      'Paraguay': 'PY', 'Peru': 'PE', 'Philippines': 'PH', 'Poland': 'PL',
+      'Portugal': 'PT', 'Qatar': 'QA', 'Romania': 'RO', 'Russia': 'RU',
+      'Saudi Arabia': 'SA', 'Serbia': 'RS', 'Singapore': 'SG', 'Slovakia': 'SK',
+      'Slovenia': 'SI', 'South Africa': 'ZA', 'South Korea': 'KR', 'Spain': 'ES',
+      'Sri Lanka': 'LK', 'Sudan': 'SD', 'Sweden': 'SE', 'Switzerland': 'CH',
+      'Syria': 'SY', 'Taiwan': 'TW', 'Tajikistan': 'TJ', 'Tanzania': 'TZ',
+      'Thailand': 'TH', 'Tunisia': 'TN', 'Turkey': 'TR', 'Turkmenistan': 'TM',
+      'Uganda': 'UG', 'Ukraine': 'UA', 'United Arab Emirates': 'AE',
+      'United Kingdom': 'GB', 'United States': 'US', 'Uruguay': 'UY',
+      'Uzbekistan': 'UZ', 'Venezuela': 'VE', 'Vietnam': 'VN', 'Yemen': 'YE',
+      'Zambia': 'ZM', 'Zimbabwe': 'ZW',
+      // Short forms
+      'UK': 'GB', 'USA': 'US', 'UAE': 'AE', 'S. Korea': 'KR',
+      'The Netherlands': 'NL', 'Türkiye': 'TR',
+    };
+
+    function countryToFlag(name) {
+      const code = COUNTRY_CODES[name];
+      if (!code) return '';
+      return String.fromCodePoint(...[...code].map(c => 0x1F1E6 + c.charCodeAt(0) - 65));
+    }
+
+    // ─── Helpers ────────────────────────────────────────────────────────────────
+    function copyToClipboard(text) {
+      navigator.clipboard.writeText(text);
+      const toast = document.getElementById('copiedToast');
+      toast.textContent = text.slice(0, 24) + '...';
+      toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 1500);
+    }
+
+    function classifyCountry(c) {
+      const tested = c.googleYes + c.googleNo;
+      if (tested === 0) return 'no-data';
+      const pct = c.googleYes / tested;
+      if (pct >= 0.7) return 'open';
+      if (pct <= 0.3) return 'blocked';
+      return 'mixed';
+    }
+
+    function statusLabel(cls) {
+      if (cls === 'open') return 'Open';
+      if (cls === 'blocked') return 'Blocked';
+      if (cls === 'mixed') return 'Mixed';
+      return 'No Data';
+    }
+
+    function latencyClass(ms) {
+      if (ms == null) return '';
+      if (ms < 500) return 'fast';
+      if (ms < 1500) return 'medium';
+      return 'slow';
+    }
+
+    // ─── Export CSV ───────────────────────────────────────────────────────────────
+    function exportCSV() {
+      if (!lastData || !lastData.countries || lastData.countries.length === 0) return;
+      const rows = [['Country', 'Total Nodes', 'Tested', 'Google Accessible', 'Google Blocked', 'Access Rate %', 'Avg Latency ms', 'Status']];
+      for (const c of lastData.countries) {
+        const tested = c.googleYes + c.googleNo;
+        const pct = tested > 0 ? Math.round((c.googleYes / tested) * 100) : 0;
+        const cls = classifyCountry(c);
+        rows.push([
+          `"${c.country}"`,
+          c.total,
+          c.tested,
+          c.googleYes,
+          c.googleNo,
+          tested > 0 ? pct : '',
+          c.avgGoogleLatencyMs != null ? c.avgGoogleLatencyMs : '',
+          statusLabel(cls),
+        ]);
+      }
+      const csv = rows.map(r => r.join(',')).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `dictator-mode-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    // ─── Render ─────────────────────────────────────────────────────────────────
+    function render(data) {
+      lastData = data;
+      const countries = data.countries || [];
+
+      // Stats
+      let totalNodes = 0, totalTested = 0, totalGoogleYes = 0, totalGoogleNo = 0;
+      let openCountries = 0, blockedCountries = 0, mixedCountries = 0, noDataCountries = 0;
+
+      for (const c of countries) {
+        totalNodes += c.total;
+        totalTested += c.tested;
+        totalGoogleYes += c.googleYes;
+        totalGoogleNo += c.googleNo;
+        const cls = classifyCountry(c);
+        if (cls === 'open') openCountries++;
+        else if (cls === 'blocked') blockedCountries++;
+        else if (cls === 'mixed') mixedCountries++;
+        else noDataCountries++;
+      }
+
+      document.getElementById('statCountries').textContent = countries.length.toLocaleString();
+      document.getElementById('statCountriesDetail').textContent = `${totalTested.toLocaleString()} nodes tested`;
+      document.getElementById('statOpen').textContent = openCountries.toLocaleString();
+      document.getElementById('statOpenDetail').textContent = `${totalGoogleYes.toLocaleString()} nodes can reach Google`;
+      document.getElementById('statBlocked').textContent = blockedCountries.toLocaleString();
+      document.getElementById('statBlockedDetail').textContent = `${totalGoogleNo.toLocaleString()} nodes blocked`;
+      document.getElementById('statMixed').textContent = (mixedCountries + noDataCountries).toLocaleString();
+      document.getElementById('statMixedDetail').textContent = `${noDataCountries} untested`;
+      document.getElementById('statNodes').textContent = totalNodes.toLocaleString();
+      document.getElementById('statNodesDetail').textContent = `${totalGoogleYes + totalGoogleNo} Google-checked`;
+      document.getElementById('sectionCount').textContent = `${countries.length} countries`;
+
+      // Table
+      if (countries.length === 0) {
+        document.getElementById('tableContainer').innerHTML = `
+          <div class="empty-state">
+            <h2>No audit data yet</h2>
+            <p>Run a network audit from the main dashboard to populate Dictator Mode.</p>
+          </div>`;
+        return;
+      }
+
+      // ─── Compute global averages for summary row ──────────────────────────
+      let globalLatencySum = 0, globalLatencyCount = 0;
+      for (const c of countries) {
+        if (c.avgGoogleLatencyMs != null) {
+          globalLatencySum += c.avgGoogleLatencyMs * (c.googleYes || 1);
+          globalLatencyCount += c.googleYes || 1;
+        }
+      }
+      const globalAvgLatency = globalLatencyCount > 0 ? Math.round(globalLatencySum / globalLatencyCount) : null;
+      const globalTested = totalGoogleYes + totalGoogleNo;
+      const globalPct = globalTested > 0 ? Math.round((totalGoogleYes / globalTested) * 100) : 0;
+      const globalPctBlocked = globalTested > 0 ? Math.round((totalGoogleNo / globalTested) * 100) : 0;
+
+      let html = `<table class="country-table">
+        <thead>
+          <tr>
+            <th>Country</th>
+            <th>Nodes</th>
+            <th>Accessible</th>
+            <th>Blocked</th>
+            <th>Avg Latency</th>
+            <th>Rate</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>`;
+
+      // ─── ALL COUNTRIES summary row ──────────────────────────────────────────
+      html += `
+        <tr class="summary-row">
+          <td><div class="country-name">&#9679; ALL COUNTRIES</div></td>
+          <td class="node-count">${totalNodes.toLocaleString()}</td>
+          <td class="google-stat accessible">${totalGoogleYes > 0 ? totalGoogleYes.toLocaleString() : '—'}</td>
+          <td class="google-stat blocked">${totalGoogleNo > 0 ? totalGoogleNo.toLocaleString() : '—'}</td>
+          <td class="latency-stat ${latencyClass(globalAvgLatency)}">${globalAvgLatency != null ? globalAvgLatency + 'ms' : '—'}</td>
+          <td>
+            <div style="display: flex; align-items: center; gap: 8px; justify-content: flex-end;">
+              <span class="google-stat accessible" style="font-size: 12px;">${globalTested > 0 ? globalPct + '%' : '—'}</span>
+              <div class="pct-bar">
+                <div class="pct-fill-green" style="width: ${globalPct}%"></div>
+                <div class="pct-fill-red" style="width: ${globalPctBlocked}%"></div>
+              </div>
+            </div>
+          </td>
+          <td></td>
+        </tr>`;
+
+      for (const c of countries) {
+        const cls = classifyCountry(c);
+        const tested = c.googleYes + c.googleNo;
+        const pct = tested > 0 ? Math.round((c.googleYes / tested) * 100) : 0;
+        const pctBlocked = tested > 0 ? Math.round((c.googleNo / tested) * 100) : 0;
+        const flag = countryToFlag(c.country);
+        const isExpanded = expandedCountry === c.country;
+        const avgLat = c.avgGoogleLatencyMs;
+
+        html += `
+          <tr class="country-row" onclick="toggleCountry('${c.country.replace(/'/g, "\\'")}')">
+            <td><div class="country-name"><span class="country-flag">${flag}</span> ${c.country}</div></td>
+            <td class="node-count">${c.total.toLocaleString()}</td>
+            <td class="google-stat accessible">${c.googleYes > 0 ? c.googleYes : '—'}</td>
+            <td class="google-stat blocked">${c.googleNo > 0 ? c.googleNo : '—'}</td>
+            <td class="latency-stat ${latencyClass(avgLat)}">${avgLat != null ? avgLat + 'ms' : '—'}</td>
+            <td>
+              <div style="display: flex; align-items: center; gap: 8px; justify-content: flex-end;">
+                <span class="google-stat ${cls === 'no-data' ? 'unknown' : cls === 'open' ? 'accessible' : cls === 'blocked' ? 'blocked' : ''}" style="font-size: 12px;">${tested > 0 ? pct + '%' : '—'}</span>
+                <div class="pct-bar">
+                  <div class="pct-fill-green" style="width: ${pct}%"></div>
+                  <div class="pct-fill-red" style="width: ${pctBlocked}%"></div>
+                </div>
+              </div>
+            </td>
+            <td><span class="status-badge ${cls}">${statusLabel(cls)}</span></td>
+          </tr>`;
+
+        html += `<tr class="node-details ${isExpanded ? 'expanded' : ''}" id="detail-${c.country.replace(/[^a-zA-Z0-9]/g, '_')}">
+          <td colspan="7">
+            <div class="node-list">`;
+
+        const sortedNodes = [...c.nodes].sort((a, b) => {
+          if (a.googleAccessible === true && b.googleAccessible !== true) return -1;
+          if (b.googleAccessible === true && a.googleAccessible !== true) return 1;
+          if (a.googleAccessible === false && b.googleAccessible !== false) return -1;
+          if (b.googleAccessible === false && a.googleAccessible !== false) return 1;
+          return 0;
+        });
+
+        for (const n of sortedNodes) {
+          const dotCls = n.googleAccessible === true ? 'green' : n.googleAccessible === false ? 'red' : 'gray';
+          const shortAddr = n.address ? n.address.slice(0, 14) + '...' + n.address.slice(-5) : '—';
+          const label = n.moniker || shortAddr;
+          const speedStr = n.actualMbps != null ? `${n.actualMbps} Mbps` : (n.error ? 'failed' : '—');
+          const latencyStr = n.googleLatencyMs != null ? `${n.googleLatencyMs}ms` : '';
+
+          html += `
+            <div class="node-item">
+              <div class="node-dot ${dotCls}"></div>
+              <span style="font-size: 12px; font-weight: 500; min-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${label}</span>
+              <span class="node-addr" onclick="event.stopPropagation(); copyToClipboard('${n.address}')" title="${n.address}">${shortAddr}</span>
+              <div class="node-meta">
+                ${latencyStr ? `<span style="color: ${dotCls === 'green' ? 'var(--accent-green)' : 'var(--accent-red)'}">${latencyStr}</span> &middot; ` : ''}
+                <span class="speed">${speedStr}</span>
+                &middot; ${n.type || '—'}
+              </div>
+            </div>`;
+        }
+
+        html += `</div></td></tr>`;
+      }
+
+      html += '</tbody></table>';
+      document.getElementById('tableContainer').innerHTML = html;
+    }
+
+    function toggleCountry(country) {
+      expandedCountry = expandedCountry === country ? null : country;
+      if (lastData) render(lastData);
+    }
+
+    // ─── SDK badge ─────────────────────────────────────────────────────────────
+    function updateSdkBadge(sdk) {
+      const badge = document.getElementById('sdkBadge');
+      if (sdk === 'csharp') {
+        badge.textContent = 'C# SDK';
+        badge.style.background = 'rgba(68, 138, 255, 0.1)';
+        badge.style.color = 'var(--accent-blue)';
+        badge.style.borderColor = 'rgba(68, 138, 255, 0.2)';
+      } else {
+        badge.textContent = 'JS SDK';
+        badge.style.background = 'rgba(0, 200, 83, 0.1)';
+        badge.style.color = 'var(--accent-green)';
+        badge.style.borderColor = 'rgba(0, 200, 83, 0.2)';
+      }
+    }
+
+    // ─── Data fetch ─────────────────────────────────────────────────────────────
+    async function fetchData() {
+      try {
+        const res = await fetch('/api/dictator');
+        const data = await res.json();
+        // Update SDK indicator
+        if (data.sdk) updateSdkBadge(data.sdk);
+        render(data);
+        lastFetchTime = Date.now();
+        // Flash highlight on data refresh
+        const statsBar = document.querySelector('.stats-bar');
+        const tableContainer = document.getElementById('tableContainer');
+        statsBar.classList.add('data-flash');
+        tableContainer.classList.add('data-flash');
+        setTimeout(() => {
+          statsBar.classList.remove('data-flash');
+          tableContainer.classList.remove('data-flash');
+        }, 900);
+      } catch (err) {
+        console.error('Fetch error:', err);
+      }
+    }
+
+    // ─── Refresh timer (shows "Updated Xs ago") ─────────────────────────────────
+    setInterval(() => {
+      refreshCountdown--;
+      if (refreshCountdown <= 0) {
+        refreshCountdown = 30;
+        fetchData();
+      }
+      const elapsed = Math.round((Date.now() - lastFetchTime) / 1000);
+      document.getElementById('refreshTimer').textContent =
+        elapsed < 2 ? 'Live' : `Updated ${elapsed}s ago`;
+    }, 1000);
+
+    // ─── Init ───────────────────────────────────────────────────────────────────
+    fetchData();
+  </script>
+</body>
+
+</html>

@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>SentinelBridge</RootNamespace>
+    <AssemblyName>SentinelBridge</AssemblyName>
+
+    <!-- Single-file deployment -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishTrimmed>false</PublishTrimmed>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Sentinel SDK\csharp-sdk\src\Sentinel.SDK.Core\Sentinel.SDK.Core.csproj" />
+    <ProjectReference Include="..\..\Sentinel SDK\csharp-sdk\src\Sentinel.SDK.Node\Sentinel.SDK.Node.csproj" />
+    <ProjectReference Include="..\..\Sentinel SDK\csharp-sdk\src\Sentinel.SDK.Tunnel\Sentinel.SDK.Tunnel.csproj" />
+  </ItemGroup>
+</Project>

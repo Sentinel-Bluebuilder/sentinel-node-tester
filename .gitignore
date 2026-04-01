@@ -1,0 +1,35 @@
+# Environment & secrets
+.env
+*.env.local
+
+# Dependencies
+node_modules/
+
+# Binaries (V2Ray, WireGuard — downloaded at setup)
+bin/
+
+# Runtime data (contains wallet addresses, WG private keys, session credentials)
+results/
+*.log
+
+# Internal dev files (session handoff, internal suggestions)
+HANDOFF.md
+suggestions/
+
+# C# bridge build artifacts
+csharp-bridge/bin/
+csharp-bridge/obj/
+
+# Windows launcher binary
+SentinelAudit.exe
+
+# Backup files
+*.bak
+*.backup
+
+# Editor & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
