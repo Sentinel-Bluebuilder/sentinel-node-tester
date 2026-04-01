@@ -81,6 +81,9 @@ export async function checkAndPauseIfInterference(broadcast, state) {
 export function classifyFailure(err) {
   const msg = err.message || '';
 
+  // Insufficient balance — not a node failure, pipeline handles pause
+  if (err._pauseAudit || /INSUFFICIENT_BALANCE|insufficient funds/i.test(msg)) return 'fatal';
+
   // VPN interference — another VPN is active
   if (err.code === 'VPN_INTERFERENCE') return 'vpn_interference';
 

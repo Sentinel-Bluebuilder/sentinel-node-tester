@@ -419,9 +419,46 @@ export async function runAudit(resume, state, broadcast) {
       broadcast('log', { msg: `\n💳 Batch ${b + 1}/${batches.length} (${batch.length} nodes) — paying...` });
       batchSessionMap = await submitBatchPayment(client, account, DENOM, GIGS, batch, state, broadcast);
     } catch (payErr) {
-      broadcast('log', { msg: `  Batch payment FAILED: ${payErr.message}` });
-      broadcast('log', { msg: `  Falling back to individual payments per node...` });
-      batchSessionMap = new Map();
+      // Insufficient funds from chain — pause instead of failing
+      if (/insufficient funds|insufficient balance/i.test(payErr.message)) {
+        broadcast('log', { msg: `💰 Batch payment failed: insufficient P2P. Pausing...` });
+        state.status = 'paused_balance';
+        state.pauseReason = `Insufficient P2P for batch payment`;
+        broadcast('state', { state });
+        let restored = false;
+        while (!state.stopRequested) {
+          await sleep(5 * 60_000);
+          if (state.stopRequested) break;
+          try {
+            const freshBal = await client.getBalance(account.address, DENOM);
+            const realBal = parseInt(freshBal?.amount || '0', 10);
+            state.balanceUdvpn = realBal;
+            state.spentUdvpn = 0;
+            state.balance = `${(realBal / 1_000_000).toFixed(4)} DVPN`;
+            broadcast('log', { msg: `💰 Balance check: ${state.balance}` });
+            if (realBal > 1_000_000) {
+              broadcast('log', { msg: `💰 Balance restored! Retrying batch...` });
+              state.status = 'running';
+              state.pauseReason = null;
+              broadcast('state', { state });
+              restored = true;
+              break;
+            }
+          } catch { }
+        }
+        if (!restored) break;
+        // Retry the batch payment
+        try {
+          batchSessionMap = await submitBatchPayment(client, account, DENOM, GIGS, batch, state, broadcast);
+        } catch (retryErr) {
+          broadcast('log', { msg: `  Batch retry also failed: ${retryErr.message}` });
+          batchSessionMap = new Map();
+        }
+      } else {
+        broadcast('log', { msg: `  Batch payment FAILED: ${payErr.message}` });
+        broadcast('log', { msg: `  Falling back to individual payments per node...` });
+        batchSessionMap = new Map();
+      }
     }
 
     const reusedAddrs = batchSessionMap._reusedAddrs || new Set();
@@ -469,8 +506,47 @@ export async function runAudit(resume, state, broadcast) {
         const retryLabel = retried > 0 ? ` (${retried} retries)` : '';
         broadcast('log', { msg: `✓ [${nodeNum}/${viableNodes.length}] ${result.actualMbps != null ? result.actualMbps + ' Mbps' : 'N/A'} | baseline ${state.baselineMbps != null ? state.baselineMbps + ' Mbps' : '--'}${retryLabel}` });
       } else {
-        // FAIL result — zero-skip: explicit failure
         const errMsg = error?.message || 'Unknown error';
+
+        // ─── Insufficient balance — PAUSE, don't fail ──────────────────
+        // Balance issues are wallet problems, not node problems. Pause the
+        // audit and poll for balance top-up. The node stays untested (not failed).
+        if (error?._pauseAudit || /INSUFFICIENT_BALANCE|insufficient funds/i.test(errMsg)) {
+          broadcast('log', { msg: `💰 Insufficient P2P balance — pausing audit. Top up wallet and balance will be checked every 5 minutes.` });
+          state.status = 'paused_balance';
+          state.pauseReason = `Insufficient P2P balance (${(Math.max(0, state.balanceUdvpn - state.spentUdvpn) / 1_000_000).toFixed(2)} DVPN remaining)`;
+          broadcast('state', { state });
+
+          // Poll for balance top-up every 5 minutes
+          let balanceRestored = false;
+          while (!state.stopRequested) {
+            await sleep(5 * 60_000);
+            if (state.stopRequested) break;
+            try {
+              const freshBal = await client.getBalance(account.address, DENOM);
+              const realBalance = parseInt(freshBal?.amount || '0', 10);
+              state.balanceUdvpn = realBalance;
+              state.spentUdvpn = 0;
+              state.balance = `${(realBalance / 1_000_000).toFixed(4)} DVPN`;
+              broadcast('log', { msg: `💰 Balance check: ${state.balance}` });
+              if (realBalance > 1_000_000) { // > 1 DVPN
+                broadcast('log', { msg: `💰 Balance restored! Resuming audit...` });
+                state.status = 'running';
+                state.pauseReason = null;
+                broadcast('state', { state });
+                balanceRestored = true;
+                break;
+              }
+            } catch (balErr) {
+              broadcast('log', { msg: `💰 Balance check failed: ${balErr.message} — retrying in 5 min` });
+            }
+          }
+          if (!balanceRestored) break; // stopRequested
+          // Don't record a fail — this node will be retested on resume
+          continue;
+        }
+
+        // FAIL result — zero-skip: explicit failure
         const failResult = buildFailResult(node, status, state, errMsg, error?.diag || {});
         state.failedNodes++;
         upsertResult(failResult);
