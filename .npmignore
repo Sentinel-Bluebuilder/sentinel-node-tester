@@ -1,0 +1,22 @@
+# Secrets & runtime
+.env
+.env.example
+results/
+*.log
+HANDOFF.md
+suggestions/
+
+# Build artifacts
+csharp-bridge/obj/
+csharp-bridge/bin/
+
+# Dev files
+scripts/
+test/
+.claude/
+.git/
+.gitignore
+
+# OS
+.DS_Store
+Thumbs.db
