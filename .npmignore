@@ -1,6 +1,5 @@
 # Secrets & runtime
 .env
-.env.example
 results/
 *.log
 HANDOFF.md
@@ -10,13 +9,29 @@ suggestions/
 csharp-bridge/obj/
 csharp-bridge/bin/
 
-# Dev files
+# Dev files (40+ analysis scripts, tests, internal tooling)
 scripts/
 test/
 .claude/
 .git/
 .gitignore
 
+# Windows launchers (users run node server.js or npx)
+SentinelAudit.vbs
+SentinelAuditLauncher.cs
+SentinelAudit.exe
+Setup (Run Once As Admin).bat
+start.bat
+
+# V2Ray binaries (downloaded at runtime)
+bin/v2ray*.exe
+bin/v2ray*.bak*
+bin/geoip.dat
+bin/geosite.dat
+bin/geoip-only-cn-private.dat
+bin/config.json
+
 # OS
 .DS_Store
 Thumbs.db
+Desktop.ini

@@ -606,7 +606,7 @@ Injected into:
 
 ## Process Safety
 
-- **NEVER** `taskkill /F /IM node.exe` — kills Claude Code
+- **NEVER** `taskkill /F /IM node.exe` — kills ALL Node.js processes
 - **NEVER** `taskkill /F /IM v2ray.exe` during audit — kills active test
 - Kill by PID only: `taskkill //F //PID <exact_pid>`
 - V2Ray watchdog: 45s max tunnel lifetime for WireGuard
