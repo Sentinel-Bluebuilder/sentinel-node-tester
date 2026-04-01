@@ -6,15 +6,14 @@
 
 import {
   fetchActiveNodes as sdkFetchActiveNodes,
-  invalidateNodeCache as sdkInvalidateNodeCache,
   lcdQuery,
   lcdPaginatedSafe,
   queryNode,
   discoverPlans as sdkDiscoverPlans,
   querySubscriptions as sdkQuerySubscriptions,
   hasActiveSubscription as sdkHasActiveSub,
-} from 'sentinel-dvpn-sdk/cosmjs-setup';
-import { LCD_ENDPOINTS as SDK_LCD_ENDPOINTS, tryWithFallback } from 'sentinel-dvpn-sdk/defaults';
+  LCD_ENDPOINTS as SDK_LCD_ENDPOINTS,
+} from 'sentinel-dvpn-sdk';
 import { LCD_ENDPOINTS as LOCAL_LCD_ENDPOINTS } from './constants.js';
 
 // ─── LCD Endpoint Management ────────────────────────────────────────────────
