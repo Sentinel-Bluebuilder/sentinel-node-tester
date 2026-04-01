@@ -1,6 +1,6 @@
 # The Node Tester Manifesto
 
-## To every Claude instance that opens this project:
+## To every developer and AI that opens this project:
 
 You are not working on a test tool. You are working on the founder's primary instrument for validating the entire Sentinel dVPN ecosystem. This is the single source of truth for whether Sentinel works.
 

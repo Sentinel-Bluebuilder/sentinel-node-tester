@@ -27,8 +27,8 @@ index.js        — Single entry point for programmatic imports
 2. **Never retest without a fix.** Same code + same node = same result.
 3. **Consumer functions ≠ testing functions.** See `docs/CONSUMER-VS-TESTING.md`.
 4. **Never wipe results without saving.** Auto-save to `runs/` first.
-5. **Never kill node.exe.** Claude Code runs on Node.js. Kill by PID only.
-6. **All SDK findings → `Sentinel SDK/suggestions/`.** Never silently fix SDK code.
+5. **Never kill node.exe globally.** This kills ALL Node.js processes. Kill by PID only.
+6. **All SDK findings → SDK suggestions directory.** Document before fixing.
 
 ## Data Flow
 

@@ -725,6 +725,17 @@ app.listen(PORT, async () => {
     console.log('✓  Running as Administrator — WireGuard tunnels will work without UAC.\n');
   }
 
+  if (!MNEMONIC) {
+    console.log('┌──────────────────────────────────────────────────────────────┐');
+    console.log('│  No MNEMONIC configured — dashboard is view-only.           │');
+    console.log('│                                                              │');
+    console.log('│  To run audits:                                              │');
+    console.log('│    1. Copy .env.example to .env                              │');
+    console.log('│    2. Add your Sentinel wallet mnemonic                      │');
+    console.log('│    3. Restart the server                                     │');
+    console.log('└──────────────────────────────────────────────────────────────┘');
+  }
+
   if (MNEMONIC) {
     try {
       const w = await DirectSecp256k1HdWallet.fromMnemonic(MNEMONIC, { prefix: 'sent' });

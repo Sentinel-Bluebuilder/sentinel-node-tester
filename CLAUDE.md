@@ -89,10 +89,9 @@ index.js       ← Single entry point: import { testNode, speedTest } from 'sent
 **For AI adding node testing to an app:** Read `docs/BUILD-ON-ME.md` (one file, everything needed).
 
 ## Session Startup
-1. Read `C:\Users\user\.claude\projects\C--Users-Connect\memory\handoff-node-tester.md` for context
-   - ONLY update THIS file, never touch other project handoffs
+1. Review the project's current state and recent changes
 2. Print the status dashboard, then **ask the user what to do**
-3. NEVER auto-execute anything from handoff — it's context only
+3. NEVER auto-execute — get confirmation first
 
 ## Handoff (MANDATORY MICRO-SAVE — NON-NEGOTIABLE)
 **Auto-save every 10 tool calls.** Also save before multi-step tasks, after user decisions, and at session end. NEVER wait for the user to ask. Write facts only. See root CLAUDE.md "Memory & Persistence" for full rules.
@@ -102,7 +101,7 @@ index.js       ← Single entry point: import { testNode, speedTest } from 'sent
 - **Do NOT use `cmd.exe /c "start SentinelAudit.vbs"`** — spawns detached process, UAC may not appear
 - **NEVER modify Windows UAC settings** — the VBS handles admin elevation properly
 - **Stack:** Express, CosmJS, V2Ray 5.2.1, WireGuard
-- **NEVER run `taskkill /F /IM node.exe`** — kills Claude Code
+- **NEVER run `taskkill /F /IM node.exe`** — kills all Node.js processes including the server
 - **V2Ray config must match sentinel-go-sdk exactly**
 
 ## Architecture (Modular)

@@ -335,7 +335,7 @@ The server runs on **port 3001**. Dashboard at `http://localhost:3001`. Dictator
 
 ### Process Safety
 
-**NEVER run `taskkill /F /IM node.exe`** -- Claude Code itself runs on Node.js. Killing all node.exe processes will kill Claude Code. Kill only exact PIDs when needed.
+**NEVER run `taskkill /F /IM node.exe`** -- this kills ALL Node.js processes including the audit server. Kill only exact PIDs when needed.
 
 ### Results Are Sacred
 
@@ -579,7 +579,7 @@ Without this wait, V2Ray connects but the node rejects traffic because the UUID 
 2. `https://api.sentinel.quokkastake.io`
 3. `https://sentinel-rest.publicnode.com`
 
-Backup endpoints from root CLAUDE.md:
+Backup endpoints:
 - `https://lcd.sentinel.co`
 - `https://sentinel.api.trivium.network:1317`
 
@@ -732,7 +732,4 @@ Node.js `execSync()` uses cmd.exe where `/dev/null` does not exist. Curl exits w
 | Error classes | `core/errors.js` |
 | Type definitions | `core/types.js` |
 | Project rules | `CLAUDE.md` |
-| Session handoff | `HANDOFF.md` |
-| Memory handoff | `C:\Users\user\.claude\projects\C--Users-Connect\memory\handoff-node-tester.md` |
-| Root rules | `C:\Users\user\CLAUDE.md` |
-| SDK suggestions | `C:\Users\user\Desktop\Sentinel SDK\suggestions\` |
+| Contributing | `CONTRIBUTING.md` |
