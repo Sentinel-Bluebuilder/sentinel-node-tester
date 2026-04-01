@@ -55,7 +55,7 @@ DECISIONS.md           ← Decision log — every major choice with rationale
 ```
 START-HERE.md          ← 4 questions → routes to right doc
 MANIFESTO.md           ← Mission, principles, hard-won knowledge
-CLAUDE.md              ← THIS FILE: rules for AI
+CLAUDE.md              ← THIS FILE: project rules and conventions
 ```
 
 ### Build Guides
@@ -93,8 +93,8 @@ index.js       ← Single entry point: import { testNode, speedTest } from 'sent
 2. Print the status dashboard, then **ask the user what to do**
 3. NEVER auto-execute — get confirmation first
 
-## Handoff (MANDATORY MICRO-SAVE — NON-NEGOTIABLE)
-**Auto-save every 10 tool calls.** Also save before multi-step tasks, after user decisions, and at session end. NEVER wait for the user to ask. Write facts only. See root CLAUDE.md "Memory & Persistence" for full rules.
+## Development Notes
+Save progress frequently. Document decisions before implementing. Write findings before fixing.
 
 ## Quick Ref
 - **Port:** 3001, **Launch command:** `cscript //nologo SentinelAudit.vbs` from project dir — NEVER use `start.bat` or `node server.js` directly
