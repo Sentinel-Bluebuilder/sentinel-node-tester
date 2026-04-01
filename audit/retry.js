@@ -66,6 +66,11 @@ export async function testWithRetry(testFn, broadcast, state, nodeAddr) {
       lastErr = err;
       const failType = classifyFailure(err);
 
+      // Insufficient balance — pass through to pipeline for pause handling
+      if (err._pauseAudit) {
+        break;
+      }
+
       // Fatal errors — no retry
       if (failType === 'fatal' || failType === 'node_error') {
         break;

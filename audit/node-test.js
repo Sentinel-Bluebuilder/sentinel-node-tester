@@ -165,11 +165,13 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
     throw new Error('Economy mode — no batch session available');
   }
 
-  // Balance check
-  const remainingBalance = state.balanceUdvpn - state.spentUdvpn;
+  // Balance check — return PAUSE signal instead of failing
+  const remainingBalance = Math.max(0, state.balanceUdvpn - state.spentUdvpn);
   const isInPlan = (node.planIds || []).length > 0;
   if (!sessionId && !isInPlan && remainingBalance < thisCostUdvpn + 10_000) {
-    throw new Error('Insufficient balance for this node');
+    const err = new Error('INSUFFICIENT_BALANCE');
+    err._pauseAudit = true; // Signal to pipeline: pause, don't fail
+    throw err;
   }
   if (remainingBalance < 500_000 && !state.lowBalanceWarning) {
     state.lowBalanceWarning = true;
