@@ -1,9 +1,30 @@
 {
   "name": "sentinel-node-tester",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Network audit dashboard for Sentinel dVPN — test every node on the blockchain for real VPN throughput, speed, and protocol compliance",
   "type": "module",
   "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./audit/pipeline": "./audit/pipeline.js",
+    "./audit/node-test": "./audit/node-test.js",
+    "./audit/retry": "./audit/retry.js",
+    "./core/errors": "./core/errors.js",
+    "./core/constants": "./core/constants.js",
+    "./core/wallet": "./core/wallet.js",
+    "./core/chain": "./core/chain.js",
+    "./core/session": "./core/session.js",
+    "./core/transport-cache": "./core/transport-cache.js",
+    "./core/countries": "./core/countries.js",
+    "./core/types": "./core/types.js",
+    "./protocol/v3protocol": "./protocol/v3protocol.js",
+    "./protocol/speedtest": "./protocol/speedtest.js",
+    "./protocol/diagnostics": "./protocol/diagnostics.js",
+    "./platforms/windows/wireguard": "./platforms/windows/wireguard.js",
+    "./platforms/windows/v2ray": "./platforms/windows/v2ray.js",
+    "./platforms/windows/network": "./platforms/windows/network.js",
+    "./server": "./server.js"
+  },
   "bin": {
     "sentinel-audit": "./bin/cli.js"
   },
@@ -31,7 +52,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/sentinel-official/sentinel-node-tester"
+    "url": "https://github.com/Sentinel-Autonomybuilder/sentinel-node-tester"
   },
   "homepage": "https://sentinel.co",
   "engines": {

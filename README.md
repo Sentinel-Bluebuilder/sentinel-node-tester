@@ -1,8 +1,13 @@
 # Sentinel Node Tester
 
+[![npm version](https://img.shields.io/npm/v/sentinel-node-tester.svg)](https://www.npmjs.com/package/sentinel-node-tester)
+[![Tests](https://github.com/Sentinel-Autonomybuilder/sentinel-node-tester/actions/workflows/test.yml/badge.svg)](https://github.com/Sentinel-Autonomybuilder/sentinel-node-tester/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org/)
+
 Network audit dashboard for the [Sentinel dVPN](https://sentinel.co) blockchain. Tests every active node for real VPN throughput, protocol compliance, speed, and accessibility.
 
-Built on the [Sentinel dVPN SDK](https://github.com/nicxd531/sentinel-dvpn-sdk) — the same protocol stack that powers consumer VPN applications.
+Built on the [Sentinel dVPN SDK](https://www.npmjs.com/package/sentinel-dvpn-sdk) — the same protocol stack that powers consumer VPN applications.
 
 ---
 
