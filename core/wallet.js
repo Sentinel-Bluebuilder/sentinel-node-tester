@@ -14,8 +14,8 @@ import {
   createClient as sdkCreateClient,
   buildRegistry,
   broadcast as sdkBroadcast,
-} from 'sentinel-dvpn-sdk/cosmjs-setup';
-import { RPC_ENDPOINTS as SDK_RPC_ENDPOINTS } from 'sentinel-dvpn-sdk/defaults';
+  RPC_ENDPOINTS as SDK_RPC_ENDPOINTS,
+} from 'sentinel-dvpn-sdk';
 import { RPC_ENDPOINTS as LOCAL_RPC_ENDPOINTS, GAS_PRICE as GAS_PRICE_STR } from './constants.js';
 
 // Use SDK RPC endpoints (5 endpoints), fall back to local constants

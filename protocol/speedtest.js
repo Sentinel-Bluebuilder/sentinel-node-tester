@@ -13,17 +13,20 @@ import https from 'https';
 import dns from 'dns';
 import axios from 'axios';
 import { SocksProxyAgent } from 'socks-proxy-agent';
-import { sleep as sdkSleep } from 'sentinel-dvpn-sdk/defaults';
-
-// Re-export SDK speedtest functions
-export {
+import {
+  sleep as sdkSleep,
   speedtestDirect,
   speedtestViaSocks5,
   resolveSpeedtestIPs,
-  resolveCfHost,
-} from 'sentinel-dvpn-sdk/speedtest';
+} from 'sentinel-dvpn-sdk';
 
-// Re-export sleep from SDK defaults
+// Re-export SDK functions
+export { speedtestDirect, speedtestViaSocks5, resolveSpeedtestIPs };
+
+// resolveCfHost not exported from npm SDK yet — provide local stub
+export function resolveCfHost() { return resolveSpeedtestIPs().then(ips => ips?.[0] || null).catch(() => null); }
+
+// Re-export sleep
 export const sleep = sdkSleep;
 
 // ─── Google Accessibility Check (Node Tester-specific) ──────────────────────

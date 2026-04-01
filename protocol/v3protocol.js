@@ -24,12 +24,8 @@ export {
   extractSessionId,
   waitForPort,
   generateV2RayUUID,
-  encodeVarint,
-  protoString,
-  protoInt64,
-  protoEmbedded,
   encodeMsgStartSession,
   encodeMsgStartSubscription,
   encodeMsgSubStartSession,
   validateCIDR,
-} from 'sentinel-dvpn-sdk/v3protocol';
+} from 'sentinel-dvpn-sdk';

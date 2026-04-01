@@ -12,7 +12,7 @@ import { DENOM, GIGS, CREDS_FILE, SESSION_MAP_TTL, V3_MSG_TYPE } from './constan
 import { signAndBroadcastRetry, assertIsDeliverTxSuccess } from './wallet.js';
 import { getActiveLcd } from './chain.js';
 import { sleep } from '../protocol/speedtest.js';
-import { extractAllSessionIds as sdkExtractAllSessionIds } from 'sentinel-dvpn-sdk/cosmjs-setup';
+import { extractAllSessionIds as sdkExtractAllSessionIds } from 'sentinel-dvpn-sdk';
 
 // ─── Session Credential Cache (disk-persistent) ─────────────────────────────
 let credentialCache = {};
