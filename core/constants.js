@@ -66,6 +66,7 @@ export const RESULTS_DIR = path.join(PROJECT_ROOT, 'results');
 export const RESULTS_FILE = path.join(RESULTS_DIR, 'results.json');
 export const CREDS_FILE = path.join(RESULTS_DIR, 'session-credentials.json');
 export const FAILURE_LOG = path.join(RESULTS_DIR, 'failures.jsonl');
+export const TRANSACTIONS_LOG = path.join(RESULTS_DIR, 'transactions.jsonl');
 
 // ─── Platform ────────────────────────────────────────────────────────────────
 export const PLATFORM = process.platform; // 'win32', 'darwin', 'linux'

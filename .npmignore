@@ -12,7 +12,7 @@ csharp-bridge/bin/
 # Dev files (40+ analysis scripts, tests, internal tooling)
 scripts/
 test/
-.claude/
+./
 .git/
 .gitignore
 
