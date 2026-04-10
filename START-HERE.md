@@ -6,7 +6,7 @@
 
 **A) "I want to run the node tester standalone"**
 → You're deploying Type 1. The CLI/Browser tester runs as a Node.js server with a web dashboard. Tests protocol mechanics, finds edge cases, validates SDKs.
-→ **Read:** `SETUP.md` → `CONTEXT.md` → `AI-ONBOARDING.md`
+→ **Read:** `SETUP.md` → `CONTEXT.md`
 → **Launch:** `cscript //nologo SentinelAudit.vbs` (Windows, Admin required)
 → **Dashboard:** http://localhost:3001
 
@@ -55,9 +55,8 @@ sentinel-node-tester/
 │
 ├── START-HERE.md              ← YOU ARE HERE
 ├── MANIFESTO.md               ← Why this exists, principles, what we've proven
-├── CLAUDE.md                  ← Project rules and conventions
 ├── SETUP.md                   ← Installation + first run
-├── AI-ONBOARDING.md           ← Complete AI onboarding (architecture, API, bugs)
+├── CONTEXT.md                 ← Architecture, conventions, known issues
 ├── HANDOFF.md                 ← Current session state + recent changes
 │
 ├── docs/

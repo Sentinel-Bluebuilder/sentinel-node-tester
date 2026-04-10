@@ -756,8 +756,35 @@ app.listen(PORT, async () => {
       state.estimatedTotalCost = '0 DVPN';
       tmpClient.disconnect();
       console.log(`Wallet: ${acc.address} | Balance: ${state.balance}`);
+      // Broadcast fresh balance to any SSE clients that connected before chain query finished
+      broadcast('state', { state });
     } catch (err) {
       console.error('Failed to fetch initial balance:', err.message);
     }
+  }
+
+  // ─── Periodic balance refresh (runs even when idle) ────────────────────────
+  if (MNEMONIC) {
+    setInterval(async () => {
+      // Skip refresh during active audit — pipeline handles its own refresh
+      if (state.status === 'running' || state.status === 'paused_balance') return;
+      try {
+        const w = await DirectSecp256k1HdWallet.fromMnemonic(MNEMONIC, { prefix: 'sent' });
+        const [acc] = await w.getAccounts();
+        const tmpClient = await SigningStargateClient.connectWithSigner(
+          'https://rpc.sentinel.co:443', w,
+          { gasPrice: GasPrice.fromString(GAS_PRICE) },
+        );
+        const bal = await tmpClient.getBalance(acc.address, DENOM);
+        const fresh = parseInt(bal?.amount || '0', 10);
+        tmpClient.disconnect();
+        if (fresh !== state.balanceUdvpn) {
+          state.balanceUdvpn = fresh;
+          state.spentUdvpn = 0;
+          state.balance = `${(fresh / 1_000_000).toFixed(4)} DVPN`;
+          broadcast('state', { state });
+        }
+      } catch { /* non-critical */ }
+    }, 2 * 60_000); // Every 2 minutes
   }
 });
