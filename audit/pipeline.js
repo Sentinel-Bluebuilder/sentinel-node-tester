@@ -4,7 +4,7 @@
  * Zero-skip system: every node ends as PASS or FAIL.
  */
 
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, renameSync } from 'fs';
 import path from 'path';
 
 import {
@@ -20,8 +20,20 @@ import {
 } from '../core/session.js';
 import { nodeStatusV3 } from '../protocol/v3protocol.js';
 import { speedtestDirect, sleep, resolveCfHost } from '../protocol/speedtest.js';
-import { WG_AVAILABLE, IS_ADMIN, emergencyCleanupSync, uninstallWgTunnel } from '../platforms/windows/wireguard.js';
-import { checkV2Ray } from '../platforms/windows/v2ray.js';
+// Platform-aware imports — Windows has full implementation, others get stubs
+let WG_AVAILABLE, IS_ADMIN, emergencyCleanupSync, uninstallWgTunnel, checkV2Ray;
+if (process.platform === 'win32') {
+  ({ WG_AVAILABLE, IS_ADMIN, emergencyCleanupSync, uninstallWgTunnel } = await import('../platforms/windows/wireguard.js'));
+  ({ checkV2Ray } = await import('../platforms/windows/v2ray.js'));
+} else {
+  WG_AVAILABLE = false;
+  IS_ADMIN = process.getuid?.() === 0 || false;
+  emergencyCleanupSync = () => {};
+  uninstallWgTunnel = async () => {};
+  checkV2Ray = async () => {
+    try { const { execSync } = await import('child_process'); execSync('which v2ray', { stdio: 'pipe' }); return true; } catch { return false; }
+  };
+}
 import { checkAndPauseIfInterference, classifyFailure } from '../protocol/diagnostics.js';
 import { loadTransportCache, getCacheStats, saveTransportCache } from '../core/transport-cache.js';
 import { testNode } from './node-test.js';
@@ -85,7 +97,30 @@ if (existsSync(RESULTS_FILE)) {
 }
 
 export function getResults() { return results; }
-export function saveResults() { writeFileSync(RESULTS_FILE, JSON.stringify(results, null, 2), 'utf8'); }
+
+// ─── Crash-Safe Results Persistence ────────────────────────────────────────
+// Write to temp file then rename (atomic on most filesystems).
+// Also continuously save to the active run directory so a kill never loses data.
+let _activeRunDir = null;
+
+export function setActiveRunDir(dir) { _activeRunDir = dir; }
+
+export function saveResults() {
+  const data = JSON.stringify(results, null, 2);
+  const tmpFile = RESULTS_FILE + '.tmp';
+  writeFileSync(tmpFile, data, 'utf8');
+  try { renameSync(tmpFile, RESULTS_FILE); } catch { writeFileSync(RESULTS_FILE, data, 'utf8'); }
+
+  // Also save to the active run directory (crash-safe copy)
+  if (_activeRunDir) {
+    const runFile = path.join(_activeRunDir, 'results.json');
+    const runTmp = runFile + '.tmp';
+    try {
+      writeFileSync(runTmp, data, 'utf8');
+      try { renameSync(runTmp, runFile); } catch { writeFileSync(runFile, data, 'utf8'); }
+    } catch { /* run dir may not exist yet */ }
+  }
+}
 
 export function logFailure(nodeAddr, error, context = {}) {
   const entry = { ts: new Date().toISOString(), node: nodeAddr, error, ...context };
@@ -508,6 +543,14 @@ export async function runAudit(resume, state, broadcast) {
       } else {
         const errMsg = error?.message || 'Unknown error';
 
+        // ─── Stop requested — NOT a failure ────────────────────────────
+        // When user pauses/stops, the current node should remain untested
+        // so it's first in line on resume. Don't record, don't increment.
+        if (error?._stopRequested || errMsg === 'Stop requested') {
+          broadcast('log', { msg: `⏸ Node ${node.address.slice(0, 20)}… interrupted — will retry on resume` });
+          break;
+        }
+
         // ─── Insufficient balance — PAUSE, don't fail ──────────────────
         // Balance issues are wallet problems, not node problems. Pause the
         // audit and poll for balance top-up. The node stays untested (not failed).
@@ -542,7 +585,8 @@ export async function runAudit(resume, state, broadcast) {
             }
           }
           if (!balanceRestored) break; // stopRequested
-          // Don't record a fail — this node will be retested on resume
+          // Retry this same node — decrement j so the loop re-tests it
+          j--;
           continue;
         }
 
@@ -607,6 +651,11 @@ export async function runAudit(resume, state, broadcast) {
         broadcast, state, node.address,
       );
 
+      if (error?._stopRequested || error?.message === 'Stop requested') {
+        broadcast('log', { msg: `⏸ Internet-recovery retest interrupted — remaining nodes untouched` });
+        break;
+      }
+
       if (result) {
         state.failedNodes = Math.max(0, state.failedNodes - 1);
         state.testedNodes++;
@@ -656,6 +705,11 @@ export async function runAudit(resume, state, broadcast) {
         ),
         broadcast, state, node.address,
       );
+
+      if (error?._stopRequested || error?.message === 'Stop requested') {
+        broadcast('log', { msg: `⏸ Iron Rule retest interrupted — remaining nodes untouched` });
+        break;
+      }
 
       if (result) {
         state.failedNodes = Math.max(0, state.failedNodes - 1);
@@ -811,6 +865,12 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
       ),
       broadcast, state, node.address,
     );
+
+    if (error?._stopRequested || error?.message === 'Stop requested') {
+      broadcast('log', { msg: `⏸ Retest interrupted — remaining nodes untouched` });
+      logLine(`  STOPPED by user (node not counted as failed)`);
+      break;
+    }
 
     if (result && result.actualMbps != null) {
       recomputeCounters(state);
@@ -1082,6 +1142,9 @@ export async function runPlanTest(planId, state, broadcast) {
         planFailed++;
         broadcast('log', { msg: `  ✗ Plan node failed` });
       }
+    } else if (error?._stopRequested || error?.message === 'Stop requested') {
+      broadcast('log', { msg: `⏸ Plan test interrupted — remaining nodes untouched` });
+      break;
     } else {
       state.failedNodes++;
       planFailed++;

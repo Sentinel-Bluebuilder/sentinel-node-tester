@@ -8,9 +8,10 @@ import { randomUUID } from 'crypto';
 import { existsSync, appendFileSync } from 'fs';
 import path from 'path';
 
-import { DENOM, GIGS, V3_MSG_TYPE, FAILURE_LOG } from '../core/constants.js';
+import { DENOM, GIGS, V3_MSG_TYPE, FAILURE_LOG, ACTIVE_DNS } from '../core/constants.js';
 import { queryNodeStatusDirect } from '../core/chain.js';
 import { BRIDGE_AVAILABLE, bridgeNodeStatus, bridgeHandshakeWG, bridgeHandshakeV2Ray } from '../core/csharp-bridge.js';
+import { TKD_AVAILABLE, tkdNodeStatus, tkdHandshakeWG, tkdHandshakeV2Ray } from '../core/tkd-bridge.js';
 import {
   getCredential, saveCredential, clearCredential,
   markSessionPoisoned, isPaid, markPaid, clearPaidNodes,
@@ -27,8 +28,37 @@ import {
   buildV2RayClientConfig, writeWgConfig, extractSessionId, waitForPort,
 } from '../protocol/v3protocol.js';
 import { speedtestDirect, speedtestViaSocks5, sleep, resolveSpeedtestIPs, checkGoogleDirect, checkGoogleViaSocks5 } from '../protocol/speedtest.js';
-import { installWgTunnel, uninstallWgTunnel, WG_AVAILABLE, emergencyCleanupSync } from '../platforms/windows/wireguard.js';
-import { spawnV2Ray, cleanupV2Ray, killAllV2Ray, killV2RayByPid, nextSocksPort } from '../platforms/windows/v2ray.js';
+// Platform-aware imports
+let installWgTunnel, uninstallWgTunnel, WG_AVAILABLE, emergencyCleanupSync;
+let spawnV2Ray, cleanupV2Ray, killAllV2Ray, killV2RayByPid, nextSocksPort;
+if (process.platform === 'win32') {
+  ({ installWgTunnel, uninstallWgTunnel, WG_AVAILABLE, emergencyCleanupSync } = await import('../platforms/windows/wireguard.js'));
+  ({ spawnV2Ray, cleanupV2Ray, killAllV2Ray, killV2RayByPid, nextSocksPort } = await import('../platforms/windows/v2ray.js'));
+} else {
+  const { spawn: _spawn, execSync: _execSync } = await import('child_process');
+  const { writeFileSync: _wfs } = await import('fs');
+  const _os = await import('os');
+  const _path = await import('path');
+  WG_AVAILABLE = false;
+  emergencyCleanupSync = () => {};
+  installWgTunnel = async () => { throw new Error('WireGuard not implemented for ' + process.platform); };
+  uninstallWgTunnel = async () => {};
+  let _socksPort = 10800;
+  nextSocksPort = async () => _socksPort++;
+  spawnV2Ray = async (config, outbound, socksPort) => {
+    const cfgPath = _path.join(_os.tmpdir(), 'sentinel-v2ray.json');
+    _wfs(cfgPath, JSON.stringify(config, null, 2));
+    const proc = _spawn('v2ray', ['run', '-config', cfgPath], { stdio: 'pipe' });
+    let stderr = '', stdout = '';
+    proc.stderr?.on('data', d => { stderr += d.toString(); });
+    proc.stdout?.on('data', d => { stdout += d.toString(); });
+    proc.on('error', err => { stderr += `spawn error: ${err.message}`; });
+    return { proc, cfgPath, getStdout: () => stdout, getStderr: () => stderr };
+  };
+  cleanupV2Ray = (proc) => { if (proc) try { proc.kill(); } catch {} };
+  killAllV2Ray = () => { try { _execSync('pkill -f v2ray 2>/dev/null', { stdio: 'ignore' }); } catch {} };
+  killV2RayByPid = (pid) => { if (pid) try { process.kill(pid); } catch {} };
+}
 function logFailure(nodeAddr, error, context = {}) {
   const entry = { ts: new Date().toISOString(), node: nodeAddr, error, ...context };
   appendFileSync(FAILURE_LOG, JSON.stringify(entry) + '\n', 'utf8');
@@ -52,10 +82,12 @@ function logFailure(nodeAddr, error, context = {}) {
 export async function testNode(client, account, privkey, node, opts, preSessionId, broadcast, state) {
   const { testMb, gigabytes, denom, v2rayAvailable, baselineMbps, onlineTimeoutMs = 6_000, nodeStatus = null } = opts;
   const useCSharp = state.activeSDK === 'csharp' && BRIDGE_AVAILABLE;
+  const useTkd = state.activeSDK === 'tkd' && TKD_AVAILABLE;
 
   // ─── Online check (with remote_addrs fallback) ──────────────────────────
-  const statusFn = useCSharp ? bridgeNodeStatus : nodeStatusV3;
-  if (useCSharp && broadcast) broadcast('log', { msg: '  [C# SDK]' });
+  const statusFn = useCSharp ? bridgeNodeStatus : useTkd ? tkdNodeStatus : nodeStatusV3;
+  if (useCSharp && broadcast) broadcast('log', { msg: '  [Blue C#]' });
+  if (useTkd && broadcast) broadcast('log', { msg: '  [TKD JS]' });
   let status = nodeStatus;
   const altAddrs = (node.remoteAddrs || []).filter(a => a !== node.remoteUrl);
   if (!status) {
@@ -368,7 +400,8 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
         }
       }
       // Session already exists on node — race between our handshake and node's chain indexing
-      if (/already exists/i.test(err.message)) {
+      // Blue JS throws "already exists", TKD/axios throws "Request failed with status code 409"
+      if (/already exists|status code 409/i.test(err.message) || err.response?.status === 409) {
         if (state.retestMode && makeFn) {
           // Retest mode: known 409 nodes — skip waits, go straight to fresh session
           if (broadcast) broadcast('log', { msg: `  ⚠ 409 in retest — paying for fresh session immediately...` });
@@ -383,11 +416,11 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
         if (broadcast) broadcast('log', { msg: `  ⚠ Session exists on node (indexing race) — waiting 15s then retrying...` });
         await sleep(15_000);
         try { return await fn(); } catch (retryErr) {
-          if (/already exists/i.test(retryErr.message)) {
+          if (/already exists|status code 409/i.test(retryErr.message) || retryErr.response?.status === 409) {
             if (broadcast) broadcast('log', { msg: `  ⚠ Still 409 — final retry in 20s...` });
             await sleep(20_000);
             try { return await fn(); } catch (finalErr) {
-              if (/already exists/i.test(finalErr.message) && makeFn) {
+              if ((/already exists|status code 409/i.test(finalErr.message) || finalErr.response?.status === 409) && makeFn) {
                 try {
                   await payForFreshSession();
                   return await makeFn(sessionId);
@@ -417,7 +450,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
       wgPriv = Buffer.from(cached.wgPrivateKey, 'base64');
       hs = { assignedAddrs: cached.wgAssignedAddrs, serverPubKey: cached.wgServerPubKey, serverEndpoint: cached.wgServerEndpoint };
       splitIPs = await resolveSpeedtestIPs();
-      confPath = writeWgConfig(wgPriv, hs.assignedAddrs, hs.serverPubKey, hs.serverEndpoint, splitIPs);
+      confPath = writeWgConfig(wgPriv, hs.assignedAddrs, hs.serverPubKey, hs.serverEndpoint, splitIPs, { dns: ACTIVE_DNS.join(',') });
     } else if (useCSharp) {
       // C# SDK handshake — bridge generates its own WG keypair
       hs = await handshakeWithRetry(
@@ -426,7 +459,17 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
       );
       wgPriv = hs.clientPrivateKey ? Buffer.from(hs.clientPrivateKey, 'base64') : generateWgKeyPair().privateKey;
       splitIPs = await resolveSpeedtestIPs();
-      confPath = writeWgConfig(wgPriv, hs.assignedAddrs, hs.serverPubKey, hs.serverEndpoint, splitIPs);
+      confPath = writeWgConfig(wgPriv, hs.assignedAddrs, hs.serverPubKey, hs.serverEndpoint, splitIPs, { dns: ACTIVE_DNS.join(',') });
+    } else if (useTkd) {
+      // TKD SDK handshake — uses @sentinel-official/sentinel-js-sdk handshake() + Wireguard class
+      if (broadcast) broadcast('log', { msg: `  [TKD] WireGuard handshake...` });
+      hs = await handshakeWithRetry(
+        () => tkdHandshakeWG(node.remoteUrl, sessionId),
+        (newSid) => tkdHandshakeWG(node.remoteUrl, newSid),
+      );
+      wgPriv = hs.clientPrivateKey ? Buffer.from(hs.clientPrivateKey, 'base64') : generateWgKeyPair().privateKey;
+      splitIPs = await resolveSpeedtestIPs();
+      confPath = writeWgConfig(wgPriv, hs.assignedAddrs, hs.serverPubKey, hs.serverEndpoint, splitIPs, { dns: ACTIVE_DNS.join(',') });
     } else {
       const keys = generateWgKeyPair();
       wgPriv = keys.privateKey;
@@ -435,7 +478,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
         (newSid) => initHandshakeV3(node.remoteUrl, newSid, privkey, keys.publicKey),
       );
       splitIPs = await resolveSpeedtestIPs();
-      confPath = writeWgConfig(wgPriv, hs.assignedAddrs, hs.serverPubKey, hs.serverEndpoint, splitIPs);
+      confPath = writeWgConfig(wgPriv, hs.assignedAddrs, hs.serverPubKey, hs.serverEndpoint, splitIPs, { dns: ACTIVE_DNS.join(',') });
     }
     if (broadcast) broadcast('log', { msg: `  WG assigned ${hs.assignedAddrs.join(', ')} → ${hs.serverEndpoint} (split: ${splitIPs.length} IPs)` });
 
@@ -495,6 +538,17 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
       uuid = hs.uuid || randomUUID();
       hsConfig = hs.config;
       if (broadcast) broadcast('log', { msg: `  [C#] Handshake OK — UUID: ${uuid} (SOCKS:${socksPort})` });
+    } else if (useTkd) {
+      // TKD SDK handshake — uses @sentinel-official/sentinel-js-sdk handshake() + V2Ray class
+      socksPort = await nextSocksPort();
+      if (broadcast) broadcast('log', { msg: `  [TKD] V2Ray handshake...` });
+      const hs = await handshakeWithRetry(
+        () => tkdHandshakeV2Ray(node.remoteUrl, sessionId),
+        (newSid) => tkdHandshakeV2Ray(node.remoteUrl, newSid),
+      );
+      uuid = hs.uuid || randomUUID();
+      hsConfig = hs.config;
+      if (broadcast) broadcast('log', { msg: `  [TKD] Handshake OK — UUID: ${uuid} (SOCKS:${socksPort})` });
 
       saveCredential(node.address, {
         type: 'v2ray', sessionId: String(sessionId),
@@ -526,7 +580,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
       await sleep(10_000);
     }
 
-    const v2rayConfig = buildV2RayClientConfig(serverHost, hsConfig, uuid, socksPort, { clockDriftSec: status.clockDriftSec || 0 });
+    const v2rayConfig = buildV2RayClientConfig(serverHost, hsConfig, uuid, socksPort, { clockDriftSec: status.clockDriftSec || 0, dns: ACTIVE_DNS.join(',') });
     const allMeta = JSON.parse(hsConfig).metadata || [];
 
     // Log alterId for drift debugging
@@ -619,10 +673,27 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
       }
       await sleep(oi > 0 ? 4000 : 2000); // Extra wait between outbounds for port release
 
-      const { proc, getStdout, getStderr } = await spawnV2Ray(v2rayConfig, ob, socksPort);
+      const attemptLabel = `[${oi + 1}/${numOutbounds}] ${protoName}/${transportName}/${securityName}:${selectedPort}`;
+
+      let proc, getStdout, getStderr;
+      try {
+        ({ proc, getStdout, getStderr } = await spawnV2Ray(v2rayConfig, ob, socksPort));
+      } catch (spawnErr) {
+        // spawn UNKNOWN on Windows: binary locked by antivirus, handle exhaustion, etc.
+        // Retry once after a short delay
+        if (broadcast) broadcast('log', { msg: `  ⚠ V2Ray spawn failed (${spawnErr.message}) — retrying in 3s...` });
+        await sleep(3000);
+        try {
+          ({ proc, getStdout, getStderr } = await spawnV2Ray(v2rayConfig, ob, socksPort));
+        } catch (spawnErr2) {
+          allAttempts.push({ label: attemptLabel, result: 'FAIL', error: `spawn failed: ${spawnErr2.message}`, stdout: '', stderr: '' });
+          lastV2Err = spawnErr2;
+          if (broadcast) broadcast('log', { msg: `  ✗ V2Ray spawn retry failed: ${spawnErr2.message}` });
+          continue;
+        }
+      }
       lastV2RayPid = proc.pid;
 
-      const attemptLabel = `[${oi + 1}/${numOutbounds}] ${protoName}/${transportName}/${securityName}:${selectedPort}`;
       try {
         // When TCP probe already failed, use shorter SOCKS5 timeout (5s vs 12/8s)
         // to fail faster and move to next outbound — saves ~15s per unreachable port
@@ -817,15 +888,21 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
         }
       }
 
-      if (sessionId) markSessionPoisoned(node.address, String(sessionId));
-      clearCredential(node.address);
-      diag.v2rayConfig = v2rayConfig;
-      diag.v2rayAttempts = allAttempts;
-      diag.v2rayStdout = allAttempts.map(a => `--- ${a.label} (${a.result}) ---\n${a.stdout}`).join('\n');
-      diag.v2rayStderr = allAttempts.map(a => `--- ${a.label} (${a.result}) ---\n${a.stderr}`).join('\n');
-      const err = new Error(lastV2Err.message);
-      err.diag = diag;
-      throw err;
+      // Fallback succeeded — lastV2Err was cleared, skip the throw
+      if (!lastV2Err) {
+        // A fallback path (status port, discovered port, or AEAD retry) worked
+        // actualMbps is already set — continue to speed cap & scoring
+      } else {
+        if (sessionId) markSessionPoisoned(node.address, String(sessionId));
+        clearCredential(node.address);
+        diag.v2rayConfig = v2rayConfig;
+        diag.v2rayAttempts = allAttempts;
+        diag.v2rayStdout = allAttempts.map(a => `--- ${a.label} (${a.result}) ---\n${a.stdout}`).join('\n');
+        diag.v2rayStderr = allAttempts.map(a => `--- ${a.label} (${a.result}) ---\n${a.stderr}`).join('\n');
+        const err = new Error(lastV2Err.message);
+        err.diag = diag;
+        throw err;
+      }
     }
   }
 
@@ -873,7 +950,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
 
   } catch (testErr) {
     if (useCached) clearCredential(node.address);
-    if (sessionId && /handshake|already exists|proxy.*fail/i.test(testErr.message)) {
+    if (sessionId && /handshake|already exists|status code 409|proxy.*fail/i.test(testErr.message)) {
       markSessionPoisoned(node.address, String(sessionId));
     }
     logFailure(node.address, testErr.message, {

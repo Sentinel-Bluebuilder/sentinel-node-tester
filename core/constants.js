@@ -23,21 +23,24 @@ export const LOW_BALANCE_WARN = 500_000; // 0.5 DVPN
 export const PORT = parseInt(process.env.PORT || '3001', 10);
 
 // ─── DNS Configuration ──────────────────────────────────────────────────────
-// Presets: default (OpenDNS), hns (Handshake HDNS), cloudflare, google, custom
+// Default: HNS (Handshake) — decentralized DNS, 0.01% error rate across 9,298 tests
 export const DNS_PRESETS = {
-  default:    ['208.67.222.222', '208.67.220.220'],
   hns:        ['103.196.38.38', '103.196.38.39'],
-  cloudflare: ['1.1.1.1', '1.0.0.1'],
   google:     ['8.8.8.8', '8.8.4.4'],
+  cloudflare: ['1.1.1.1', '1.0.0.1'],
+  quad9:      ['9.9.9.9', '149.112.112.112'],
+  opendns:    ['208.67.222.222', '208.67.220.220'],
 };
 export let ACTIVE_DNS = (process.env.DNS_SERVERS || '').split(',').map(s => s.trim()).filter(Boolean);
-if (ACTIVE_DNS.length === 0) ACTIVE_DNS = DNS_PRESETS.default;
+if (ACTIVE_DNS.length === 0) ACTIVE_DNS = DNS_PRESETS.hns;
 export function setActiveDns(servers) { ACTIVE_DNS = servers; }
 
-// ─── Protocol Message Types ──────────────────────────────────────────────────
-export const V3_MSG_TYPE = '/sentinel.node.v3.MsgStartSessionRequest';
-export const V3_SUB_TYPE = '/sentinel.subscription.v3.MsgStartSubscriptionRequest';
-export const V3_SUB_SESSION_TYPE = '/sentinel.subscription.v3.MsgStartSessionRequest';
+// ─── Protocol Message Types (from SDK — single source of truth) ─────────────
+import { MSG_TYPES } from 'sentinel-dvpn-sdk';
+export { MSG_TYPES };
+export const V3_MSG_TYPE = MSG_TYPES.START_SESSION;
+export const V3_SUB_TYPE = MSG_TYPES.START_SUBSCRIPTION;
+export const V3_SUB_SESSION_TYPE = MSG_TYPES.SUB_START_SESSION;
 
 // ─── RPC Endpoints (ordered by reliability) ──────────────────────────────────
 export const RPC_ENDPOINTS = [

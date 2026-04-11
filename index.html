@@ -524,14 +524,16 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="opacity:0.5"><path d="M0 0h11.4v11.4H0zm12.6 0H24v11.4H12.6zM0 12.6h11.4V24H0zm12.6 12.6H24V12.6H12.6z" fill="#00adef"/></svg>
           <span style="color:#666;font-size:11px;letter-spacing:1px">WINDOWS</span>
           <span id="sdkToggle" style="display:inline-flex;align-items:center;gap:0;border:1px solid rgba(255,255,255,0.12);border-radius:5px;overflow:hidden;font-size:10px;letter-spacing:1px;cursor:pointer">
-            <span id="sdkJs" onclick="setSDK('js')" style="padding:3px 10px;background:rgba(0,200,83,0.15);color:#00c853;font-weight:600">JS SDK</span>
-            <span id="sdkCs" onclick="setSDK('csharp')" style="padding:3px 10px;color:#555;font-weight:600">C# SDK</span>
+            <span id="sdkJs" onclick="setSDK('js')" style="padding:3px 10px;background:rgba(0,200,83,0.15);color:#00c853;font-weight:600">BLUE JS</span>
+            <span id="sdkCs" onclick="setSDK('csharp')" style="padding:3px 10px;color:#555;font-weight:600">BLUE C#</span>
+            <span id="sdkTkd" onclick="setSDK('tkd')" style="padding:3px 10px;color:#555;font-weight:600">TKD JS</span>
           </span>
           <select id="dnsSelect" onchange="setDNS(this.value)" style="background:#111;color:#aaa;border:1px solid rgba(255,255,255,0.12);border-radius:5px;padding:3px 8px;font-size:10px;font-family:Outfit,sans-serif;letter-spacing:1px;cursor:pointer">
-            <option value="default">DNS: OpenDNS</option>
-            <option value="hns">DNS: HNS</option>
-            <option value="cloudflare">DNS: Cloudflare</option>
+            <option value="hns">DNS: HNS (default)</option>
             <option value="google">DNS: Google</option>
+            <option value="cloudflare">DNS: Cloudflare</option>
+            <option value="quad9">DNS: Quad9</option>
+            <option value="opendns">DNS: OpenDNS</option>
           </select>
           <a href="/dictator" style="color:#ff1744;text-decoration:none;font-size:10px;letter-spacing:2px;text-transform:uppercase;padding:2px 8px;border:1px solid rgba(255,23,68,0.3);border-radius:4px;transition:all 0.2s" onmouseover="this.style.background='rgba(255,23,68,0.15)'" onmouseout="this.style.background='transparent'">Dictator Mode</a>
         </p>
@@ -569,10 +571,10 @@
       <button class="btn btn-stop" id="btnStop" disabled onclick="stopAudit()">Stop</button>
       <button class="btn btn-outline" id="btnEconomy" onclick="toggleEconomy()">Economy</button>
       <div style="margin-left:auto; display:flex; gap:10px; align-items:center">
-        <select id="planSelect" style="background:#1a1a2e;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:6px;padding:8px 12px;font-size:12px;font-family:'Outfit',sans-serif;cursor:pointer;letter-spacing:0.5px">
+        <select id="planSelect" style="display:none">
           <option value="">Select Plan...</option>
         </select>
-        <button class="btn btn-plan" id="btnPlanTest" onclick="testPlan()">Test Plan</button>
+        <button class="btn btn-plan" id="btnPlanTest" onclick="testPlan()" style="display:none" title="WIP — Plan testing is under development">Test Plan</button>
         <button class="btn btn-clear" onclick="clearResults()">Reset</button>
         <button class="btn-help" onclick="showInfoPopup()" title="Dashboard guide">?</button>
       </div>
@@ -649,7 +651,17 @@
       <div class="glass-panel table-container">
         <div class="panel-header">
           <div class="panel-title">Node Performance Matrix</div>
-          <div style="font-size:11px; color:var(--text-secondary)" id="resultsCountLabel">0 Entries</div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span id="filterBtns" style="display:inline-flex;gap:2px;border:1px solid rgba(255,255,255,0.1);border-radius:5px;overflow:hidden;font-size:10px;letter-spacing:0.5px">
+              <span onclick="setFilter('all')" id="filterAll" style="padding:3px 8px;background:rgba(255,255,255,0.08);color:#fff;font-weight:600;cursor:pointer">ALL</span>
+              <span onclick="setFilter('pass')" id="filterPass" style="padding:3px 8px;color:#555;font-weight:600;cursor:pointer">PASS</span>
+              <span onclick="setFilter('fail')" id="filterFail" style="padding:3px 8px;color:#555;font-weight:600;cursor:pointer">FAIL</span>
+              <span onclick="setFilter('slow')" id="filterSlow" style="padding:3px 8px;color:#555;font-weight:600;cursor:pointer">SLOW</span>
+              <span onclick="setFilter('wg')" id="filterWg" style="padding:3px 8px;color:#555;font-weight:600;cursor:pointer">WG</span>
+              <span onclick="setFilter('v2')" id="filterV2" style="padding:3px 8px;color:#555;font-weight:600;cursor:pointer">V2</span>
+            </span>
+            <span style="font-size:11px; color:var(--text-secondary)" id="resultsCountLabel">0 Entries</span>
+          </div>
         </div>
         <div class="table-wrap">
           <table>
@@ -665,6 +677,7 @@
                 <th style="text-align:right">Total BW</th>
                 <th style="text-align:right">Baseline</th>
                 <th style="text-align:center">Result</th>
+                <th style="text-align:center">Other SDKs</th>
               </tr>
             </thead>
             <tbody id="resultsBody"></tbody>
@@ -842,16 +855,7 @@
 
       // Sync SDK toggle with server state (don't override user's click)
       if (state.activeSDK && state.activeSDK !== activeSDK) {
-        activeSDK = state.activeSDK;
-        const jsEl = document.getElementById('sdkJs');
-        const csEl = document.getElementById('sdkCs');
-        if (activeSDK === 'csharp') {
-          csEl.style.background = 'rgba(68,138,255,0.15)'; csEl.style.color = '#448aff';
-          jsEl.style.background = 'transparent'; jsEl.style.color = '#555';
-        } else {
-          jsEl.style.background = 'rgba(0,200,83,0.15)'; jsEl.style.color = '#00c853';
-          csEl.style.background = 'transparent'; csEl.style.color = '#555';
-        }
+        setSDK(state.activeSDK);
       }
 
       if (state.walletAddress) {
@@ -934,13 +938,16 @@
         }
       }
 
-      // Dead plan nodes: failed/skipped nodes that are in a subscription plan
-      const deadPlan = resultsArr.filter(r => r.inPlan && r.actualMbps == null).length;
+      // Dead plan nodes: plan-linked nodes that failed in THIS run only
+      // Filter by current run's SDK to avoid stale cross-run data
+      const currentSDK = state.activeSDK || 'js';
+      const currentRunResults = resultsArr.filter(r => !r.sdk || r.sdk === currentSDK);
+      const deadPlan = currentRunResults.filter(r => r.inPlan && r.actualMbps == null).length;
       document.getElementById('statDeadPlan').textContent = deadPlan;
-      const totalPlanTested = resultsArr.filter(r => r.inPlan).length;
+      const totalPlanTested = currentRunResults.filter(r => r.inPlan).length;
       document.getElementById('statDeadPlanPct').textContent = totalPlanTested > 0
         ? `${deadPlan}/${totalPlanTested} plan nodes failed`
-        : 'In subscription but failed';
+        : 'No plan failures';
 
       const retryCount = state.retryCount || 0;
       const fill = document.getElementById('progressFill');
@@ -1019,11 +1026,34 @@
           }).join('');
     }
 
+    let activeFilter = 'all';
+    function setFilter(f) {
+      activeFilter = f;
+      // Update button styles
+      ['all','pass','fail','slow','wg','v2'].forEach(id => {
+        const el = document.getElementById('filter' + id.charAt(0).toUpperCase() + id.slice(1));
+        if (el) { el.style.background = id === f ? 'rgba(255,255,255,0.08)' : 'transparent'; el.style.color = id === f ? '#fff' : '#555'; }
+      });
+      renderTable();
+    }
+
+    function applyFilter(arr) {
+      if (activeFilter === 'all') return arr;
+      if (activeFilter === 'fail') return arr.filter(r => r.actualMbps == null);
+      if (activeFilter === 'pass') return arr.filter(r => r.actualMbps != null && r.actualMbps >= 10);
+      if (activeFilter === 'slow') return arr.filter(r => r.actualMbps != null && r.actualMbps < 10);
+      if (activeFilter === 'wg') return arr.filter(r => (r.type || '').toLowerCase().includes('wire'));
+      if (activeFilter === 'v2') return arr.filter(r => (r.type || '').toLowerCase().includes('v2'));
+      return arr;
+    }
+
     function renderTable() {
       const tbody = document.getElementById('resultsBody');
       tbody.innerHTML = '';
-      resultsArr.slice(-maxRows).reverse().forEach(r => appendRowHtml(r, tbody));
-      document.getElementById('resultsCountLabel').textContent = resultsArr.length + ' Entries';
+      const filtered = applyFilter(resultsArr);
+      filtered.slice(-maxRows).reverse().forEach(r => appendRowHtml(r, tbody));
+      const label = activeFilter === 'all' ? filtered.length + ' Entries' : filtered.length + '/' + resultsArr.length + ' (' + activeFilter.toUpperCase() + ')';
+      document.getElementById('resultsCountLabel').textContent = label;
     }
 
     function addSingleRow(r) {
@@ -1097,9 +1127,28 @@
       }
 
       const sdkLabel = r.sdk || state.activeSDK || 'js';
-      const sdkBadge = sdkLabel === 'csharp'
-        ? '<span style="font-size:10px;padding:2px 5px;border-radius:3px;background:rgba(68,138,255,0.15);color:#448aff;font-weight:600">C#</span>'
-        : '<span style="font-size:10px;padding:2px 5px;border-radius:3px;background:rgba(0,200,83,0.1);color:#00c853;font-weight:600">JS</span>';
+      const sdkColors = { js: { bg: 'rgba(0,200,83,0.1)', fg: '#00c853', label: 'JS' }, csharp: { bg: 'rgba(68,138,255,0.15)', fg: '#448aff', label: 'C#' }, tkd: { bg: 'rgba(255,152,0,0.15)', fg: '#ff9800', label: 'TKD' } };
+      const sc = sdkColors[sdkLabel] || sdkColors.js;
+      const sdkBadge = `<span style="font-size:10px;padding:2px 5px;border-radius:3px;background:${sc.bg};color:${sc.fg};font-weight:600">${sc.label}</span>`;
+
+      // ─── Other SDKs column: cross-reference this node against other run results ──
+      let otherSdkHtml = '<span style="color:#555">-</span>';
+      if (window._otherSdkMap && r.address) {
+        const other = window._otherSdkMap[r.address];
+        if (other) {
+          const parts = [];
+          for (const [sdk, data] of Object.entries(other)) {
+            if (sdk === sdkLabel) continue;
+            const col = sdkColors[sdk] || sdkColors.js;
+            if (data.passed) {
+              parts.push(`<span title="${col.label}: ${data.speed} Mbps" style="color:#00c853;cursor:help">${col.label}&#10003;</span>`);
+            } else {
+              parts.push(`<span title="${col.label}: ${data.error}" style="color:#ff1744;cursor:help">${col.label}&#10007;</span>`);
+            }
+          }
+          if (parts.length > 0) otherSdkHtml = parts.join(' ');
+        }
+      }
       const osLabel = r.os || 'Windows';
       const osIcon = osLabel === 'Windows' ? '⊞' : osLabel === 'macOS' ? '⌘' : '🐧';
       const osBadge = `<span style="font-size:10px;color:#888" title="${osLabel}">${osIcon} ${osLabel}</span>`;
@@ -1115,6 +1164,7 @@
         <td style="text-align:right;color:#4fc3f7;font-weight:500">${totalHtml}</td>
         <td style="text-align:right;color:var(--text-secondary)">${blAt}</td>
         <td style="text-align:center">${badge}</td>
+        <td style="text-align:center;font-size:11px">${otherSdkHtml}</td>
       `;
 
       prepend ? tbody.insertBefore(tr, tbody.firstChild) : tbody.appendChild(tr);
@@ -1217,19 +1267,22 @@
       activeSDK = sdk;
       const jsEl = document.getElementById('sdkJs');
       const csEl = document.getElementById('sdkCs');
-      if (sdk === 'js') {
-        jsEl.style.background = 'rgba(0,200,83,0.15)';
-        jsEl.style.color = '#00c853';
-        csEl.style.background = 'transparent';
-        csEl.style.color = '#555';
-      } else {
-        csEl.style.background = 'rgba(68,138,255,0.15)';
-        csEl.style.color = '#448aff';
-        jsEl.style.background = 'transparent';
-        jsEl.style.color = '#555';
-      }
+      const tkdEl = document.getElementById('sdkTkd');
+      // Reset all
+      [jsEl, csEl, tkdEl].forEach(el => { if (el) { el.style.background = 'transparent'; el.style.color = '#555'; } });
+      // Highlight active
+      if (sdk === 'js' && jsEl) { jsEl.style.background = 'rgba(0,200,83,0.15)'; jsEl.style.color = '#00c853'; }
+      if (sdk === 'csharp' && csEl) { csEl.style.background = 'rgba(68,138,255,0.15)'; csEl.style.color = '#448aff'; }
+      if (sdk === 'tkd' && tkdEl) { tkdEl.style.background = 'rgba(255,152,0,0.15)'; tkdEl.style.color = '#ff9800'; }
       fetch('/api/sdk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sdk }) }).catch(() => {});
     }
+
+    // Load cross-SDK comparison data for "Other SDKs" column
+    window._otherSdkMap = {};
+    fetch('/api/cross-sdk').then(r => r.json()).then(data => {
+      window._otherSdkMap = data;
+      renderTable(); // Re-render with cross-SDK data
+    }).catch(() => {});
 
     async function setDNS(preset) {
       try {
@@ -1410,8 +1463,8 @@
           </div>
 
           <div style="margin-bottom:18px">
-            <div style="color:#7c3aed;font-weight:600;font-size:14px;margin-bottom:4px">Test via Plan</div>
-            Tests only nodes linked to a specific subscription plan. Select a plan from the dropdown first.
+            <div style="color:#7c3aed;font-weight:600;font-size:14px;margin-bottom:4px">Test via Plan <span style="color:#ff9800;font-size:10px">(WIP)</span></div>
+            Plan testing is under development. Currently hidden from the dashboard. Coming in a future release.
           </div>
 
           <div style="margin-bottom:18px">
@@ -1420,8 +1473,8 @@
           </div>
 
           <div style="margin-bottom:18px">
-            <div style="color:#448aff;font-weight:600;font-size:14px;margin-bottom:4px">JS SDK / C# SDK Toggle</div>
-            Switch which SDK implementation is used for node connections. JS uses the JavaScript SDK directly. C# routes through the SentinelBridge.exe CLI.
+            <div style="color:#448aff;font-weight:600;font-size:14px;margin-bottom:4px">SDK Toggle (Blue JS / Blue C# / TKD JS)</div>
+            Switch which SDK implementation is used for node connections. <b>Blue JS</b> = our JavaScript SDK. <b>Blue C#</b> = our C# SDK via SentinelBridge.exe. <b>TKD JS</b> = @sentinel-official/sentinel-js-sdk (official, RPC-based).
           </div>
 
           <div style="margin-bottom:18px">

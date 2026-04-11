@@ -7,13 +7,13 @@
  */
 
 import {
-  SentinelError, NodeError, ChainError as SdkChainError,
+  SentinelError, ValidationError, NodeError, ChainError as SdkChainError,
   TunnelError as SdkTunnelError, SecurityError,
   ErrorCodes, ERROR_SEVERITY, isRetryable, userMessage,
 } from 'sentinel-dvpn-sdk';
 
 // Re-export SDK error utilities for consumers
-export { ErrorCodes, ERROR_SEVERITY, isRetryable, userMessage, SentinelError, NodeError, SecurityError };
+export { ErrorCodes, ERROR_SEVERITY, isRetryable, userMessage, SentinelError, ValidationError, NodeError, SecurityError };
 
 // ─── Base Audit Error (extends SDK's SentinelError, adds .diag) ─────────────
 export class AuditError extends SentinelError {

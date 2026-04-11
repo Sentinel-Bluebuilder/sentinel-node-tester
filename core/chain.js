@@ -1,20 +1,23 @@
 /**
  * Sentinel Node Tester — Chain Queries
- * Adapter: uses SDK for LCD queries, pagination, and node discovery.
+ * Adapter: uses SDK for RPC queries (primary) with LCD fallback.
+ * RPC is ~10x faster per-request via protobuf/ABCI. LCD used as fallback
+ * when RPC endpoints are unreachable.
+ *
  * Keeps audit-specific: sticky LCD, plan membership annotation, local cache wrapper.
  */
 
 import {
   fetchActiveNodes as sdkFetchActiveNodes,
-  lcdQuery,
-  lcdPaginatedSafe,
-  queryNode,
+  flushNodeCache as sdkFlushNodeCache,
   discoverPlans as sdkDiscoverPlans,
   querySubscriptions as sdkQuerySubscriptions,
-  hasActiveSubscription as sdkHasActiveSub,
   LCD_ENDPOINTS as SDK_LCD_ENDPOINTS,
+  createRpcQueryClientWithFallback,
+  rpcQueryNode,
+  rpcQueryNodesForPlan,
+  disconnectRpc,
 } from 'sentinel-dvpn-sdk';
-import { LCD_ENDPOINTS as LOCAL_LCD_ENDPOINTS } from './constants.js';
 
 // ─── LCD Endpoint Management ────────────────────────────────────────────────
 const LCD_LIST = SDK_LCD_ENDPOINTS.map(e => e.url);
@@ -44,17 +47,247 @@ export async function ensureLcd() {
   return lcd;
 }
 
-// ─── Node List (delegates to SDK with caching + remoteAddrs) ────────────────
+// ─── RPC Client Management ─────────────────────────────────────────────────
+let _rpcClient = null;
+let _rpcUrl = null;
 
 /**
- * Fetch all active nodes from chain. SDK handles pagination, caching (5-min TTL),
- * and populates remoteAddrs[] for fallback.
+ * Get or create a cached RPC query client with automatic fallback.
+ * Returns null if all RPC endpoints fail (caller should use LCD fallback).
+ */
+async function getRpcClient() {
+  if (_rpcClient) return _rpcClient;
+  try {
+    const result = await createRpcQueryClientWithFallback();
+    _rpcClient = result;
+    _rpcUrl = result.url;
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+/** Disconnect and clear the cached RPC client */
+export function cleanupRpc() {
+  if (_rpcClient) {
+    try { disconnectRpc(); } catch { }
+    _rpcClient = null;
+    _rpcUrl = null;
+  }
+}
+
+// ─── Node List (RPC primary, LCD fallback) ─────────────────────────────────
+
+/**
+ * Fetch all active nodes via RPC with raw ABCI pagination.
+ * The chain caps ABCI queries at 100 per page, so we loop with next_key.
+ * Returns null if RPC is unavailable (signals LCD fallback).
+ */
+async function rpcFetchAllNodes(broadcast) {
+  const client = await getRpcClient();
+  if (!client) return null; // signal LCD fallback
+  return rpcFetchAllNodesPaginated(client, broadcast);
+}
+
+/**
+ * Raw ABCI paginated fetch for all active nodes.
+ * Loops with next_key until all pages are fetched.
+ *
+ * Cosmos PageRequest proto fields:
+ *   1 = key (bytes), 2 = offset (uint64), 3 = limit (uint64),
+ *   4 = count_total (bool), 5 = reverse (bool)
+ * NOTE: The SDK's encodePagination has a bug — it puts limit at field 2 (offset).
+ * We use correct field numbers here.
+ */
+async function rpcFetchAllNodesPaginated(client, broadcast) {
+  const allNodes = [];
+  let nextKeyBytes = null;
+  let page = 0;
+  const PAGE_SIZE = 100;
+  const MAX_PAGES = 20; // safety: max 2000 nodes
+
+  try {
+    do {
+      const paginationParts = [];
+      if (nextKeyBytes) {
+        // key = field 1 (length-delimited bytes)
+        paginationParts.push(encodeRpcBytes(1, nextKeyBytes));
+      }
+      // limit = field 3 (NOT field 2 which is offset)
+      paginationParts.push(encodeRpcVarintField(3, PAGE_SIZE));
+
+      const pagination = concatBytes(paginationParts);
+      const request = concatBytes([
+        encodeRpcVarintField(1, 1),                // status = active
+        encodeRpcEmbedded(2, pagination),           // pagination
+      ]);
+
+      const result = await client.queryClient.queryAbci(
+        '/sentinel.node.v3.QueryService/QueryNodes',
+        request,
+      );
+      const resp = new Uint8Array(result.value);
+      const fields = decodeRpcProto(resp);
+
+      // Decode nodes (field 1)
+      const nodes = (fields[1] || []).map(entry => decodeRpcNode(decodeRpcProto(entry.value)));
+      allNodes.push(...nodes);
+      page++;
+
+      // Extract pagination response (field 2) for next_key
+      nextKeyBytes = null;
+      if (fields[2] && fields[2][0]) {
+        const pagResp = decodeRpcProto(fields[2][0].value);
+        if (pagResp[1] && pagResp[1][0] && pagResp[1][0].value.length > 0) {
+          nextKeyBytes = pagResp[1][0].value;
+        }
+      }
+
+      if (nodes.length < PAGE_SIZE) break; // last page
+    } while (nextKeyBytes && page < MAX_PAGES);
+
+    if (broadcast) broadcast('log', { msg: `  RPC: ${allNodes.length} nodes fetched in ${page} pages` });
+    return allNodes;
+  } catch (err) {
+    if (broadcast) broadcast('log', { msg: `  RPC paginated fetch failed at page ${page}: ${err.message}` });
+    // Return what we have if partial, otherwise null for LCD fallback
+    return allNodes.length > 0 ? allNodes : null;
+  }
+}
+
+// ─── Minimal Protobuf Helpers (for raw ABCI pagination) ────────────────────
+
+function encodeRpcVarint(value) {
+  let n = BigInt(value);
+  const bytes = [];
+  do {
+    let b = Number(n & 0x7fn);
+    n >>= 7n;
+    if (n > 0n) b |= 0x80;
+    bytes.push(b);
+  } while (n > 0n);
+  return new Uint8Array(bytes);
+}
+
+function encodeRpcVarintField(fieldNum, value) {
+  if (!value && value !== 0) return new Uint8Array(0);
+  const tag = encodeRpcVarint((BigInt(fieldNum) << 3n) | 0n);
+  const val = encodeRpcVarint(value);
+  return concatBytes([tag, val]);
+}
+
+function encodeRpcBytes(fieldNum, data) {
+  const tag = encodeRpcVarint((BigInt(fieldNum) << 3n) | 2n);
+  const len = encodeRpcVarint(data.length);
+  return concatBytes([tag, len, data]);
+}
+
+function encodeRpcEmbedded(fieldNum, bytes) {
+  if (!bytes || bytes.length === 0) return new Uint8Array(0);
+  return encodeRpcBytes(fieldNum, bytes);
+}
+
+function concatBytes(arrays) {
+  const totalLen = arrays.reduce((sum, a) => sum + a.length, 0);
+  const result = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const arr of arrays) {
+    result.set(arr, offset);
+    offset += arr.length;
+  }
+  return result;
+}
+
+function decodeRpcProto(buf) {
+  const fields = {};
+  let i = 0;
+  while (i < buf.length) {
+    let tag = 0n, shift = 0n;
+    while (i < buf.length) {
+      const b = buf[i++];
+      tag |= BigInt(b & 0x7f) << shift;
+      shift += 7n;
+      if (!(b & 0x80)) break;
+    }
+    const fieldNum = Number(tag >> 3n);
+    const wireType = Number(tag & 0x7n);
+
+    if (wireType === 0) {
+      let val = 0n, s = 0n;
+      while (i < buf.length) {
+        const b = buf[i++];
+        val |= BigInt(b & 0x7f) << s;
+        s += 7n;
+        if (!(b & 0x80)) break;
+      }
+      if (!fields[fieldNum]) fields[fieldNum] = [];
+      fields[fieldNum].push({ wireType, value: val });
+    } else if (wireType === 2) {
+      let len = 0n, s = 0n;
+      while (i < buf.length) {
+        const b = buf[i++];
+        len |= BigInt(b & 0x7f) << s;
+        s += 7n;
+        if (!(b & 0x80)) break;
+      }
+      const data = buf.slice(i, i + Number(len));
+      i += Number(len);
+      if (!fields[fieldNum]) fields[fieldNum] = [];
+      fields[fieldNum].push({ wireType, value: data });
+    } else if (wireType === 5) { i += 4; }
+      else if (wireType === 1) { i += 8; }
+  }
+  return fields;
+}
+
+function decodeRpcString(data) {
+  return new TextDecoder().decode(data);
+}
+
+function decodeRpcPrice(fields) {
+  return {
+    denom: fields[1]?.[0] ? decodeRpcString(fields[1][0].value) : '',
+    base_value: fields[2]?.[0] ? decodeRpcString(fields[2][0].value) : '0',
+    quote_value: fields[3]?.[0] ? decodeRpcString(fields[3][0].value) : '0',
+  };
+}
+
+function decodeRpcNode(fields) {
+  return {
+    address: fields[1]?.[0] ? decodeRpcString(fields[1][0].value) : '',
+    gigabyte_prices: (fields[2] || []).map(f => decodeRpcPrice(decodeRpcProto(f.value))),
+    hourly_prices: (fields[3] || []).map(f => decodeRpcPrice(decodeRpcProto(f.value))),
+    remote_addrs: (fields[4] || []).map(f => decodeRpcString(f.value)),
+    status: fields[6]?.[0] ? Number(fields[6][0].value) : 0,
+  };
+}
+
+// ─── Node List (RPC primary → LCD fallback) ────────────────────────────────
+
+/**
+ * Fetch all active nodes from chain.
+ * Tries RPC first (faster, protobuf), falls back to LCD (REST/JSON).
  */
 export async function getAllNodes(broadcast) {
+  // Try RPC first
+  const rpcNodes = await rpcFetchAllNodes(broadcast);
+  if (rpcNodes && rpcNodes.length > 0) {
+    const result = rpcNodes.map(n => ({
+      address: n.address,
+      remoteUrl: '',
+      remoteAddrs: (n.remote_addrs || []).map(a => a.startsWith('http') ? a : `https://${a}`),
+      gigabyte_prices: n.gigabyte_prices || [],
+      status: 1,
+      planIds: [],
+    }));
+    if (broadcast) broadcast('log', { msg: `  ${result.length} nodes fetched via RPC (${_rpcUrl || 'cached'})` });
+    return result;
+  }
+
+  // LCD fallback
   const lcd = await ensureLcd();
   try {
     const nodes = await sdkFetchActiveNodes(lcd);
-    // Normalize to the format the Node Tester expects
     const result = nodes.map(n => ({
       address: n.address,
       remoteUrl: n.remote_url || '',
@@ -63,24 +296,38 @@ export async function getAllNodes(broadcast) {
       status: 1,
       planIds: [],
     }));
-    if (broadcast) broadcast('log', { msg: `  ${result.length} nodes fetched from chain` });
+    if (broadcast) broadcast('log', { msg: `  ${result.length} nodes fetched via LCD fallback` });
     return result;
   } catch (err) {
-    if (broadcast) broadcast('log', { msg: `  ⚠ Node fetch failed: ${err.message}` });
+    if (broadcast) broadcast('log', { msg: `  Node fetch failed: ${err.message}` });
     throw err;
   }
 }
 
 /** Invalidate node list cache — delegates to SDK */
 export function invalidateNodeCache() {
-  sdkInvalidateNodeCache();
+  sdkFlushNodeCache();
 }
 
 /**
  * Direct query: is this node active on chain RIGHT NOW?
- * Uses SDK's queryNode with multi-endpoint fallback.
+ * Tries RPC first (fast single-node lookup), falls back to LCD.
  */
 export async function queryNodeStatusDirect(nodeAddr) {
+  // Try RPC first
+  try {
+    const client = await getRpcClient();
+    if (client) {
+      const node = await rpcQueryNode(client, nodeAddr);
+      if (node) {
+        const st = node.status === 1 || node.status === '1' ? 1 : 0;
+        return { active: st === 1, status: st };
+      }
+      // rpcQueryNode returned null — could be inactive or not found, try LCD
+    }
+  } catch { /* fall through to LCD */ }
+
+  // LCD fallback
   for (const lcd of LCD_LIST) {
     try {
       const res = await fetch(`${lcd}/sentinel/node/v3/nodes/${nodeAddr}`, {
@@ -97,10 +344,12 @@ export async function queryNodeStatusDirect(nodeAddr) {
   return { active: false, status: null };
 }
 
-// ─── Plan Membership (audit-specific) ───────────────────────────────────────
+// ─── Plan Membership (RPC for node lists, LCD for plan discovery) ──────────
 
 /**
  * Fetch subscription plans and mark which nodes belong to each plan.
+ * Uses LCD for plan/subscription discovery (no RPC decoder for plans yet),
+ * but uses RPC for querying nodes per plan (decoded protobuf).
  */
 export async function fetchPlanMembership(nodes, broadcast) {
   const lcd = getActiveLcd();
@@ -108,6 +357,7 @@ export async function fetchPlanMembership(nodes, broadcast) {
   const planNodeSets = {};
 
   try {
+    // Step 1: Discover plan IDs from subscriptions (LCD — no RPC decoder for subscriptions)
     const planIds = new Set();
     let subNextKey = null;
     do {
@@ -121,17 +371,35 @@ export async function fetchPlanMembership(nodes, broadcast) {
       subNextKey = data.pagination?.next_key || null;
     } while (subNextKey);
 
+    // Step 2: For each plan, get its nodes (try RPC first, LCD fallback)
+    const rpcClient = await getRpcClient();
+
     for (const pid of planIds) {
       const planNodes = new Set();
-      let nextKey = null;
-      do {
-        let url = `${lcd}/sentinel/node/v3/nodes?plan_id=${pid}&status=1&pagination.limit=200`;
-        if (nextKey) url += `&pagination.key=${encodeURIComponent(nextKey)}`;
-        const r = await fetch(url, { signal: AbortSignal.timeout(15000) });
-        const d = await r.json();
-        for (const n of (d.nodes || [])) planNodes.add(n.address);
-        nextKey = d.pagination?.next_key || null;
-      } while (nextKey);
+
+      if (rpcClient) {
+        // RPC: single request, up to 500 nodes per plan
+        try {
+          const nodes = await rpcQueryNodesForPlan(rpcClient, BigInt(pid), { status: 1, limit: 500 });
+          for (const n of nodes) planNodes.add(n.address);
+        } catch {
+          // Fall through to LCD for this plan
+        }
+      }
+
+      if (planNodes.size === 0) {
+        // LCD fallback: paginated fetch
+        let nextKey = null;
+        do {
+          let url = `${lcd}/sentinel/node/v3/nodes?plan_id=${pid}&status=1&pagination.limit=200`;
+          if (nextKey) url += `&pagination.key=${encodeURIComponent(nextKey)}`;
+          const r = await fetch(url, { signal: AbortSignal.timeout(15000) });
+          const d = await r.json();
+          for (const n of (d.nodes || [])) planNodes.add(n.address);
+          nextKey = d.pagination?.next_key || null;
+        } while (nextKey);
+      }
+
       planNodeSets[pid] = planNodes;
     }
 
@@ -144,7 +412,8 @@ export async function fetchPlanMembership(nodes, broadcast) {
     }
 
     const inPlan = nodes.filter(n => n.planIds.length > 0).length;
-    if (broadcast) broadcast('log', { msg: `Plans: ${Object.keys(planNodeSets).length} active plans, ${inPlan} nodes in at least one plan` });
+    const rpcNote = rpcClient ? ' (RPC+LCD)' : ' (LCD)';
+    if (broadcast) broadcast('log', { msg: `Plans: ${Object.keys(planNodeSets).length} active plans, ${inPlan} nodes in at least one plan${rpcNote}` });
   } catch (err) {
     if (broadcast) broadcast('log', { msg: `Plan lookup failed (non-critical): ${err.message}` });
   }
@@ -156,10 +425,9 @@ export async function discoverPlans(broadcast, opts = {}) {
   const lcd = await ensureLcd();
   try {
     const plans = await sdkDiscoverPlans(lcd, opts);
-    if (broadcast) broadcast('log', { msg: `📋 Discovered ${plans.length} active plans` });
+    if (broadcast) broadcast('log', { msg: `Discovered ${plans.length} active plans` });
     return plans;
   } catch (err) {
-    // Fallback to local implementation if SDK fails
     if (broadcast) broadcast('log', { msg: `Plan discovery failed: ${err.message}` });
     return [];
   }

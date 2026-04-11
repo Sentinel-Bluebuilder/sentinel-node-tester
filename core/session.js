@@ -12,7 +12,13 @@ import { DENOM, GIGS, CREDS_FILE, SESSION_MAP_TTL, V3_MSG_TYPE } from './constan
 import { signAndBroadcastRetry, assertIsDeliverTxSuccess } from './wallet.js';
 import { getActiveLcd } from './chain.js';
 import { sleep } from '../protocol/speedtest.js';
-import { extractAllSessionIds as sdkExtractAllSessionIds } from 'sentinel-dvpn-sdk';
+import {
+  extractAllSessionIds as sdkExtractAllSessionIds,
+  markSessionPoisoned as sdkMarkPoisoned,
+  isSessionPoisoned as sdkIsPoisoned,
+  querySessions as sdkQuerySessions,
+  querySessionAllocation as sdkQueryAllocation,
+} from 'sentinel-dvpn-sdk';
 
 // ─── Session Credential Cache (disk-persistent) ─────────────────────────────
 let credentialCache = {};
@@ -139,7 +145,7 @@ export async function findExistingSession(nodeAddr, walletAddress, broadcast) {
     return entry ? entry.sessionId : null;
   } catch (err) {
     if (err?.name !== 'AbortError' && !/timeout|ECONNREFUSED|ENOTFOUND/i.test(err?.message || '')) {
-      if (broadcast) broadcast('log', { msg: `⚠ findExistingSession error: ${err.message}` });
+      if (broadcast) broadcast('log', { msg: `⚠ findExistingSession error: ${err?.message}` });
     }
   }
   return null;
