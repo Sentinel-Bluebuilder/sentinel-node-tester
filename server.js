@@ -11,9 +11,18 @@ import { existsSync } from 'fs';
 
 import { MNEMONIC, DENOM, GAS_PRICE, PORT, LCD_ENDPOINTS, PROJECT_ROOT, DNS_PRESETS, ACTIVE_DNS, setActiveDns } from './core/constants.js';
 import { cachedWalletSetup, createFreshClient } from './core/wallet.js';
-import { ensureLcd, getActiveLcd } from './core/chain.js';
-import { createState, runAudit, runRetestSkips, runPlanTest, getResults, saveResults } from './audit/pipeline.js';
-import { emergencyCleanupSync, watchdogCheck, WG_AVAILABLE, IS_ADMIN } from './platforms/windows/wireguard.js';
+import { ensureLcd, getActiveLcd, cleanupRpc } from './core/chain.js';
+import { createState, runAudit, runRetestSkips, runPlanTest, getResults, saveResults, setActiveRunDir } from './audit/pipeline.js';
+// Platform-aware WireGuard import — Windows has full implementation, others get stubs
+let emergencyCleanupSync, watchdogCheck, WG_AVAILABLE, IS_ADMIN;
+if (process.platform === 'win32') {
+  ({ emergencyCleanupSync, watchdogCheck, WG_AVAILABLE, IS_ADMIN } = await import('./platforms/windows/wireguard.js'));
+} else {
+  emergencyCleanupSync = () => {};
+  watchdogCheck = () => {};
+  WG_AVAILABLE = false;
+  IS_ADMIN = process.getuid?.() === 0 || false;
+}
 import { loadTransportCache, getCacheStats } from './core/transport-cache.js';
 
 import { DirectSecp256k1HdWallet } from '@cosmjs/proto-signing';
@@ -25,7 +34,7 @@ process.env.PATH = path.join(__dirname, 'bin') + path.delimiter + (process.env.P
 // ─── WireGuard Safety: cleanup on ANY exit ──────────────────────────────────
 emergencyCleanupSync();
 
-function onProcessExit() { emergencyCleanupSync(); }
+function onProcessExit() { cleanupRpc(); emergencyCleanupSync(); }
 process.on('exit', onProcessExit);
 process.on('SIGINT', () => { onProcessExit(); process.exit(130); });
 process.on('SIGTERM', () => { onProcessExit(); process.exit(143); });
@@ -319,12 +328,18 @@ app.post('/api/start', async (req, res) => {
   // Clear state snapshot for fresh test
   try { _wfs(STATE_SNAPSHOT_FILE, '{}', 'utf8'); } catch { }
 
+  // Create run directory and set it as active — results save here continuously
+  const newRunDir = path.join(RUNS_DIR, `test-${String(newNum).padStart(3, '0')}`);
+  try { _mkd(newRunDir, { recursive: true }); } catch { }
+  setActiveRunDir(newRunDir);
+
   // Update runs index with new test
   const idx2 = loadRunsIndex();
   idx2.activeRun = newNum;
   saveRunsIndex(idx2);
 
-  broadcast('log', { msg: `🚀 Starting Test #${newNum} (${state.activeSDK.toUpperCase()} SDK, ${process.platform === 'win32' ? 'Windows' : process.platform})` });
+  const SDK_LABELS = { js: 'Blue JS', csharp: 'Blue C#', tkd: 'TKD JS' };
+  broadcast('log', { msg: `🚀 Starting Test #${newNum} (${SDK_LABELS[state.activeSDK] || state.activeSDK} SDK, ${process.platform === 'win32' ? 'Windows' : process.platform})` });
   res.json({ ok: true, testNumber: newNum });
   runAudit(false, state, broadcast).then(() => {
     saveCurrentRun(`Test #${newNum}`);
@@ -343,6 +358,11 @@ app.post('/api/resume', async (req, res) => {
   const results = getResults();
   if (results.length === 0) return res.json({ error: 'No results to resume from. Use Start to begin a new test.' });
   state.stopRequested = false;
+  // Ensure run directory exists and is active for continuous saves
+  const resumeRunDir = path.join(RUNS_DIR, `test-${String(state.activeRunNumber).padStart(3, '0')}`);
+  try { _mkd(resumeRunDir, { recursive: true }); } catch { }
+  setActiveRunDir(resumeRunDir);
+
   broadcast('log', { msg: `▶ Resuming Test #${state.activeRunNumber} from node ${results.length + 1} (${results.length} already tested, SDK: ${state.activeSDK.toUpperCase()})` });
   res.json({ ok: true, testNumber: state.activeRunNumber, resumeFrom: results.length });
   runAudit(true, state, broadcast).then(() => {
@@ -401,6 +421,7 @@ app.post('/api/retest-fails', async (req, res) => {
   });
 });
 
+// DEPRECATED: Plan testing is WIP — hidden from dashboard, endpoint still functional for API callers
 app.post('/api/test-plan', async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
@@ -616,19 +637,80 @@ app.post('/api/runs/load/:num', (req, res) => {
 // ─── SDK Toggle ─────────────────────────────────────────────────────────────
 app.post('/api/sdk', (req, res) => {
   const { sdk } = req.body;
-  if (sdk === 'js' || sdk === 'csharp') {
+  const SDK_LABELS = { js: 'Blue JS', csharp: 'Blue C#', tkd: 'TKD JS (Official)' };
+  if (SDK_LABELS[sdk]) {
     state.activeSDK = sdk;
     try { _wfs(SDK_PREF_FILE, sdk, 'utf8'); } catch {}
     broadcast('state', { state });
-    broadcast('log', { msg: `SDK switched to ${sdk === 'js' ? 'JavaScript' : 'C#'}` });
+    broadcast('log', { msg: `SDK switched to ${SDK_LABELS[sdk]}` });
     res.json({ ok: true, sdk });
   } else {
-    res.status(400).json({ error: 'Invalid SDK. Use "js" or "csharp"' });
+    res.status(400).json({ error: 'Invalid SDK. Use "js", "csharp", or "tkd"' });
   }
 });
 
 app.get('/api/sdk', (req, res) => {
   res.json({ sdk: state.activeSDK });
+});
+
+// ─── Health Check (prelaunch validation for AI/automation) ─────────────────
+app.get('/api/health', async (req, res) => {
+  const { checkV2Ray } = process.platform === 'win32'
+    ? await import('./platforms/windows/v2ray.js')
+    : { checkV2Ray: async () => { try { const { execSync } = await import('child_process'); execSync('which v2ray', { stdio: 'pipe' }); return true; } catch { return false; } } };
+  const v2ray = await checkV2Ray();
+  const issues = [];
+  if (!MNEMONIC) issues.push('MNEMONIC not set in .env — copy .env.example to .env and add your wallet mnemonic');
+  if (!IS_ADMIN && WG_AVAILABLE) issues.push('Not running as Administrator — WireGuard nodes will fail. Use SentinelAudit.vbs (Windows) or sudo (macOS/Linux)');
+  if (!v2ray) issues.push('V2Ray binary not found — download from https://github.com/v2fly/v2ray-core/releases and place in bin/');
+  if (!WG_AVAILABLE && process.platform === 'win32') issues.push('WireGuard not installed — install from https://www.wireguard.com/install/');
+  res.json({
+    status: issues.length === 0 ? 'ready' : 'issues',
+    platform: process.platform,
+    admin: IS_ADMIN,
+    mnemonic: MNEMONIC ? 'set' : 'missing',
+    wireguard: WG_AVAILABLE,
+    v2ray,
+    sdk: state.activeSDK,
+    balance: state.balance || 'unknown',
+    issues,
+  });
+});
+
+// ─── Cross-SDK Comparison Data ─────────────────────────────────────────────
+app.get('/api/cross-sdk', (req, res) => {
+  // Build a map of nodeAddress → { sdk: { passed, speed, error } } from all saved runs
+  const map = {};
+  const idx = loadRunsIndex();
+  for (const run of (idx.runs || [])) {
+    const runDir = path.join(RUNS_DIR, `test-${String(run.number).padStart(3, '0')}`);
+    const rFile = path.join(runDir, 'results.json');
+    if (!existsSync(rFile)) continue;
+    let results;
+    try { results = JSON.parse(_rfs(rFile, 'utf8')); } catch { continue; }
+    const sdk = run.sdk || 'js';
+    for (const r of results) {
+      if (!r.address) continue;
+      if (!map[r.address]) map[r.address] = {};
+      const passed = r.actualMbps != null && r.actualMbps > 0;
+      // Keep best result per SDK per node
+      if (!map[r.address][sdk] || (passed && !map[r.address][sdk].passed)) {
+        map[r.address][sdk] = { passed, speed: r.actualMbps, error: r.error?.slice(0, 60) || null };
+      }
+    }
+  }
+  // Also include current live results
+  const currentResults = getResults();
+  const currentSdk = state.activeSDK || 'js';
+  for (const r of currentResults) {
+    if (!r.address) continue;
+    if (!map[r.address]) map[r.address] = {};
+    const passed = r.actualMbps != null && r.actualMbps > 0;
+    if (!map[r.address][currentSdk] || (passed && !map[r.address][currentSdk].passed)) {
+      map[r.address][currentSdk] = { passed, speed: r.actualMbps, error: r.error?.slice(0, 60) || null };
+    }
+  }
+  res.json(map);
 });
 
 // ─── DNS Configuration ──────────────────────────────────────────────────────

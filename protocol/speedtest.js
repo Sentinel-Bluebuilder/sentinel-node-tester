@@ -18,12 +18,15 @@ import {
   speedtestDirect,
   speedtestViaSocks5,
   resolveSpeedtestIPs,
+  flushSpeedTestDnsCache,
+  compareSpeedTests,
+  SPEEDTEST_DEFAULTS,
 } from 'sentinel-dvpn-sdk';
 
 // Re-export SDK functions
-export { speedtestDirect, speedtestViaSocks5, resolveSpeedtestIPs };
+export { speedtestDirect, speedtestViaSocks5, resolveSpeedtestIPs, flushSpeedTestDnsCache, compareSpeedTests, SPEEDTEST_DEFAULTS };
 
-// resolveCfHost not exported from npm SDK yet — provide local stub
+// resolveCfHost: delegates to SDK's DNS resolution
 export function resolveCfHost() { return resolveSpeedtestIPs().then(ips => ips?.[0] || null).catch(() => null); }
 
 // Re-export sleep

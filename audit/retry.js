@@ -64,6 +64,14 @@ export async function testWithRetry(testFn, broadcast, state, nodeAddr) {
       return { result, retried };
     } catch (err) {
       lastErr = err;
+
+      // Stop requested — exit immediately, not a node failure
+      if (err.message === 'Stop requested' || state.stopRequested) {
+        lastErr = err;
+        lastErr._stopRequested = true;
+        break;
+      }
+
       const failType = classifyFailure(err);
 
       // Insufficient balance — pass through to pipeline for pause handling

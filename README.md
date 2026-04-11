@@ -29,8 +29,16 @@ Connects to the Sentinel blockchain, discovers every active dVPN node, pays for 
 ### 1. Node Performance
 Test any dVPN node for actual bandwidth. Measures download speed through a real VPN tunnel against Cloudflare CDN with adaptive fallback.
 
-### 2. SDK Validation
-Toggle between JavaScript and C# SDK implementations. Same nodes, same protocol, different code paths. Every difference reveals an SDK bug.
+### 2. Multi-SDK Validation
+Toggle between three SDK implementations from the dashboard:
+
+| SDK | Label | Package | Code Path |
+|-----|-------|---------|-----------|
+| **Blue JS** | Our JavaScript SDK | [`sentinel-dvpn-sdk`](https://www.npmjs.com/package/sentinel-dvpn-sdk) | Status + handshake + config |
+| **Blue C#** | Our C# SDK | `SentinelBridge.exe` | Status + handshake via CLI bridge |
+| **TKD JS** | Official Sentinel SDK by [TKD Alex](https://github.com/sentinel-official/sentinel-js-sdk) | [`@sentinel-official/sentinel-js-sdk`](https://www.npmjs.com/package/@sentinel-official/sentinel-js-sdk) | Status (nodeInfo) + handshake + V2Ray/WG classes |
+
+Same nodes, same protocol, different code paths. Every difference reveals an SDK bug.
 
 ### 3. Protocol Compliance
 Exercises the full Sentinel v3 pipeline end-to-end:
@@ -101,6 +109,84 @@ The VBS script handles admin elevation automatically.
 
 ---
 
+## Integrate Into Your App
+
+The easy API gives you 3 functions — no server, no dashboard, just results.
+
+```bash
+npm install sentinel-node-tester
+```
+
+### List online nodes (free, no wallet)
+```javascript
+import { getNodes } from 'sentinel-node-tester/easy';
+
+const nodes = await getNodes();
+console.log(`${nodes.length} nodes online`);
+
+// With filters
+const usNodes = await getNodes({ country: 'United States', type: 'wireguard', withStatus: true });
+```
+
+### Test a single node
+```javascript
+import { testOne } from 'sentinel-node-tester/easy';
+
+const result = await testOne({
+  mnemonic: 'your twelve words...',
+  node: 'sentnode1redactedxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+});
+
+if (result.pass) {
+  console.log(`${result.speed} Mbps via ${result.type} in ${result.country}`);
+} else {
+  console.log(`Failed: ${result.error}`);
+}
+```
+
+### Full audit (batch test all nodes)
+```javascript
+import { audit } from 'sentinel-node-tester/easy';
+
+const { results, summary } = await audit({
+  mnemonic: 'your twelve words...',
+  maxNodes: 50,  // 0 = all ~1000 nodes
+  onProgress: ({ tested, total, passed }) =>
+    console.log(`${tested}/${total} — ${passed} passed`),
+});
+
+console.log(`${summary.passRate} pass rate, avg ${summary.avgSpeed} Mbps`);
+```
+
+### Express middleware (add to existing server)
+```javascript
+import express from 'express';
+import { middleware } from 'sentinel-node-tester/easy';
+
+const app = express();
+app.use(express.json());
+app.use(middleware({ mnemonic: process.env.MNEMONIC }));
+
+// Now available:
+//   GET  /sentinel/nodes   — list online nodes
+//   POST /sentinel/test    — test node(s): { node: 'sentnode1...' } or { maxNodes: 10 }
+//   GET  /sentinel/health  — readiness check
+
+app.listen(3000);
+```
+
+### Cost
+| Operation | Cost |
+|-----------|------|
+| List nodes | Free |
+| Test 1 node | ~40 P2P (~$0.003) |
+| Test 50 nodes | ~2,000 P2P (~$0.15) |
+| Full audit (~1000 nodes) | ~700-800 P2P (~$2-3) |
+
+Get P2P tokens: [Osmosis DEX](https://app.osmosis.zone)
+
+---
+
 ## Dashboard
 
 Web dashboard at `http://localhost:3001`:
@@ -145,8 +231,11 @@ All functionality is available programmatically:
 | `GET` | `/api/runs/:num` | Get specific run results |
 | `POST` | `/api/runs/load/:num` | Load historical run |
 | `GET/POST` | `/api/dns` | DNS resolver config |
-| `GET/POST` | `/api/sdk` | SDK toggle (js/csharp) |
+| `GET/POST` | `/api/sdk` | SDK toggle (js/csharp/tkd) |
 | `GET` | `/api/transport-cache` | Transport intelligence stats |
+| `GET` | `/api/health` | Prelaunch readiness check |
+| `GET` | `/api/cross-sdk` | Cross-SDK comparison data |
+| `POST` | `/api/test-plan` | **WIP** — Plan-specific testing (not ready) |
 
 ---
 

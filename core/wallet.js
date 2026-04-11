@@ -14,7 +14,9 @@ import {
   createClient as sdkCreateClient,
   buildRegistry,
   broadcast as sdkBroadcast,
+  createSafeBroadcaster,
   RPC_ENDPOINTS as SDK_RPC_ENDPOINTS,
+  SDK_VERSION,
 } from 'sentinel-dvpn-sdk';
 import { RPC_ENDPOINTS as LOCAL_RPC_ENDPOINTS, GAS_PRICE as GAS_PRICE_STR } from './constants.js';
 
@@ -115,4 +117,4 @@ export async function signAndBroadcastRetry(client, address, messages, fee, broa
   }
 }
 
-export { assertIsDeliverTxSuccess };
+export { assertIsDeliverTxSuccess, createSafeBroadcaster, SDK_VERSION };

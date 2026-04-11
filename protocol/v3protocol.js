@@ -25,7 +25,13 @@ export {
   waitForPort,
   generateV2RayUUID,
   encodeMsgStartSession,
+  encodeMsgEndSession,
   encodeMsgStartSubscription,
   encodeMsgSubStartSession,
   validateCIDR,
+  // EncodeObject builders (return { typeUrl, value } for signAndBroadcast)
+  buildMsgStartSession,
+  buildMsgEndSession,
+  buildMsgStartSubscription,
+  buildMsgSubStartSession,
 } from 'sentinel-dvpn-sdk';

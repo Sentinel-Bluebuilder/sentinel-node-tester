@@ -11,7 +11,7 @@ export { testWithRetry } from './audit/retry.js';
 export { runAudit, runRetestSkips } from './audit/pipeline.js';
 
 // ─── Chain & Wallet ──────────────────────────────────────────────────────────
-export { getAllNodes, findWorkingLcd, getActiveLcd, queryNodeStatusDirect, invalidateNodeCache, discoverPlans, querySubscriptions, hasActiveSubscription } from './core/chain.js';
+export { getAllNodes, findWorkingLcd, getActiveLcd, queryNodeStatusDirect, invalidateNodeCache, discoverPlans, querySubscriptions, hasActiveSubscription, cleanupRpc } from './core/chain.js';
 export { signAndBroadcastRetry, assertIsDeliverTxSuccess } from './core/wallet.js';
 export {
   getCredential, saveCredential, clearCredential, clearAllCredentials,

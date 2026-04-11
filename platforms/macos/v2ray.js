@@ -1,6 +1,6 @@
 /**
- * Sentinel Node Tester — Windows V2Ray Process Management
- * Extracted from server.js testNode V2Ray section.
+ * Sentinel Node Tester — macOS V2Ray Process Management
+ * Same interface as platforms/windows/v2ray.js, adapted for macOS.
  */
 
 import { spawn, execSync } from 'child_process';
@@ -11,18 +11,36 @@ import os from 'os';
 import { PROJECT_ROOT } from '../../core/constants.js';
 
 // ─── V2Ray Binary Detection ─────────────────────────────────────────────────
-const LOCAL_V2RAY_EXE = path.join(PROJECT_ROOT, 'bin', 'v2ray.exe');
+const LOCAL_V2RAY = path.join(PROJECT_ROOT, 'bin', 'v2ray');
 
 export function getV2RayExe() {
-  if (existsSync(LOCAL_V2RAY_EXE)) return LOCAL_V2RAY_EXE;
-  return 'v2ray.exe';
+  if (existsSync(LOCAL_V2RAY)) return LOCAL_V2RAY;
+  // Homebrew locations
+  const brewPaths = [
+    '/usr/local/bin/v2ray',
+    '/opt/homebrew/bin/v2ray',
+  ];
+  for (const p of brewPaths) {
+    if (existsSync(p)) return p;
+  }
+  // Fall back to PATH lookup
+  try {
+    const result = execSync('which v2ray', { encoding: 'utf8', stdio: 'pipe' }).trim();
+    if (result) return result;
+  } catch {}
+  return 'v2ray';
 }
 
 export async function checkV2Ray() {
-  if (existsSync(LOCAL_V2RAY_EXE)) return true;
-  for (const cmd of ['v2ray version', 'v2ray.exe version']) {
-    try { execSync(cmd, { stdio: 'pipe' }); return true; } catch { }
-  }
+  if (existsSync(LOCAL_V2RAY)) return true;
+  try {
+    execSync('which v2ray', { stdio: 'pipe' });
+    return true;
+  } catch {}
+  try {
+    execSync('v2ray version', { stdio: 'pipe' });
+    return true;
+  } catch {}
   return false;
 }
 
@@ -56,12 +74,12 @@ export async function nextSocksPort() {
 // ─── Kill V2Ray by PID ──────────────────────────────────────────────────────
 export function killV2RayByPid(pid) {
   if (!pid) return;
-  try { execSync(`taskkill /F /PID ${pid} 2>nul`, { stdio: 'ignore' }); } catch { }
+  try { process.kill(pid, 'SIGKILL'); } catch {}
 }
 
-/** Kill all v2ray.exe processes — use ONLY for pre-test cleanup */
+/** Kill all v2ray processes — use ONLY for pre-test cleanup */
 export function killAllV2Ray() {
-  try { execSync('taskkill /F /IM v2ray.exe 2>nul', { stdio: 'ignore' }); } catch { }
+  try { execSync('pkill -9 -f v2ray 2>/dev/null || true', { stdio: 'ignore' }); } catch {}
 }
 
 /**
@@ -81,7 +99,7 @@ export async function spawnV2Ray(v2rayConfig, outbound, socksPort) {
     attemptApiPort = 10000 + Math.floor(Math.random() * 50000);
   }
   const attemptInbounds = v2rayConfig.inbounds.map(ib =>
-    ib.tag === 'api' ? { ...ib, port: attemptApiPort } : ib
+    ib.tag === 'api' ? { ...ib, port: attemptApiPort } : ib,
   );
   const cfgForAttempt = {
     ...v2rayConfig,
@@ -97,7 +115,7 @@ export async function spawnV2Ray(v2rayConfig, outbound, socksPort) {
   };
   writeFileSync(cfgPath, JSON.stringify(cfgForAttempt, null, 2));
 
-  const proc = spawn(v2rayExe, ['run', '-config', cfgPath], { stdio: 'pipe', windowsHide: true });
+  const proc = spawn(v2rayExe, ['run', '-config', cfgPath], { stdio: 'pipe' });
   let stderr = '';
   let stdout = '';
   proc.stderr?.on('data', d => { stderr += d.toString(); });
@@ -113,11 +131,11 @@ export async function spawnV2Ray(v2rayConfig, outbound, socksPort) {
 }
 
 /**
- * Clean up a V2Ray process — kill by proc.kill() then taskkill by PID as backup.
+ * Clean up a V2Ray process — kill by proc.kill() then SIGKILL by PID as backup.
  */
 export function cleanupV2Ray(proc) {
   if (!proc) return;
-  try { proc.kill(); } catch { }
+  try { proc.kill(); } catch {}
   if (proc.pid) {
     killV2RayByPid(proc.pid);
   }
