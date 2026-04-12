@@ -679,7 +679,7 @@ app.get('/api/health', async (req, res) => {
 
 // ─── Cross-SDK Comparison Data ─────────────────────────────────────────────
 app.get('/api/cross-sdk', (req, res) => {
-  // Build a map of nodeAddress → { sdk: { passed, speed, error } } from all saved runs
+  // Build a map of nodeAddress → { sdk: { passed, speed, error, run, date } } from all saved runs
   const map = {};
   const idx = loadRunsIndex();
   for (const run of (idx.runs || [])) {
@@ -689,25 +689,27 @@ app.get('/api/cross-sdk', (req, res) => {
     let results;
     try { results = JSON.parse(_rfs(rFile, 'utf8')); } catch { continue; }
     const sdk = run.sdk || 'js';
+    const runDate = run.date || '';
+    const runNum = run.number;
     for (const r of results) {
       if (!r.address) continue;
       if (!map[r.address]) map[r.address] = {};
       const passed = r.actualMbps != null && r.actualMbps > 0;
-      // Keep best result per SDK per node
       if (!map[r.address][sdk] || (passed && !map[r.address][sdk].passed)) {
-        map[r.address][sdk] = { passed, speed: r.actualMbps, error: r.error?.slice(0, 60) || null };
+        map[r.address][sdk] = { passed, speed: r.actualMbps, error: r.error?.slice(0, 60) || null, run: runNum, date: runDate };
       }
     }
   }
   // Also include current live results
   const currentResults = getResults();
   const currentSdk = state.activeSDK || 'js';
+  const now = new Date().toISOString();
   for (const r of currentResults) {
     if (!r.address) continue;
     if (!map[r.address]) map[r.address] = {};
     const passed = r.actualMbps != null && r.actualMbps > 0;
     if (!map[r.address][currentSdk] || (passed && !map[r.address][currentSdk].passed)) {
-      map[r.address][currentSdk] = { passed, speed: r.actualMbps, error: r.error?.slice(0, 60) || null };
+      map[r.address][currentSdk] = { passed, speed: r.actualMbps, error: r.error?.slice(0, 60) || null, run: state.activeRunNumber, date: now };
     }
   }
   res.json(map);

@@ -575,7 +575,7 @@
           <option value="">Select Plan...</option>
         </select>
         <button class="btn btn-plan" id="btnPlanTest" onclick="testPlan()" style="display:none" title="WIP — Plan testing is under development">Test Plan</button>
-        <button class="btn btn-clear" onclick="clearResults()">Reset</button>
+        <!-- Reset removed: use New Test instead (saves data before clearing) -->
         <button class="btn-help" onclick="showInfoPopup()" title="Dashboard guide">?</button>
       </div>
     </div>
@@ -1137,13 +1137,21 @@
         const other = window._otherSdkMap[r.address];
         if (other) {
           const parts = [];
+          const now = Date.now();
           for (const [sdk, data] of Object.entries(other)) {
             if (sdk === sdkLabel) continue;
             const col = sdkColors[sdk] || sdkColors.js;
+            // Check if result is stale (>24h old)
+            const age = data.date ? Math.round((now - new Date(data.date).getTime()) / 3600000) : 999;
+            const stale = age > 24;
+            const ageLabel = age < 1 ? '<1h' : age < 24 ? age + 'h' : Math.round(age/24) + 'd';
+            const runLabel = data.run ? '#' + data.run : '';
             if (data.passed) {
-              parts.push(`<span title="${col.label}: ${data.speed} Mbps" style="color:#00c853;cursor:help">${col.label}&#10003;</span>`);
+              const opacity = stale ? '0.5' : '1';
+              const warn = stale ? ' (stale: ' + ageLabel + ' ago)' : '';
+              parts.push(`<span title="${col.label}: ${data.speed} Mbps | Run ${runLabel} ${ageLabel} ago${warn}" style="color:#00c853;cursor:help;opacity:${opacity}">${col.label}&#10003;</span>`);
             } else {
-              parts.push(`<span title="${col.label}: ${data.error}" style="color:#ff1744;cursor:help">${col.label}&#10007;</span>`);
+              parts.push(`<span title="${col.label}: ${(data.error||'fail').slice(0,40)} | Run ${runLabel} ${ageLabel} ago" style="color:#ff1744;cursor:help">${col.label}&#10007;</span>`);
             }
           }
           if (parts.length > 0) otherSdkHtml = parts.join(' ');
