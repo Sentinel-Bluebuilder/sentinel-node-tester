@@ -272,14 +272,17 @@ export async function getAllNodes(broadcast) {
   // Try RPC first
   const rpcNodes = await rpcFetchAllNodes(broadcast);
   if (rpcNodes && rpcNodes.length > 0) {
-    const result = rpcNodes.map(n => ({
-      address: n.address,
-      remoteUrl: '',
-      remoteAddrs: (n.remote_addrs || []).map(a => a.startsWith('http') ? a : `https://${a}`),
-      gigabyte_prices: n.gigabyte_prices || [],
-      status: 1,
-      planIds: [],
-    }));
+    const result = rpcNodes.map(n => {
+      const addrs = (n.remote_addrs || []).map(a => a.startsWith('http') ? a : `https://${a}`);
+      return {
+        address: n.address,
+        remoteUrl: addrs[0] || '',
+        remoteAddrs: addrs,
+        gigabyte_prices: n.gigabyte_prices || [],
+        status: 1,
+        planIds: [],
+      };
+    });
     if (broadcast) broadcast('log', { msg: `  ${result.length} nodes fetched via RPC (${_rpcUrl || 'cached'})` });
     return result;
   }
