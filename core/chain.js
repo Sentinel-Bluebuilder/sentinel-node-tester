@@ -55,7 +55,7 @@ let _rpcUrl = null;
  * Get or create a cached RPC query client with automatic fallback.
  * Returns null if all RPC endpoints fail (caller should use LCD fallback).
  */
-async function getRpcClient() {
+export async function getRpcClient() {
   if (_rpcClient) return _rpcClient;
   try {
     const result = await createRpcQueryClientWithFallback();
@@ -156,8 +156,9 @@ async function rpcFetchAllNodesPaginated(client, broadcast) {
 }
 
 // ─── Minimal Protobuf Helpers (for raw ABCI pagination) ────────────────────
+// Exported so session.js can reuse for RPC session queries.
 
-function encodeRpcVarint(value) {
+export function encodeRpcVarint(value) {
   let n = BigInt(value);
   const bytes = [];
   do {
@@ -169,25 +170,25 @@ function encodeRpcVarint(value) {
   return new Uint8Array(bytes);
 }
 
-function encodeRpcVarintField(fieldNum, value) {
+export function encodeRpcVarintField(fieldNum, value) {
   if (!value && value !== 0) return new Uint8Array(0);
   const tag = encodeRpcVarint((BigInt(fieldNum) << 3n) | 0n);
   const val = encodeRpcVarint(value);
   return concatBytes([tag, val]);
 }
 
-function encodeRpcBytes(fieldNum, data) {
+export function encodeRpcBytes(fieldNum, data) {
   const tag = encodeRpcVarint((BigInt(fieldNum) << 3n) | 2n);
   const len = encodeRpcVarint(data.length);
   return concatBytes([tag, len, data]);
 }
 
-function encodeRpcEmbedded(fieldNum, bytes) {
+export function encodeRpcEmbedded(fieldNum, bytes) {
   if (!bytes || bytes.length === 0) return new Uint8Array(0);
   return encodeRpcBytes(fieldNum, bytes);
 }
 
-function concatBytes(arrays) {
+export function concatBytes(arrays) {
   const totalLen = arrays.reduce((sum, a) => sum + a.length, 0);
   const result = new Uint8Array(totalLen);
   let offset = 0;
@@ -198,7 +199,7 @@ function concatBytes(arrays) {
   return result;
 }
 
-function decodeRpcProto(buf) {
+export function decodeRpcProto(buf) {
   const fields = {};
   let i = 0;
   while (i < buf.length) {
@@ -240,7 +241,7 @@ function decodeRpcProto(buf) {
   return fields;
 }
 
-function decodeRpcString(data) {
+export function decodeRpcString(data) {
   return new TextDecoder().decode(data);
 }
 

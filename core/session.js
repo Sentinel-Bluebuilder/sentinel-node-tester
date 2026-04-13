@@ -10,7 +10,11 @@
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { DENOM, GIGS, CREDS_FILE, SESSION_MAP_TTL, V3_MSG_TYPE } from './constants.js';
 import { signAndBroadcastRetry, assertIsDeliverTxSuccess } from './wallet.js';
-import { getActiveLcd } from './chain.js';
+import {
+  getActiveLcd, getRpcClient,
+  encodeRpcVarint, encodeRpcVarintField, encodeRpcBytes, encodeRpcEmbedded,
+  concatBytes, decodeRpcProto, decodeRpcString,
+} from './chain.js';
 import { sleep } from '../protocol/speedtest.js';
 import {
   extractAllSessionIds as sdkExtractAllSessionIds,
@@ -88,49 +92,162 @@ export function addToSessionMap(nodeAddr, sessionId) {
   sessionMap.set(nodeAddr, { sessionId, maxBytes: GIGS * 1_000_000_000, usedBytes: 0 });
 }
 
+// ─── RPC Session Decoder ────────────────────────────────────────────────────
+// BaseSession proto fields (sentinel.session.v3.BaseSession):
+//   1=id(uint64), 2=acc_address(string), 3=node_address(string),
+//   4=download_bytes(string), 5=upload_bytes(string), 6=max_bytes(string),
+//   7=duration, 8=max_duration, 9=status(enum), 10=inactive_at, 11=start_at, 12=status_at
+// Session wrappers: field 1 = base_session (embedded)
+
+function decodeRpcBaseSession(buf) {
+  const f = decodeRpcProto(buf);
+  return {
+    id: f[1]?.[0] ? f[1][0].value : 0n,
+    acc_address: f[2]?.[0] ? decodeRpcString(f[2][0].value) : '',
+    node_address: f[3]?.[0] ? decodeRpcString(f[3][0].value) : '',
+    download_bytes: f[4]?.[0] ? decodeRpcString(f[4][0].value) : '0',
+    upload_bytes: f[5]?.[0] ? decodeRpcString(f[5][0].value) : '0',
+    max_bytes: f[6]?.[0] ? decodeRpcString(f[6][0].value) : '0',
+    status: f[9]?.[0] ? Number(f[9][0].value) : 0,
+  };
+}
+
+function decodeRpcSession(anyBuf) {
+  // Unwrap google.protobuf.Any: field 1 = type_url, field 2 = value
+  const anyFields = decodeRpcProto(anyBuf);
+  const innerBuf = anyFields[2]?.[0]?.value;
+  if (!innerBuf) return null;
+  // Session wrapper: field 1 = base_session (embedded)
+  const sessionFields = decodeRpcProto(innerBuf);
+  if (!sessionFields[1]?.[0]) return null;
+  return decodeRpcBaseSession(sessionFields[1][0].value);
+}
+
 /**
- * Fetch ALL active sessions for this wallet with full pagination.
+ * Fetch sessions for account via RPC (ABCI query) with pagination.
+ * Returns array of decoded session objects, or null if RPC unavailable.
+ */
+async function rpcFetchAllSessions(walletAddress) {
+  const client = await getRpcClient();
+  if (!client) return null;
+
+  const allSessions = [];
+  let nextKeyBytes = null;
+  let page = 0;
+  const PAGE_SIZE = 100;
+  const MAX_PAGES = 20;
+
+  try {
+    do {
+      const paginationParts = [];
+      if (nextKeyBytes) {
+        paginationParts.push(encodeRpcBytes(1, nextKeyBytes));
+      }
+      paginationParts.push(encodeRpcVarintField(3, PAGE_SIZE));
+
+      const request = concatBytes([
+        encodeRpcBytes(1, new TextEncoder().encode(walletAddress)), // address (string = field 1)
+        encodeRpcEmbedded(2, concatBytes(paginationParts)),         // pagination
+      ]);
+
+      const result = await client.queryClient.queryAbci(
+        '/sentinel.session.v3.QueryService/QuerySessionsForAccount',
+        request,
+      );
+      const resp = new Uint8Array(result.value);
+      if (resp.length <= 2) break; // empty pagination-only response
+
+      const fields = decodeRpcProto(resp);
+
+      // Field 1 = repeated google.protobuf.Any (sessions)
+      const sessions = (fields[1] || []).map(entry => decodeRpcSession(entry.value)).filter(Boolean);
+      allSessions.push(...sessions);
+      page++;
+
+      // Extract pagination response (field 2) for next_key
+      nextKeyBytes = null;
+      if (fields[2]?.[0]) {
+        const pagResp = decodeRpcProto(fields[2][0].value);
+        if (pagResp[1]?.[0]?.value?.length > 0) {
+          nextKeyBytes = pagResp[1][0].value;
+        }
+      }
+
+      if (sessions.length < PAGE_SIZE) break;
+    } while (nextKeyBytes && page < MAX_PAGES);
+
+    return allSessions;
+  } catch {
+    return null; // signal LCD fallback
+  }
+}
+
+/**
+ * Fetch ALL active sessions for this wallet.
+ * RPC primary (protobuf, faster), LCD fallback (REST/JSON).
  * Builds a Map<nodeAddr, {sessionId, maxBytes, usedBytes}> for instant O(1) lookups.
  */
 export async function buildSessionMap(walletAddress, broadcast) {
-  const activeLcd = getActiveLcd();
-  if (!activeLcd || !walletAddress) return;
+  if (!walletAddress) return;
   const map = new Map();
+
+  // Helper to populate map from decoded sessions
+  function processSession(bs) {
+    const sNode = bs.node_address;
+    if (!sNode) return;
+    if (bs.acc_address && bs.acc_address !== walletAddress) return;
+    // status: 1 = active (RPC returns int), 'active' (LCD returns string)
+    if (bs.status && bs.status !== 1 && bs.status !== 'active') return;
+    const maxBytes = parseInt(bs.max_bytes || '0');
+    const used = parseInt(bs.download_bytes || '0') + parseInt(bs.upload_bytes || '0');
+    if (maxBytes > 0 && used >= maxBytes) return;
+    const sid = BigInt(bs.id);
+    if (isSessionPoisoned(sNode, String(sid))) return;
+    const existing = map.get(sNode);
+    if (!existing || (maxBytes - used) > (existing.maxBytes - existing.usedBytes)) {
+      map.set(sNode, { sessionId: sid, maxBytes, usedBytes: used });
+    }
+  }
+
+  // Try RPC first
+  const rpcSessions = await rpcFetchAllSessions(walletAddress);
+  if (rpcSessions) {
+    for (const bs of rpcSessions) processSession(bs);
+    sessionMap = map;
+    sessionMapAt = Date.now();
+    if (broadcast) broadcast('log', { msg: `  ♻ Session map: ${map.size} reusable sessions (${rpcSessions.length} fetched via RPC)` });
+    return;
+  }
+
+  // LCD fallback
+  const activeLcd = getActiveLcd();
+  if (!activeLcd) return;
   let nextKey = null;
   let totalFetched = 0;
-  let chainTotal = null;
   do {
     let url = `${activeLcd}/sentinel/session/v3/sessions?address=${walletAddress}&status=1&pagination.limit=200`;
-    if (!chainTotal) url += '&pagination.count_total=true';
     if (nextKey) url += `&pagination.key=${encodeURIComponent(nextKey)}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
     if (!res.ok) break;
     const data = await res.json();
-    if (data.pagination?.total) chainTotal = parseInt(data.pagination.total);
-    const sessions = data.sessions || [];
-    for (const s of sessions) {
+    for (const s of (data.sessions || [])) {
       const bs = s.base_session || s;
-      const sNode = bs.node_address || bs.node;
-      if (!sNode) continue;
-      const sAcct = bs.acc_address || bs.address;
-      if (sAcct && sAcct !== walletAddress) continue;
-      if (bs.status && bs.status !== 'active') continue;
-      const maxBytes = parseInt(bs.max_bytes || '0');
-      const used = parseInt(bs.download_bytes || '0') + parseInt(bs.upload_bytes || '0');
-      if (maxBytes > 0 && used >= maxBytes) continue;
-      const sid = BigInt(bs.id);
-      if (isSessionPoisoned(sNode, String(sid))) continue;
-      const existing = map.get(sNode);
-      if (!existing || (maxBytes - used) > (existing.maxBytes - existing.usedBytes)) {
-        map.set(sNode, { sessionId: sid, maxBytes, usedBytes: used });
-      }
+      processSession({
+        id: bs.id,
+        node_address: bs.node_address || bs.node,
+        acc_address: bs.acc_address || bs.address,
+        status: bs.status,
+        max_bytes: bs.max_bytes,
+        download_bytes: bs.download_bytes,
+        upload_bytes: bs.upload_bytes,
+      });
     }
-    totalFetched += sessions.length;
+    totalFetched += (data.sessions || []).length;
     nextKey = data.pagination?.next_key || null;
   } while (nextKey);
   sessionMap = map;
   sessionMapAt = Date.now();
-  if (broadcast) broadcast('log', { msg: `  ♻ Session map: ${map.size} reusable sessions (${totalFetched} fetched, ${chainTotal || '?'} on chain)` });
+  if (broadcast) broadcast('log', { msg: `  ♻ Session map: ${map.size} reusable sessions (${totalFetched} fetched via LCD)` });
 }
 
 export async function findExistingSession(nodeAddr, walletAddress, broadcast) {
@@ -307,15 +424,26 @@ export async function submitBatchPayment(client, account, denom, gigabytes, batc
 
 /**
  * Poll until all node sessions appear on chain, or timeout.
+ * Uses RPC primary, LCD fallback.
  */
 export async function waitForBatchSessions(nodeAddrs, walletAddr, maxWaitMs = 20000) {
-  const activeLcd = getActiveLcd();
-  if (!activeLcd || nodeAddrs.length === 0) return;
+  if (nodeAddrs.length === 0) return;
   const pending = new Set(nodeAddrs);
   const deadline = Date.now() + maxWaitMs;
   while (pending.size > 0 && Date.now() < deadline) {
     await sleep(2000);
     try {
+      // Try RPC first
+      const rpcSessions = await rpcFetchAllSessions(walletAddr);
+      if (rpcSessions) {
+        for (const bs of rpcSessions) {
+          if (pending.has(bs.node_address)) pending.delete(bs.node_address);
+        }
+        continue;
+      }
+      // LCD fallback
+      const activeLcd = getActiveLcd();
+      if (!activeLcd) continue;
       const url = `${activeLcd}/sentinel/session/v3/sessions?address=${walletAddr}&status=1&pagination.limit=200`;
       const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
       if (!res.ok) continue;
@@ -325,19 +453,50 @@ export async function waitForBatchSessions(nodeAddrs, walletAddr, maxWaitMs = 20
         const n = bs.node_address || bs.node;
         if (pending.has(n)) pending.delete(n);
       }
-    } catch { }
+    } catch { /* transient error — retry on next poll */ }
+  }
+}
+
+/**
+ * Query a single session by ID via RPC.
+ * Returns decoded base session or null.
+ */
+async function rpcQuerySession(sessionId) {
+  const client = await getRpcClient();
+  if (!client) return null;
+  try {
+    const request = encodeRpcVarintField(1, Number(sessionId));
+    const result = await client.queryClient.queryAbci(
+      '/sentinel.session.v3.QueryService/QuerySession',
+      request,
+    );
+    const resp = new Uint8Array(result.value);
+    if (resp.length <= 2) return null;
+    const fields = decodeRpcProto(resp);
+    // Field 1 = google.protobuf.Any (session)
+    if (!fields[1]?.[0]) return null;
+    return decodeRpcSession(fields[1][0].value);
+  } catch {
+    return null;
   }
 }
 
 export async function waitForSessionActive(nodeAddr, walletAddr, maxWaitMs = 20000, sessionId = null) {
   // If we have a session ID, query it directly — much faster than scanning all sessions
   if (sessionId) {
-    const activeLcd = getActiveLcd();
-    if (!activeLcd) return;
     const deadline = Date.now() + maxWaitMs;
     while (Date.now() < deadline) {
       await sleep(2000);
       try {
+        // Try RPC first
+        const rpcSession = await rpcQuerySession(sessionId);
+        if (rpcSession) {
+          if (rpcSession.status === 1) return; // 1 = active
+          continue;
+        }
+        // LCD fallback
+        const activeLcd = getActiveLcd();
+        if (!activeLcd) continue;
         const url = `${activeLcd}/sentinel/session/v3/sessions/${sessionId}`;
         const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
         if (res.ok) {
@@ -345,7 +504,7 @@ export async function waitForSessionActive(nodeAddr, walletAddr, maxWaitMs = 200
           const bs = data.session?.base_session || data.session || {};
           if (bs.status === 'active' || bs.status === 1) return;
         }
-      } catch { }
+      } catch { /* transient error — retry on next poll */ }
     }
     return;
   }
