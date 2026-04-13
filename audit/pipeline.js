@@ -13,7 +13,8 @@ import {
   V3_SUB_TYPE, V3_SUB_SESSION_TYPE,
 } from '../core/constants.js';
 import { cachedWalletSetup, createFreshClient, signAndBroadcastRetry } from '../core/wallet.js';
-import { getAllNodes, fetchPlanMembership, ensureLcd, getActiveLcd } from '../core/chain.js';
+import { getAllNodes, fetchPlanMembership, ensureLcd, getActiveLcd, getRpcClient } from '../core/chain.js';
+import { rpcQueryNode, rpcQueryNodesForPlan } from 'sentinel-dvpn-sdk';
 import {
   submitBatchPayment, waitForBatchSessions, waitForSessionActive,
   clearPoisonedSessions, clearPaidNodes, clearAllCredentials, invalidateSessionCache, parseNodePriceUdvpn,
@@ -809,27 +810,49 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
   const toTest = allNodes.filter(n => skipSet.has(n.address));
 
   // Direct lookup for nodes not found in paginated list (pagination can miss nodes)
+  // RPC primary (fast single-node lookup), LCD fallback
   const foundAddrs = new Set(toTest.map(n => n.address));
   const missingAddrs = skipAddrs.filter(a => !foundAddrs.has(a));
   if (missingAddrs.length > 0) {
     broadcast('log', { msg: `⚠ ${missingAddrs.length} nodes not in paginated list — doing direct lookup...` });
-    const activeLcd = getActiveLcd();
+    const rpcClient = await getRpcClient();
     for (const addr of missingAddrs) {
       try {
-        const res = await fetch(`${activeLcd}/sentinel/node/v3/nodes/${addr}`, { signal: AbortSignal.timeout(10000) });
-        const data = await res.json();
-        if (data.node) {
-          const rawAddrs = (data.node.remote_addrs || []).filter(Boolean);
+        let node = null;
+        // Try RPC first
+        if (rpcClient) {
+          node = await rpcQueryNode(rpcClient, addr);
+        }
+        if (node) {
+          const rawAddrs = (node.remote_addrs || []).filter(Boolean);
           const rawAddr = rawAddrs[0] || '';
           toTest.push({
-            address: data.node.address || addr,
+            address: node.address || addr,
             remoteUrl: rawAddr.startsWith('http') ? rawAddr : `https://${rawAddr}`,
             remoteAddrs: rawAddrs.map(a => a.startsWith('http') ? a : `https://${a}`),
-            gigabyte_prices: data.node.gigabyte_prices || [],
-            hourly_prices: data.node.hourly_prices || [],
+            gigabyte_prices: node.gigabyte_prices || [],
+            hourly_prices: node.hourly_prices || [],
             planIds: [],
           });
-          broadcast('log', { msg: `  ✓ Found ${addr.slice(0, 20)}… via direct lookup` });
+          broadcast('log', { msg: `  ✓ Found ${addr.slice(0, 20)}… via RPC` });
+        } else {
+          // LCD fallback
+          const activeLcd = getActiveLcd();
+          const res = await fetch(`${activeLcd}/sentinel/node/v3/nodes/${addr}`, { signal: AbortSignal.timeout(10000) });
+          const data = await res.json();
+          if (data.node) {
+            const rawAddrs = (data.node.remote_addrs || []).filter(Boolean);
+            const rawAddr = rawAddrs[0] || '';
+            toTest.push({
+              address: data.node.address || addr,
+              remoteUrl: rawAddr.startsWith('http') ? rawAddr : `https://${rawAddr}`,
+              remoteAddrs: rawAddrs.map(a => a.startsWith('http') ? a : `https://${a}`),
+              gigabyte_prices: data.node.gigabyte_prices || [],
+              hourly_prices: data.node.hourly_prices || [],
+              planIds: [],
+            });
+            broadcast('log', { msg: `  ✓ Found ${addr.slice(0, 20)}… via LCD fallback` });
+          }
         }
       } catch (e) {
         broadcast('log', { msg: `  ✗ ${addr.slice(0, 20)}… lookup failed: ${e.message?.slice(0, 50)}` });
@@ -999,20 +1022,32 @@ export async function runPlanTest(planId, state, broadcast) {
     return;
   }
 
-  // 2. Fetch plan nodes
-  const activeLcd = await ensureLcd();
+  // 2. Fetch plan nodes (RPC primary, LCD fallback)
   broadcast('log', { msg: `  Fetching plan ${planId} nodes...` });
   let planNodes = [];
   try {
-    let allPlanNodes = [], pnNextKey = null;
-    do {
-      let pnUrl = `${activeLcd}/sentinel/node/v3/plans/${planId}/nodes?pagination.limit=200`;
-      if (pnNextKey) pnUrl += `&pagination.key=${encodeURIComponent(pnNextKey)}`;
-      const nr = await fetch(pnUrl, { signal: AbortSignal.timeout(15000) });
-      const nd = await nr.json();
-      allPlanNodes.push(...(nd.nodes || []));
-      pnNextKey = nd.pagination?.next_key || null;
-    } while (pnNextKey);
+    let allPlanNodes = [];
+    // Try RPC first
+    const rpcClient = await getRpcClient();
+    if (rpcClient) {
+      try {
+        allPlanNodes = await rpcQueryNodesForPlan(rpcClient, planId, { limit: 500 });
+        broadcast('log', { msg: `  Fetched ${allPlanNodes.length} plan nodes via RPC` });
+      } catch { allPlanNodes = []; }
+    }
+    // LCD fallback if RPC failed
+    if (allPlanNodes.length === 0) {
+      const activeLcd = await ensureLcd();
+      let pnNextKey = null;
+      do {
+        let pnUrl = `${activeLcd}/sentinel/node/v3/plans/${planId}/nodes?pagination.limit=200`;
+        if (pnNextKey) pnUrl += `&pagination.key=${encodeURIComponent(pnNextKey)}`;
+        const nr = await fetch(pnUrl, { signal: AbortSignal.timeout(15000) });
+        const nd = await nr.json();
+        allPlanNodes.push(...(nd.nodes || []));
+        pnNextKey = nd.pagination?.next_key || null;
+      } while (pnNextKey);
+    }
     planNodes = allPlanNodes.map(n => {
       const rawAddr = (n.remote_addrs || [])[0] || '';
       return {
