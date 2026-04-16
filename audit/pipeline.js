@@ -63,17 +63,27 @@ function isInternetError(err) {
 }
 
 /**
- * Pause audit when internet is down. Poll every 15 min until it comes back.
- * Returns true when internet restored, false if stop requested.
+ * Pause audit when internet is down. Poll with backoff until it comes back.
+ * Uses short sleep intervals so stop requests take effect quickly.
+ * Backoff: 30s → 1m → 2m → 5m → 10m → 15m (max).
  */
 async function waitForInternet(broadcast, state) {
   state.status = 'paused_internet';
-  state.pauseReason = 'Internet down — checking every 15 minutes';
+  state.pauseReason = 'Internet down — checking with backoff';
   broadcast('state', { state });
-  broadcast('log', { msg: `\n🌐 Internet appears down. Pausing audit. Will check every 15 minutes...` });
+  broadcast('log', { msg: `\n🌐 Internet appears down. Pausing audit...` });
+
+  const BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 600_000, INTERNET_POLL_MS];
+  let attempt = 0;
 
   while (!state.stopRequested) {
-    await sleep(INTERNET_POLL_MS);
+    const delay = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)];
+    // Sleep in 2s chunks so stop requests take effect quickly
+    const chunks = Math.ceil(delay / 2000);
+    for (let i = 0; i < chunks; i++) {
+      if (state.stopRequested) return false;
+      await sleep(2000);
+    }
     if (state.stopRequested) return false;
     broadcast('log', { msg: `🌐 Checking internet connectivity...` });
     const online = await checkInternet();
@@ -84,7 +94,9 @@ async function waitForInternet(broadcast, state) {
       broadcast('state', { state });
       return true;
     }
-    broadcast('log', { msg: `🌐 ✗ Still down. Next check in 15 minutes...` });
+    const nextDelay = BACKOFF_MS[Math.min(attempt + 1, BACKOFF_MS.length - 1)];
+    broadcast('log', { msg: `🌐 ✗ Still down. Next check in ${Math.round(nextDelay / 1000)}s...` });
+    attempt++;
   }
   return false;
 }
@@ -602,10 +614,13 @@ export async function runAudit(resume, state, broadcast) {
         broadcast('log', { msg: `${label} [${node.address.slice(0, 20)}…]: ${errMsg}${retryLabel}` });
 
         // ─── Internet-down detection ───────────────────────────────────
-        // If this failure looks like a network issue, check if internet is down.
-        // If down, pause the audit and wait for recovery — don't burn through
-        // hundreds of nodes while offline (wastes tokens on batch payments).
+        // If this failure looks like a network issue, clean up tunnels FIRST
+        // (WG can corrupt routing tables), then check if internet is really down.
         if (isInternetError(error) && !state.stopRequested) {
+          // Clean up WireGuard/V2Ray before checking — tunnel may be corrupting routes
+          try { await uninstallWgTunnel(); } catch { }
+          emergencyCleanupSync();
+          await sleep(1000); // Let routing tables settle
           const online = await checkInternet();
           if (!online) {
             // Mark this node for retest after internet returns

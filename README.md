@@ -7,7 +7,7 @@
 
 Network audit dashboard for the [Sentinel dVPN](https://sentinel.co) blockchain. Tests every active node for real VPN throughput, protocol compliance, speed, and accessibility.
 
-Built on the [Sentinel dVPN SDK](https://www.npmjs.com/package/sentinel-dvpn-sdk) — the same protocol stack that powers consumer VPN applications.
+Built on the [Blue JS SDK](https://github.com/Sentinel-Autonomybuilder/blue-js-sdk) ([`sentinel-dvpn-sdk`](https://www.npmjs.com/package/sentinel-dvpn-sdk) on npm) — the same protocol stack that powers consumer VPN applications. See [ATTRIBUTION.md](ATTRIBUTION.md) for the complete SDK dependency map.
 
 ---
 
@@ -34,7 +34,7 @@ Toggle between three SDK implementations from the dashboard:
 
 | SDK | Label | Package | Code Path |
 |-----|-------|---------|-----------|
-| **Blue JS** | Our JavaScript SDK | [`sentinel-dvpn-sdk`](https://www.npmjs.com/package/sentinel-dvpn-sdk) | Status + handshake + config |
+| **Blue JS** | Our JavaScript SDK ([source](https://github.com/Sentinel-Autonomybuilder/blue-js-sdk)) | [`sentinel-dvpn-sdk`](https://www.npmjs.com/package/sentinel-dvpn-sdk) | Status + handshake + config |
 | **Blue C#** | Our C# SDK | `SentinelBridge.exe` | Status + handshake via CLI bridge |
 | **TKD JS** | Official Sentinel SDK by [TKD Alex](https://github.com/sentinel-official/sentinel-js-sdk) | [`@sentinel-official/sentinel-js-sdk`](https://www.npmjs.com/package/@sentinel-official/sentinel-js-sdk) | Status (nodeInfo) + handshake + V2Ray/WG classes |
 
@@ -263,22 +263,23 @@ sentinel-node-tester/
 ├── index.html             — Dashboard UI
 │
 ├── core/                  — Shared infrastructure
-│   ├── constants.js       — Config, env vars, endpoints
-│   ├── errors.js          — Typed errors (SDK SentinelError + .diag)
-│   ├── wallet.js          — Wallet derivation + signing (SDK adapter)
-│   ├── chain.js           — LCD queries + node discovery (SDK adapter)
-│   ├── session.js         — Session map, credentials, batch payment
-│   └── transport-cache.js — V2Ray transport intelligence
+│   ├── constants.js       — Config, env vars, endpoints (SDK: MSG_TYPES)
+│   ├── errors.js          — Typed errors (extends SDK SentinelError)
+│   ├── wallet.js          — Wallet + signing (SDK primitives + RPC rotation)
+│   ├── chain.js           — Node discovery (SDK queries + LCD failover)
+│   ├── session.js         — Sessions (SDK query/parse + batch payment)
+│   ├── countries.js       — Country map (derived from SDK app-helpers)
+│   └── transport-cache.js — V2Ray transport intelligence (original)
 │
-├── audit/                 — Audit orchestration
+├── audit/                 — Audit orchestration (original)
 │   ├── pipeline.js        — runAudit, runRetest, state management
 │   ├── node-test.js       — Single node test (~450 lines)
 │   └── retry.js           — Zero-skip retry with classification
 │
-├── protocol/              — Network protocol
-│   ├── v3protocol.js      — Sentinel v3 handshake (SDK re-exports)
+├── protocol/              — Network protocol (SDK adapters)
+│   ├── v3protocol.js      — Sentinel v3 handshake (100% SDK re-export)
 │   ├── speedtest.js       — Bandwidth + Google checks (SDK + local)
-│   └── diagnostics.js     — Interference detection, failure classification
+│   └── diagnostics.js     — Interference detection (original)
 │
 ├── platforms/             — OS-specific
 │   └── windows/
