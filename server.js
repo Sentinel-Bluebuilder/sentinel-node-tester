@@ -12,7 +12,7 @@ import { existsSync } from 'fs';
 import { MNEMONIC, DENOM, GAS_PRICE, PORT, LCD_ENDPOINTS, PROJECT_ROOT, DNS_PRESETS, ACTIVE_DNS, setActiveDns } from './core/constants.js';
 import { cachedWalletSetup, createFreshClient } from './core/wallet.js';
 import { ensureLcd, getActiveLcd, cleanupRpc } from './core/chain.js';
-import { createState, runAudit, runRetestSkips, runPlanTest, getResults, saveResults, setActiveRunDir } from './audit/pipeline.js';
+import { createState, runAudit, runRetestSkips, runPlanTest, runSubPlanTest, getResults, saveResults, setActiveRunDir } from './audit/pipeline.js';
 // Platform-aware WireGuard import — Windows has full implementation, others get stubs
 let emergencyCleanupSync, watchdogCheck, WG_AVAILABLE, IS_ADMIN;
 if (process.platform === 'win32') {
@@ -225,7 +225,7 @@ function rehydrateState(results) {
       if (snap.balanceUdvpn) state.balanceUdvpn = snap.balanceUdvpn;
       if (snap.spentUdvpn) state.spentUdvpn = Math.min(snap.spentUdvpn, state.balanceUdvpn);
       const remaining = Math.max(0, state.balanceUdvpn - state.spentUdvpn);
-      state.balance = `${(remaining / 1_000_000).toFixed(4)} DVPN`;
+      state.balance = `${(remaining / 1_000_000).toFixed(4)} P2P`;
       if (snap.estimatedTotalCost) state.estimatedTotalCost = snap.estimatedTotalCost;
       if (snap.startedAt) state.startedAt = snap.startedAt;
       if (snap.baselineMbps) state.baselineMbps = snap.baselineMbps;
@@ -289,26 +289,20 @@ app.get('/api/events', (req, res) => {
 
 // ─── Audit Control Routes ───────────────────────────────────────────────────
 
-// Start NEW test (saves current, clears, starts fresh)
-app.post('/api/start', async (req, res) => {
-  if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
-  if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
-
-  // Save current results before starting fresh — NEVER lose data
+// Shared helper: save current run (if any), clear results, allocate new run number + dir.
+function startFreshRun(label) {
   const prevResults = getResults();
   if (prevResults.length > 0) {
     const runDir = path.join(RUNS_DIR, `test-${String(state.activeRunNumber).padStart(3, '0')}`);
     try { _mkd(runDir, { recursive: true }); } catch { }
     _wfs(path.join(runDir, 'results.json'), JSON.stringify(prevResults, null, 2), 'utf8');
-    // Also save failures snapshot
     try { _cp(path.join(__dirname, 'results', 'failures.jsonl'), path.join(runDir, 'failures.jsonl')); } catch { }
     const idx = loadRunsIndex();
     const existingRun = idx.runs.find(r => r.number === state.activeRunNumber);
     if (!existingRun) {
-      // Auto-register this run in the index
       idx.runs.push({
         number: state.activeRunNumber,
-        label: `Auto-save before Test #${getNextRunNumber()}`,
+        label: `Auto-save before ${label}`,
         date: new Date().toISOString(),
         total: prevResults.length,
         passed: prevResults.filter(r => r.actualMbps != null).length,
@@ -318,25 +312,44 @@ app.post('/api/start', async (req, res) => {
       });
       saveRunsIndex(idx);
     }
-    broadcast('log', { msg: `💾 Saved Test #${state.activeRunNumber} (${prevResults.length} results) before starting fresh` });
+    broadcast('log', { msg: `💾 Saved Test #${state.activeRunNumber} (${prevResults.length} results) before starting ${label}` });
   }
+
+  // Reset in-memory results so the new run starts from zero
+  prevResults.length = 0;
 
   const newNum = getNextRunNumber();
   state.activeRunNumber = newNum;
   state.stopRequested = false;
+  state.testedNodes = 0;
+  state.failedNodes = 0;
+  state.passed15 = 0;
+  state.passed10 = 0;
+  state.passedBaseline = 0;
+  state.totalNodes = 0;
+  state.retryCount = 0;
+  state.estimatedTotalCost = '0 P2P';
+  state.spentUdvpn = 0;
 
-  // Clear state snapshot for fresh test
   try { _wfs(STATE_SNAPSHOT_FILE, '{}', 'utf8'); } catch { }
 
-  // Create run directory and set it as active — results save here continuously
   const newRunDir = path.join(RUNS_DIR, `test-${String(newNum).padStart(3, '0')}`);
   try { _mkd(newRunDir, { recursive: true }); } catch { }
   setActiveRunDir(newRunDir);
 
-  // Update runs index with new test
   const idx2 = loadRunsIndex();
   idx2.activeRun = newNum;
   saveRunsIndex(idx2);
+
+  return { newNum, newRunDir };
+}
+
+// Start NEW test (saves current, clears, starts fresh)
+app.post('/api/start', async (req, res) => {
+  if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
+  if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
+
+  const { newNum } = startFreshRun(`Test #${getNextRunNumber()}`);
 
   const SDK_LABELS = { js: 'Blue JS', csharp: 'Blue C#', tkd: 'TKD JS' };
   broadcast('log', { msg: `🚀 Starting Test #${newNum} (${SDK_LABELS[state.activeSDK] || state.activeSDK} SDK, ${process.platform === 'win32' ? 'Windows' : process.platform})` });
@@ -455,6 +468,43 @@ app.get('/api/subscriptions', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Sub. Plan mode: enriched subs with plan owner + fee-grant status + node count
+app.get('/api/sub-plans', async (req, res) => {
+  try {
+    const addr = req.query.address || state.walletAddress;
+    if (!addr) return res.json({ plans: [], walletAddress: null });
+    const { querySubscriberPlansEnriched } = await import('./core/chain.js');
+    const plans = await querySubscriberPlansEnriched(addr);
+    res.json({ plans, walletAddress: addr });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Sub. Plan mode: run fee-granted plan test — starts as a fresh run with clean counters.
+app.post('/api/test-sub-plan', async (req, res) => {
+  if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
+  if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
+  const { planId, subscriptionId, granter } = req.body || {};
+  if (!planId) return res.status(400).json({ error: 'planId required' });
+  if (!subscriptionId) return res.status(400).json({ error: 'subscriptionId required' });
+  if (!granter) return res.status(400).json({ error: 'granter (sent1...) required' });
+
+  const { newNum } = startFreshRun(`Sub. Plan ${planId}`);
+  broadcast('state', { state, results: getResults() });
+  broadcast('log', { msg: `🚀 Starting Test #${newNum} — Sub. Plan ${planId} (fee-granted, wallet pays zero gas)` });
+  res.json({ ok: true, testNumber: newNum, planId, subscriptionId, granter });
+
+  runSubPlanTest(String(planId), String(subscriptionId), String(granter), state, broadcast).then(() => {
+    saveCurrentRun(`Test #${newNum} — Sub. Plan ${planId}`);
+    broadcast('log', { msg: `💾 Test #${newNum} complete and saved` });
+  }).catch(err => {
+    state.status = 'error';
+    state.errorMessage = err.message;
+    broadcast('state', { state });
+  });
 });
 
 app.post('/api/clear', (req, res) => {
@@ -836,8 +886,8 @@ app.listen(PORT, async () => {
       const bal = await tmpClient.getBalance(acc.address, DENOM);
       state.balanceUdvpn = parseInt(bal?.amount || '0', 10);
       state.spentUdvpn = 0; // Real chain balance is the truth — reset estimate
-      state.balance = `${(state.balanceUdvpn / 1_000_000).toFixed(4)} DVPN`;
-      state.estimatedTotalCost = '0 DVPN';
+      state.balance = `${(state.balanceUdvpn / 1_000_000).toFixed(4)} P2P`;
+      state.estimatedTotalCost = '0 P2P';
       tmpClient.disconnect();
       console.log(`Wallet: ${acc.address} | Balance: ${state.balance}`);
       // Broadcast fresh balance to any SSE clients that connected before chain query finished
@@ -865,7 +915,7 @@ app.listen(PORT, async () => {
         if (fresh !== state.balanceUdvpn) {
           state.balanceUdvpn = fresh;
           state.spentUdvpn = 0;
-          state.balance = `${(fresh / 1_000_000).toFixed(4)} DVPN`;
+          state.balance = `${(fresh / 1_000_000).toFixed(4)} P2P`;
           broadcast('state', { state });
         }
       } catch { /* non-critical */ }

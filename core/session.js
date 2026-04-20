@@ -414,8 +414,8 @@ export async function submitBatchPayment(client, account, denom, gigabytes, batc
       if (priceEntry) state.spentUdvpn += Math.round(parseFloat(priceEntry.quote_value) || 0) * gigabytes;
     });
     state.spentUdvpn += 200000 * n;
-    state.balance = `${(Math.max(0, state.balanceUdvpn - state.spentUdvpn) / 1_000_000).toFixed(4)} DVPN (est. remaining)`;
-    state.estimatedTotalCost = `${(state.spentUdvpn / 1_000_000).toFixed(4)} DVPN`;
+    state.balance = `${(Math.max(0, state.balanceUdvpn - state.spentUdvpn) / 1_000_000).toFixed(4)} P2P (est. remaining)`;
+    state.estimatedTotalCost = `${(state.spentUdvpn / 1_000_000).toFixed(4)} P2P`;
     if (broadcast) broadcast('state', { state });
   }
   result._reusedAddrs = reusedAddrs;

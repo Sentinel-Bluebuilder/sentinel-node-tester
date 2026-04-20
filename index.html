@@ -575,7 +575,8 @@
           <option value="">Select Plan...</option>
         </select>
         <button class="btn btn-plan" id="btnPlanTest" onclick="testPlan()" style="display:none" title="WIP — Plan testing is under development">Test Plan</button>
-        <!-- Reset removed: use New Test instead (saves data before clearing) -->
+        <button class="btn btn-start" id="btnTestAllP2P" onclick="startAudit()" title="Scan every active node on chain. Each session paid from this wallet.">Test ALL (P2P)</button>
+        <button class="btn btn-plan" id="btnTestSubPlan" onclick="openSubPlanModal()" title="Pick a plan you are subscribed to. Every session TX is fee-granted by the plan owner — this wallet pays zero gas.">Test Sub. Plan</button>
         <button class="btn-help" onclick="showInfoPopup()" title="Dashboard guide">?</button>
       </div>
     </div>
@@ -867,7 +868,7 @@
         el.onclick = () => copyToClipboard(addr, el);
       }
 
-      // Balance — strip any trailing text, just show DVPN number
+      // Balance — strip any trailing text, just show P2P number
       if (state.balance) {
         const clean = state.balance.replace(/\(.*\)/g, '').trim();
         document.getElementById('walletBal').textContent = clean;
@@ -1325,7 +1326,7 @@
       state.passedBaseline = 0;
       state.nodeSpeedHistory = [];
       state.baselineHistory = [];
-      state.estimatedTotalCost = '0.0000 DVPN';
+      state.estimatedTotalCost = '0.0000 P2P';
       state.startedAt = null;
       state.completedAt = null;
       state.errorMessage = null;
@@ -1512,6 +1513,94 @@
       });
     }
 
+    async function openSubPlanModal() {
+      const existing = document.getElementById('subPlanOverlay');
+      if (existing) { existing.remove(); return; }
+
+      const overlay = document.createElement('div');
+      overlay.id = 'subPlanOverlay';
+      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
+      overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+      const popup = document.createElement('div');
+      popup.style.cssText = 'background:#111;border:1px solid rgba(255,255,255,0.12);border-radius:16px;padding:32px 36px;max-width:780px;width:92%;max-height:85vh;overflow-y:auto;color:#f0f0f0;font-family:Inter,sans-serif;line-height:1.6';
+      popup.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <h2 style="font-family:Outfit,sans-serif;font-size:20px;font-weight:700;letter-spacing:1px;margin:0">Test Sub. Plan</h2>
+          <span onclick="document.getElementById('subPlanOverlay').remove()" style="cursor:pointer;color:#666;font-size:22px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:50%;transition:all 0.2s" onmouseover="this.style.color='#fff';this.style.background='rgba(255,255,255,0.1)'" onmouseout="this.style.color='#666';this.style.background='transparent'">&times;</span>
+        </div>
+        <div style="font-size:12px;color:#888;margin-bottom:20px">
+          Only tests nodes in the selected plan. Every session TX is <b style="color:#7c3aed">fee-granted by the plan owner</b> — this wallet pays zero gas.
+        </div>
+        <div id="subPlanList" style="font-size:13px;color:#aaa">
+          <div style="padding:20px;text-align:center;color:#666">Loading your subscriptions…</div>
+        </div>
+      `;
+      overlay.appendChild(popup);
+      document.body.appendChild(overlay);
+      document.addEventListener('keydown', function esc(e) {
+        if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', esc); }
+      });
+
+      try {
+        const r = await fetch('/api/sub-plans');
+        const data = await r.json();
+        const list = document.getElementById('subPlanList');
+        if (!data.plans || data.plans.length === 0) {
+          list.innerHTML = '<div style="padding:20px;text-align:center;color:#666">No active subscriptions on this wallet.<br><span style="font-size:11px">Subscribe to a plan first (via app or chain TX), then reopen this dialog.</span></div>';
+          return;
+        }
+        list.innerHTML = data.plans.map(p => {
+          const badge = p.feeGrantActive
+            ? '<span style="background:#1a4d1a;color:#4caf50;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600">FEE GRANT ACTIVE</span>'
+            : '<span style="background:#4d1a1a;color:#ff6b6b;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600">NO FEE GRANT</span>';
+          const disabled = !p.feeGrantActive || p.nodeCount === 0 || !p.ownerSentAddr;
+          const btnStyle = disabled
+            ? 'background:#333;color:#666;cursor:not-allowed'
+            : 'background:#7c3aed;color:#fff;cursor:pointer';
+          const reason = !p.ownerSentAddr ? 'Plan owner unknown'
+            : p.nodeCount === 0 ? 'No active nodes in this plan'
+            : !p.feeGrantActive ? 'Plan owner has not granted gas to this wallet'
+            : '';
+          const expiryStr = p.expiry ? new Date(p.expiry).toLocaleDateString() : '—';
+          return `
+            <div style="border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px 18px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;gap:16px">
+              <div style="flex:1">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+                  <span style="color:#fff;font-weight:600;font-size:15px">Plan ${p.planId}</span>
+                  ${badge}
+                </div>
+                <div style="font-size:11px;color:#888;line-height:1.5">
+                  Subscription <span style="color:#ccc">#${p.subscriptionId}</span> · Nodes <span style="color:#ccc">${p.nodeCount}</span> · Expires <span style="color:#ccc">${expiryStr}</span><br>
+                  Granter <span style="color:#ccc;font-family:monospace;font-size:10px">${p.ownerSentAddr || 'unknown'}</span>
+                </div>
+                ${reason ? `<div style="font-size:10px;color:#ff6b6b;margin-top:6px">⚠ ${reason}</div>` : ''}
+              </div>
+              <button ${disabled ? 'disabled' : ''} onclick="runSubPlanTest('${p.planId}','${p.subscriptionId}','${p.ownerSentAddr || ''}')" style="${btnStyle};border:none;padding:10px 18px;border-radius:10px;font-family:Outfit,sans-serif;font-weight:700;letter-spacing:0.5px;font-size:12px;white-space:nowrap">TEST THIS PLAN</button>
+            </div>
+          `;
+        }).join('');
+      } catch (err) {
+        document.getElementById('subPlanList').innerHTML = `<div style="padding:20px;text-align:center;color:#ff6b6b">Failed to load plans: ${err.message}</div>`;
+      }
+    }
+
+    async function runSubPlanTest(planId, subscriptionId, granter) {
+      const overlay = document.getElementById('subPlanOverlay');
+      if (overlay) overlay.remove();
+      try {
+        const r = await fetch('/api/test-sub-plan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ planId, subscriptionId, granter }),
+        });
+        const data = await r.json();
+        if (data.error) alert('Sub. Plan test failed to start: ' + data.error);
+      } catch (err) {
+        alert('Sub. Plan request failed: ' + err.message);
+      }
+    }
+
     async function stopAudit() {
       const btn = document.getElementById('btnStop');
       btn.classList.add('loading');
@@ -1534,7 +1623,7 @@
       state.passedBaseline = 0;
       state.nodeSpeedHistory = [];
       state.baselineHistory = [];
-      state.estimatedTotalCost = '0.0000 DVPN';
+      state.estimatedTotalCost = '0.0000 P2P';
       renderTable();
       applyState();
       document.getElementById('logBody').innerHTML = '';
@@ -1549,7 +1638,7 @@
         const data = await res.json();
         sel.innerHTML = '<option value="">Select Plan...</option>';
         for (const p of (data.plans || [])) {
-          const priceLabel = p.price ? `${(parseInt(p.price.amount || 0) / 1e6).toFixed(0)} DVPN` : 'Free';
+          const priceLabel = p.price ? `${(parseInt(p.price.amount || 0) / 1e6).toFixed(0)} P2P` : 'Free';
           sel.innerHTML += `<option value="${p.id}">Plan ${p.id} — ${p.nodes} nodes, ${p.subs} subs (${priceLabel})</option>`;
         }
       } catch (e) {

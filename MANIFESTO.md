@@ -16,6 +16,12 @@ This tool is built for **anyone** to 1-shot launch and test:
 
 **Anyone can clone this repo, run `npm install`, launch `SentinelAudit.vbs`, and have a full network audit dashboard in 60 seconds.** No configuration beyond a funded wallet mnemonic in `.env`.
 
+### Two Test Modes
+The toolbar ships **`Test ALL (P2P)`** and **`Test Sub. Plan`** side by side.
+
+- **`Test ALL (P2P)`** — scans every active node on chain, each session paid from the tester's own wallet. Full-network audit.
+- **`Test Sub. Plan`** — lists the wallet's active subscriptions; pick a plan, scan only that plan's nodes. Each session TX is **fee-granted** by the plan owner (`prov_address → sent1...`), so the user pays zero gas. This mirrors how Android/iOS consumer apps ship: the end user never holds P2P — the plan operator covers all on-chain fees via a pre-granted `feegrant` allowance. The tester proves that flow works on every plan node before the mobile app ships.
+
 ---
 
 ## Why This Exists

@@ -19,7 +19,7 @@ export const GIGS = Math.max(1, parseInt(process.env.GIGABYTES_PER_NODE || '1', 
 export const TEST_MB = parseInt(process.env.TEST_MB || '10', 10);
 export const MAX_NODES = parseInt(process.env.MAX_NODES || '0', 10);
 export const NODE_DELAY = parseInt(process.env.NODE_DELAY_MS || '5000', 10);
-export const LOW_BALANCE_WARN = 500_000; // 0.5 DVPN
+export const LOW_BALANCE_WARN = 500_000; // 0.5 P2P
 export const PORT = parseInt(process.env.PORT || '3001', 10);
 
 // ─── DNS Configuration ──────────────────────────────────────────────────────

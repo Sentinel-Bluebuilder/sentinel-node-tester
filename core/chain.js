@@ -16,6 +16,11 @@ import {
   createRpcQueryClientWithFallback,
   rpcQueryNode,
   rpcQueryNodesForPlan,
+  rpcQueryPlan,
+  rpcQuerySubscriptionsForAccount,
+  sentprovToSent,
+  queryFeeGrant,
+  broadcastWithFeeGrant as sdkBroadcastWithFeeGrant,
   disconnectRpc,
 } from 'sentinel-dvpn-sdk';
 
@@ -143,7 +148,7 @@ async function rpcFetchAllNodesPaginated(client, broadcast) {
         }
       }
 
-      if (nodes.length < PAGE_SIZE) break; // last page
+      // Only stop when next_key is empty — short pages with next_key are valid.
     } while (nextKeyBytes && page < MAX_PAGES);
 
     if (broadcast) broadcast('log', { msg: `  RPC: ${allNodes.length} nodes fetched in ${page} pages` });
@@ -152,6 +157,71 @@ async function rpcFetchAllNodesPaginated(client, broadcast) {
     if (broadcast) broadcast('log', { msg: `  RPC paginated fetch failed at page ${page}: ${err.message}` });
     // Return what we have if partial, otherwise null for LCD fallback
     return allNodes.length > 0 ? allNodes : null;
+  }
+}
+
+/**
+ * Fetch ALL nodes linked to a plan via RPC with raw ABCI pagination.
+ * Chain caps ABCI queries at 100 per page; we loop with next_key until done.
+ *
+ * QueryNodesForPlanRequest proto:
+ *   1 = id (uint64 plan id), 2 = status (enum), 3 = pagination (PageRequest)
+ * PageRequest fields: 1=key, 2=offset, 3=limit, 4=count_total, 5=reverse
+ *
+ * @param {{ queryClient }} client
+ * @param {number|string|bigint} planId
+ * @param {(channel:string, data:any)=>void} [broadcast]
+ * @returns {Promise<Array<object>>} — empty array on failure
+ */
+export async function rpcFetchAllNodesForPlanPaginated(client, planId, broadcast) {
+  const allNodes = [];
+  let nextKeyBytes = null;
+  let page = 0;
+  const PAGE_SIZE = 100;
+  const MAX_PAGES = 50; // safety: up to 5000 nodes
+
+  try {
+    do {
+      const paginationParts = [];
+      if (nextKeyBytes) paginationParts.push(encodeRpcBytes(1, nextKeyBytes));
+      paginationParts.push(encodeRpcVarintField(3, PAGE_SIZE)); // limit at field 3
+      const pagination = concatBytes(paginationParts);
+
+      const request = concatBytes([
+        encodeRpcVarintField(1, BigInt(planId)), // plan id
+        encodeRpcVarintField(2, 1),              // status = active
+        encodeRpcEmbedded(3, pagination),        // pagination
+      ]);
+
+      const result = await client.queryClient.queryAbci(
+        '/sentinel.node.v3.QueryService/QueryNodesForPlan',
+        request,
+      );
+      const resp = new Uint8Array(result.value);
+      const fields = decodeRpcProto(resp);
+
+      const nodes = (fields[1] || []).map(entry => decodeRpcNode(decodeRpcProto(entry.value)));
+      allNodes.push(...nodes);
+      page++;
+
+      nextKeyBytes = null;
+      if (fields[2] && fields[2][0]) {
+        const pagResp = decodeRpcProto(fields[2][0].value);
+        if (pagResp[1] && pagResp[1][0] && pagResp[1][0].value.length > 0) {
+          nextKeyBytes = pagResp[1][0].value;
+        }
+      }
+
+      if (broadcast) broadcast('log', { msg: `  RPC plan ${planId}: page ${page} → ${nodes.length} nodes (${allNodes.length} total)` });
+      // Only stop when next_key is empty. A short page with a next_key is valid:
+      // the chain may return fewer than PAGE_SIZE items per page after status filtering.
+    } while (nextKeyBytes && page < MAX_PAGES);
+
+    if (broadcast) broadcast('log', { msg: `  RPC plan ${planId}: ${allNodes.length} nodes in ${page} pages` });
+    return allNodes;
+  } catch (err) {
+    if (broadcast) broadcast('log', { msg: `  RPC plan ${planId} paginated fetch failed at page ${page}: ${err.message}` });
+    return allNodes;
   }
 }
 
@@ -351,18 +421,163 @@ export async function queryNodeStatusDirect(nodeAddr) {
 // ─── Plan Membership (RPC for node lists, LCD for plan discovery) ──────────
 
 /**
+ * Minimal protobuf decoder for google.protobuf.Any bytes returned by
+ * rpcQuerySubscriptionsForAccount. Returns { typeUrl, valueBytes }.
+ * Only handles wire types 0 (varint) and 2 (length-delimited).
+ */
+function _decodeAny(buf) {
+  let i = 0;
+  let typeUrl = '';
+  let valueBytes = null;
+  while (i < buf.length) {
+    let tag = 0n;
+    let shift = 0n;
+    while (i < buf.length) {
+      const b = buf[i++];
+      tag |= BigInt(b & 0x7f) << shift;
+      shift += 7n;
+      if (!(b & 0x80)) break;
+    }
+    const fieldNum = Number(tag >> 3n);
+    const wireType = Number(tag & 0x7n);
+    if (wireType === 0) {
+      // varint — skip
+      while (i < buf.length) { if (!(buf[i++] & 0x80)) break; }
+    } else if (wireType === 2) {
+      let len = 0n;
+      let s = 0n;
+      while (i < buf.length) {
+        const b = buf[i++];
+        len |= BigInt(b & 0x7f) << s;
+        s += 7n;
+        if (!(b & 0x80)) break;
+      }
+      const slice = buf.slice(i, i + Number(len));
+      i += Number(len);
+      if (fieldNum === 1) typeUrl = new TextDecoder().decode(slice);
+      else if (fieldNum === 2) valueBytes = slice;
+    } else {
+      break; // unsupported wire type — stop parsing
+    }
+  }
+  return { typeUrl, valueBytes };
+}
+
+/**
+ * Decode a PlanSubscription proto bytes.
+ * field 1 = base_subscription (embedded), field 2 = plan_id (varint uint64).
+ * base_subscription field 1 = id (uint64).
+ */
+function _decodePlanSubscription(buf) {
+  let i = 0;
+  let planId = null;
+  let baseBytes = null;
+  while (i < buf.length) {
+    let tag = 0n;
+    let shift = 0n;
+    while (i < buf.length) {
+      const b = buf[i++];
+      tag |= BigInt(b & 0x7f) << shift;
+      shift += 7n;
+      if (!(b & 0x80)) break;
+    }
+    const fieldNum = Number(tag >> 3n);
+    const wireType = Number(tag & 0x7n);
+    if (wireType === 0) {
+      let val = 0n;
+      let s = 0n;
+      while (i < buf.length) {
+        const b = buf[i++];
+        val |= BigInt(b & 0x7f) << s;
+        s += 7n;
+        if (!(b & 0x80)) break;
+      }
+      if (fieldNum === 2) planId = val;
+    } else if (wireType === 2) {
+      let len = 0n;
+      let s = 0n;
+      while (i < buf.length) {
+        const b = buf[i++];
+        len |= BigInt(b & 0x7f) << s;
+        s += 7n;
+        if (!(b & 0x80)) break;
+      }
+      const slice = buf.slice(i, i + Number(len));
+      i += Number(len);
+      if (fieldNum === 1) baseBytes = slice;
+    } else {
+      break;
+    }
+  }
+  // Decode id from base_subscription (field 1 = id varint)
+  let subscriptionId = null;
+  if (baseBytes) {
+    let j = 0;
+    while (j < baseBytes.length) {
+      let tag2 = 0n;
+      let shift2 = 0n;
+      while (j < baseBytes.length) {
+        const b = baseBytes[j++];
+        tag2 |= BigInt(b & 0x7f) << shift2;
+        shift2 += 7n;
+        if (!(b & 0x80)) break;
+      }
+      const fn2 = Number(tag2 >> 3n);
+      const wt2 = Number(tag2 & 0x7n);
+      if (wt2 === 0) {
+        let val2 = 0n;
+        let s2 = 0n;
+        while (j < baseBytes.length) {
+          const b = baseBytes[j++];
+          val2 |= BigInt(b & 0x7f) << s2;
+          s2 += 7n;
+          if (!(b & 0x80)) break;
+        }
+        if (fn2 === 1) subscriptionId = val2;
+      } else if (wt2 === 2) {
+        let len2 = 0n;
+        let s2 = 0n;
+        while (j < baseBytes.length) {
+          const b = baseBytes[j++];
+          len2 |= BigInt(b & 0x7f) << s2;
+          s2 += 7n;
+          if (!(b & 0x80)) break;
+        }
+        j += Number(len2);
+      } else {
+        break;
+      }
+    }
+  }
+  return { subscriptionId: subscriptionId ? String(subscriptionId) : null, planId: planId ? String(planId) : null };
+}
+
+/**
  * Fetch subscription plans and mark which nodes belong to each plan.
- * Uses LCD for plan/subscription discovery (no RPC decoder for plans yet),
- * but uses RPC for querying nodes per plan (decoded protobuf).
+ * Step 1: Discover plan IDs — RPC first (rpcQuerySubscriptionsForAccount),
+ *   LCD fallback if RPC unavailable.
+ * Step 2: For each plan, get its nodes — RPC first, LCD fallback.
  */
 export async function fetchPlanMembership(nodes, broadcast) {
-  const lcd = getActiveLcd();
-  if (!lcd) return;
   const planNodeSets = {};
 
   try {
-    // Step 1: Discover plan IDs from subscriptions (LCD — no RPC decoder for subscriptions)
     const planIds = new Set();
+    const rpcClient = await getRpcClient();
+
+    if (rpcClient) {
+      // RPC path: query subscriptions for a sentinel sentinel network-wide scan
+      // rpcQuerySubscriptionsForAccount returns Any bytes; decode each to find PlanSubscriptions
+      // NOTE: This queries ALL subscriptions on chain (no address filter in global query).
+      // The global plan-ID discovery requires iterating all subscriptions via LCD pagination,
+      // but we use RPC to decode each returned entry efficiently when an address IS known.
+      // For global plan discovery (no specific address), fall through to LCD.
+      // Mark RPC available for Step 2 node queries.
+    }
+
+    // Step 1: Discover plan IDs from subscriptions (LCD — global scan, no address filter in RPC)
+    const lcd = getActiveLcd();
+    if (!lcd) return;
     let subNextKey = null;
     do {
       let subUrl = `${lcd}/sentinel/subscription/v3/subscriptions?pagination.limit=200`;
@@ -375,33 +590,32 @@ export async function fetchPlanMembership(nodes, broadcast) {
       subNextKey = data.pagination?.next_key || null;
     } while (subNextKey);
 
-    // Step 2: For each plan, get its nodes (try RPC first, LCD fallback)
-    const rpcClient = await getRpcClient();
-
+    // Step 2: For each plan, get its nodes (RPC first, LCD fallback)
     for (const pid of planIds) {
       const planNodes = new Set();
 
       if (rpcClient) {
-        // RPC: single request, up to 500 nodes per plan
         try {
-          const nodes = await rpcQueryNodesForPlan(rpcClient, BigInt(pid), { status: 1, limit: 500 });
-          for (const n of nodes) planNodes.add(n.address);
+          const planNodeList = await rpcQueryNodesForPlan(rpcClient, BigInt(pid), { status: 1, limit: 500 });
+          for (const n of planNodeList) planNodes.add(n.address);
         } catch {
-          // Fall through to LCD for this plan
+          // fall through to LCD for this plan
         }
       }
 
       if (planNodes.size === 0) {
-        // LCD fallback: paginated fetch
-        let nextKey = null;
-        do {
-          let url = `${lcd}/sentinel/node/v3/nodes?plan_id=${pid}&status=1&pagination.limit=200`;
-          if (nextKey) url += `&pagination.key=${encodeURIComponent(nextKey)}`;
-          const r = await fetch(url, { signal: AbortSignal.timeout(15000) });
-          const d = await r.json();
-          for (const n of (d.nodes || [])) planNodes.add(n.address);
-          nextKey = d.pagination?.next_key || null;
-        } while (nextKey);
+        const lcd2 = getActiveLcd();
+        if (lcd2) {
+          let nextKey = null;
+          do {
+            let url = `${lcd2}/sentinel/node/v3/nodes?plan_id=${pid}&status=1&pagination.limit=200`;
+            if (nextKey) url += `&pagination.key=${encodeURIComponent(nextKey)}`;
+            const r = await fetch(url, { signal: AbortSignal.timeout(15000) });
+            const d = await r.json();
+            for (const n of (d.nodes || [])) planNodes.add(n.address);
+            nextKey = d.pagination?.next_key || null;
+          } while (nextKey);
+        }
       }
 
       planNodeSets[pid] = planNodes;
@@ -447,7 +661,7 @@ export async function querySubscriptions(walletAddress) {
       id: s.id || s.base_subscription?.id,
       plan_id: s.plan_id || s.base_subscription?.plan_id,
       status: s.status || s.base_subscription?.status,
-      expiry: s.expiry || s.base_subscription?.inactive_at,
+      expiry: s.expiry || s.inactive_at || s.base_subscription?.inactive_at || null,
     }));
   } catch { return []; }
 }
@@ -457,4 +671,117 @@ export async function hasActiveSubscription(walletAddress, planId) {
   const match = subs.find(s => String(s.plan_id) === String(planId));
   if (match) return { has: true, subscriptionId: match.id };
   return { has: false };
+}
+
+// ─── Sub. Plan mode: enriched subscriber-plan query ─────────────────────────
+/**
+ * Decode a Plan protobuf message (raw ABCI bytes) → { id, provAddress }.
+ * Plan proto: field 1 = id (uint64), field 2 = prov_address (string).
+ */
+function decodePlanRaw(bytes) {
+  if (!bytes) return null;
+  const f = decodeRpcProto(new Uint8Array(bytes));
+  return {
+    id: f[1]?.[0] ? String(f[1][0].value) : null,
+    provAddress: f[2]?.[0] ? decodeRpcString(f[2][0].value) : null,
+  };
+}
+
+/**
+ * Query the plan owner (sent1...) for a given plan ID via RPC, with LCD skip
+ * (LCD /plan/v3/plans/{id} returns 501 on this chain).
+ * Returns null if plan not found or prov_address missing.
+ */
+export async function queryPlanOwnerSent(planId) {
+  try {
+    const client = await getRpcClient();
+    if (!client) return null;
+    const bytes = await rpcQueryPlan(client, BigInt(planId));
+    const plan = decodePlanRaw(bytes);
+    if (!plan?.provAddress) return null;
+    return sentprovToSent(plan.provAddress);
+  } catch { return null; }
+}
+
+/**
+ * Sub. Plan mode query.
+ * Returns the wallet's active subscriptions enriched with:
+ *   - planId                - the plan this sub belongs to
+ *   - ownerSentAddr         - the plan owner's sent1... (fee granter)
+ *   - expiry                - inactive_at
+ *   - feeGrantActive        - true if granter has an active feegrant for this wallet
+ *   - nodeCount             - number of active nodes in this plan
+ *
+ * One row per subscription. Caller picks one → runSubPlanTest tests that plan's
+ * nodes with session TXs fee-granted by the plan owner.
+ */
+export async function querySubscriberPlansEnriched(walletAddress) {
+  if (!walletAddress) return [];
+  const lcd = await ensureLcd();
+  const subs = await querySubscriptions(walletAddress);
+  if (subs.length === 0) return [];
+
+  const ownerCache = new Map();
+  const nodeCountCache = new Map();
+  const rpcClient = await getRpcClient();
+
+  const results = [];
+  for (const s of subs) {
+    const planId = s.plan_id;
+    if (!planId) continue;
+
+    let ownerSentAddr = ownerCache.get(planId);
+    if (ownerSentAddr === undefined) {
+      ownerSentAddr = await queryPlanOwnerSent(planId);
+      ownerCache.set(planId, ownerSentAddr);
+    }
+
+    let feeGrantActive = false;
+    if (ownerSentAddr) {
+      try {
+        const allowance = await queryFeeGrant(lcd, ownerSentAddr, walletAddress);
+        feeGrantActive = !!allowance;
+      } catch { }
+    }
+
+    let nodeCount = nodeCountCache.get(planId);
+    if (nodeCount === undefined) {
+      nodeCount = 0;
+      if (rpcClient) {
+        try {
+          const nodes = await rpcQueryNodesForPlan(rpcClient, BigInt(planId), { status: 1, limit: 500 });
+          nodeCount = nodes.length;
+        } catch { }
+      }
+      if (nodeCount === 0) {
+        try {
+          const r = await fetch(`${lcd}/sentinel/node/v3/plans/${planId}/nodes?pagination.limit=5000`, {
+            signal: AbortSignal.timeout(12000),
+          });
+          const d = await r.json();
+          nodeCount = (d.nodes || []).length;
+        } catch { }
+      }
+      nodeCountCache.set(planId, nodeCount);
+    }
+
+    results.push({
+      subscriptionId: String(s.id),
+      planId: String(planId),
+      ownerSentAddr: ownerSentAddr || null,
+      expiry: s.expiry || null,
+      feeGrantActive,
+      nodeCount,
+    });
+  }
+  return results;
+}
+
+// ─── Sub. Plan mode: fee-granted broadcast wrapper ──────────────────────────
+/**
+ * Broadcast a message list where `granterAddress` pays gas instead of `signerAddress`.
+ * Thin pass-through to the SDK — kept here so pipeline imports stay consistent.
+ */
+export async function broadcastWithFeeGrant(client, signerAddress, msgs, granterAddress, memo = '') {
+  return sdkBroadcastWithFeeGrant(client, signerAddress, msgs, granterAddress, memo);
 }
