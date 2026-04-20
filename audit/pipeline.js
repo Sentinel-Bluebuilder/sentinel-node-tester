@@ -13,8 +13,8 @@ import {
   V3_SUB_TYPE, V3_SUB_SESSION_TYPE,
 } from '../core/constants.js';
 import { cachedWalletSetup, createFreshClient, signAndBroadcastRetry } from '../core/wallet.js';
-import { getAllNodes, fetchPlanMembership, ensureLcd, getActiveLcd, getRpcClient } from '../core/chain.js';
-import { rpcQueryNode, rpcQueryNodesForPlan } from 'sentinel-dvpn-sdk';
+import { getAllNodes, fetchPlanMembership, ensureLcd, getActiveLcd, getRpcClient, rpcFetchAllNodesForPlanPaginated } from '../core/chain.js';
+import { rpcQueryNode } from 'sentinel-dvpn-sdk';
 import {
   submitBatchPayment, waitForBatchSessions, waitForSessionActive,
   clearPoisonedSessions, clearPaidNodes, clearAllCredentials, invalidateSessionCache, parseNodePriceUdvpn,
@@ -303,7 +303,7 @@ export async function runAudit(resume, state, broadcast) {
 
   const balRes = await client.getBalance(account.address, DENOM);
   state.balanceUdvpn = parseInt(balRes?.amount || '0', 10);
-  state.balance = `${(state.balanceUdvpn / 1_000_000).toFixed(4)} DVPN`;
+  state.balance = `${(state.balanceUdvpn / 1_000_000).toFixed(4)} P2P`;
   state.spentUdvpn = 0;
 
   if (resume) {
@@ -424,8 +424,8 @@ export async function runAudit(resume, state, broadcast) {
     (sum, { node }) => sum + parseNodePriceUdvpn(node.gigabyte_prices) * GIGS, 0
   );
   const avgCostPerNode = viableNodes.length > 0 ? estCostUdvpn / viableNodes.length : 0;
-  state.estimatedTotalCost = '0.0000 DVPN';
-  broadcast('log', { msg: `${viableNodes.length} testable nodes. ~${(avgCostPerNode / 1_000_000).toFixed(4)} DVPN/node avg, ~${(estCostUdvpn / 1_000_000).toFixed(2)} DVPN total est.` });
+  state.estimatedTotalCost = '0.0000 P2P';
+  broadcast('log', { msg: `${viableNodes.length} testable nodes. ~${(avgCostPerNode / 1_000_000).toFixed(4)} P2P/node avg, ~${(estCostUdvpn / 1_000_000).toFixed(2)} P2P total est.` });
   broadcast('state', { state });
 
   if (!IS_ADMIN && WG_AVAILABLE) {
@@ -453,7 +453,7 @@ export async function runAudit(resume, state, broadcast) {
         const realBalance = parseInt(freshBal?.amount || '0', 10);
         state.balanceUdvpn = realBalance;
         state.spentUdvpn = 0; // Reset spent — real balance is the truth
-        state.balance = `${(realBalance / 1_000_000).toFixed(4)} DVPN`;
+        state.balance = `${(realBalance / 1_000_000).toFixed(4)} P2P`;
         _lastBalanceRefresh = Date.now();
       } catch { /* non-critical — estimate continues */ }
     }
@@ -482,7 +482,7 @@ export async function runAudit(resume, state, broadcast) {
             const realBal = parseInt(freshBal?.amount || '0', 10);
             state.balanceUdvpn = realBal;
             state.spentUdvpn = 0;
-            state.balance = `${(realBal / 1_000_000).toFixed(4)} DVPN`;
+            state.balance = `${(realBal / 1_000_000).toFixed(4)} P2P`;
             broadcast('log', { msg: `💰 Balance check: ${state.balance}` });
             if (realBal > 1_000_000) {
               broadcast('log', { msg: `💰 Balance restored! Retrying batch...` });
@@ -570,7 +570,7 @@ export async function runAudit(resume, state, broadcast) {
         if (error?._pauseAudit || /INSUFFICIENT_BALANCE|insufficient funds/i.test(errMsg)) {
           broadcast('log', { msg: `💰 Insufficient P2P balance — pausing audit. Top up wallet and balance will be checked every 5 minutes.` });
           state.status = 'paused_balance';
-          state.pauseReason = `Insufficient P2P balance (${(Math.max(0, state.balanceUdvpn - state.spentUdvpn) / 1_000_000).toFixed(2)} DVPN remaining)`;
+          state.pauseReason = `Insufficient P2P balance (${(Math.max(0, state.balanceUdvpn - state.spentUdvpn) / 1_000_000).toFixed(2)} P2P remaining)`;
           broadcast('state', { state });
 
           // Poll for balance top-up every 5 minutes
@@ -583,9 +583,9 @@ export async function runAudit(resume, state, broadcast) {
               const realBalance = parseInt(freshBal?.amount || '0', 10);
               state.balanceUdvpn = realBalance;
               state.spentUdvpn = 0;
-              state.balance = `${(realBalance / 1_000_000).toFixed(4)} DVPN`;
+              state.balance = `${(realBalance / 1_000_000).toFixed(4)} P2P`;
               broadcast('log', { msg: `💰 Balance check: ${state.balance}` });
-              if (realBalance > 1_000_000) { // > 1 DVPN
+              if (realBalance > 1_000_000) { // > 1 P2P
                 broadcast('log', { msg: `💰 Balance restored! Resuming audit...` });
                 state.status = 'running';
                 state.pauseReason = null;
@@ -797,7 +797,7 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
 
   const balRes = await client.getBalance(account.address, DENOM);
   state.balanceUdvpn = parseInt(balRes?.amount || '0', 10);
-  state.balance = `${(state.balanceUdvpn / 1_000_000).toFixed(4)} DVPN`;
+  state.balance = `${(state.balanceUdvpn / 1_000_000).toFixed(4)} P2P`;
   state.spentUdvpn = 0;
   broadcast('state', { state });
 
@@ -981,7 +981,7 @@ export async function runPlanTest(planId, state, broadcast) {
 
   const balRes = await client.getBalance(account.address, DENOM);
   state.balanceUdvpn = parseInt(balRes?.amount || '0', 10);
-  state.balance = `${(state.balanceUdvpn / 1_000_000).toFixed(4)} DVPN`;
+  state.balance = `${(state.balanceUdvpn / 1_000_000).toFixed(4)} P2P`;
   state.spentUdvpn = 0;
   broadcast('state', { state });
 
@@ -1042,13 +1042,16 @@ export async function runPlanTest(planId, state, broadcast) {
   let planNodes = [];
   try {
     let allPlanNodes = [];
-    // Try RPC first
+    // Try RPC first (paginated — walks all pages)
     const rpcClient = await getRpcClient();
     if (rpcClient) {
       try {
-        allPlanNodes = await rpcQueryNodesForPlan(rpcClient, planId, { limit: 500 });
-        broadcast('log', { msg: `  Fetched ${allPlanNodes.length} plan nodes via RPC` });
-      } catch { allPlanNodes = []; }
+        allPlanNodes = await rpcFetchAllNodesForPlanPaginated(rpcClient, planId, broadcast);
+        broadcast('log', { msg: `  Fetched ${allPlanNodes.length} plan nodes via RPC (paginated)` });
+      } catch (e) {
+        broadcast('log', { msg: `  RPC plan-nodes fetch failed: ${e.message}` });
+        allPlanNodes = [];
+      }
     }
     // LCD fallback if RPC failed
     if (allPlanNodes.length === 0) {
@@ -1219,4 +1222,265 @@ export async function runPlanTest(planId, state, broadcast) {
   state.currentNode = null;
   broadcast('state', { state });
   broadcast('log', { msg: `✅ Plan ${planId} test complete. ${planPassed} passed, ${planFailed} failed out of ${shuffled.length} tested.` });
+}
+
+// ─── Sub. Plan Test (fee-granted, mirrors Android/iOS consumer flow) ────────
+/**
+ * Test every active node in a plan the wallet is already subscribed to.
+ * Every session TX is fee-granted by the plan owner — the wallet pays ZERO gas.
+ *
+ * Flow:
+ *   1. Verify the wallet is subscribed to this plan (uses the provided subscriptionId)
+ *   2. Verify the plan owner has an active fee grant for this wallet
+ *   3. Fetch all active nodes in the plan
+ *   4. For each node: start a session via subscription, fee-granted by plan owner
+ *   5. Run the standard testNode speed/reachability flow
+ *
+ * This mirrors how Android/iOS consumer apps ship — the end user never holds
+ * P2P, the plan operator covers all on-chain fees via a pre-granted feegrant.
+ */
+export async function runSubPlanTest(planId, subscriptionId, granterAddr, state, broadcast) {
+  state.status = 'running';
+  state.startedAt = new Date().toISOString();
+  state.errorMessage = null;
+  state.totalNodes = 0;
+  state.testedNodes = 0;
+  state.failedNodes = 0;
+  state.retryCount = 0;
+  recomputeCounters(state);
+  clearPoisonedSessions();
+  clearPaidNodes();
+  broadcast('state', { state });
+
+  broadcast('log', { msg: `📋 Sub. Plan ${planId} — sub ${subscriptionId} — granter ${granterAddr.slice(0, 16)}…` });
+  broadcast('log', { msg: `  Mode: fee-granted (wallet pays zero gas; plan owner pays all TXs)` });
+
+  const { wallet, account, privkey } = await cachedWalletSetup(MNEMONIC);
+  state.walletAddress = account.address;
+  const client = await createFreshClient(wallet, broadcast);
+
+  const balRes = await client.getBalance(account.address, DENOM);
+  state.balanceUdvpn = parseInt(balRes?.amount || '0', 10);
+  state.balance = `${(state.balanceUdvpn / 1_000_000).toFixed(4)} P2P`;
+  state.spentUdvpn = 0;
+  broadcast('state', { state });
+
+  // Verify fee grant is still active (granter may have revoked)
+  const { queryFeeGrant, broadcastWithFeeGrant, hasActiveSubscription, ensureLcd: _ensureLcd } = await import('../core/chain.js');
+  const lcd = await _ensureLcd();
+  try {
+    const allowance = await queryFeeGrant(lcd, granterAddr, account.address);
+    if (!allowance) {
+      state.status = 'error';
+      state.errorMessage = `Plan owner ${granterAddr.slice(0, 16)}… has no active fee grant for this wallet`;
+      broadcast('state', { state });
+      broadcast('log', { msg: `  ✗ No fee grant — cannot continue (plan owner must grant first)` });
+      return;
+    }
+    broadcast('log', { msg: `  ✓ Fee grant verified — granter pays gas on every session TX` });
+  } catch (err) {
+    broadcast('log', { msg: `  ⚠ Fee grant check failed (${err.message}) — proceeding anyway` });
+  }
+
+  // Verify subscription still active
+  const subCheck = await hasActiveSubscription(account.address, planId);
+  if (!subCheck.has) {
+    state.status = 'error';
+    state.errorMessage = `Wallet is no longer subscribed to plan ${planId}`;
+    broadcast('state', { state });
+    return;
+  }
+  // Allow subscriptionId from caller; fall back to whatever the chain reports.
+  subscriptionId = subscriptionId || subCheck.subscriptionId;
+
+  const v2rayAvailable = await checkV2Ray();
+
+  // Fetch plan nodes (RPC primary, LCD fallback)
+  broadcast('log', { msg: `  Fetching plan ${planId} nodes...` });
+  let planNodes = [];
+  try {
+    let allPlanNodes = [];
+    const rpcClient = await getRpcClient();
+    if (rpcClient) {
+      try {
+        allPlanNodes = await rpcFetchAllNodesForPlanPaginated(rpcClient, planId, broadcast);
+        broadcast('log', { msg: `  Fetched ${allPlanNodes.length} plan nodes via RPC (paginated)` });
+      } catch (e) {
+        broadcast('log', { msg: `  RPC plan-nodes fetch failed: ${e.message}` });
+        allPlanNodes = [];
+      }
+    }
+    if (allPlanNodes.length === 0) {
+      const activeLcd = await ensureLcd();
+      let pnNextKey = null;
+      do {
+        let pnUrl = `${activeLcd}/sentinel/node/v3/plans/${planId}/nodes?pagination.limit=200`;
+        if (pnNextKey) pnUrl += `&pagination.key=${encodeURIComponent(pnNextKey)}`;
+        const nr = await fetch(pnUrl, { signal: AbortSignal.timeout(15000) });
+        const nd = await nr.json();
+        allPlanNodes.push(...(nd.nodes || []));
+        pnNextKey = nd.pagination?.next_key || null;
+      } while (pnNextKey);
+    }
+    planNodes = allPlanNodes.map(n => {
+      const rawAddr = (n.remote_addrs || [])[0] || '';
+      return {
+        address: n.address,
+        remoteUrl: rawAddr.startsWith('http') ? rawAddr : `https://${rawAddr}`,
+        gigabyte_prices: n.gigabyte_prices || [],
+        planIds: [planId],
+      };
+    });
+  } catch (err) {
+    state.status = 'error';
+    state.errorMessage = err.message;
+    broadcast('state', { state });
+    return;
+  }
+
+  broadcast('log', { msg: `  Found ${planNodes.length} nodes in plan ${planId}` });
+  if (planNodes.length === 0) {
+    state.status = 'done';
+    state.completedAt = new Date().toISOString();
+    broadcast('state', { state });
+    return;
+  }
+
+  broadcast('log', { msg: `  Scanning plan nodes for online status...` });
+  const onlineNodes = await scanNodesParallel(planNodes, 20, broadcast, state);
+  broadcast('log', { msg: `  ${onlineNodes.length}/${planNodes.length} plan nodes are online` });
+
+  if (onlineNodes.length === 0) {
+    state.status = 'done';
+    state.completedAt = new Date().toISOString();
+    broadcast('state', { state });
+    return;
+  }
+
+  state.totalNodes = onlineNodes.length;
+  broadcast('state', { state });
+
+  broadcast('log', { msg: `📡 Running baseline...` });
+  try {
+    const bl = await speedtestDirect();
+    state.baselineMbps = bl.mbps;
+    broadcast('log', { msg: `  Baseline: ${bl.mbps} Mbps` });
+  } catch (e) { broadcast('log', { msg: `  Baseline failed: ${e.message}` }); }
+
+  let subPassed = 0, subFailed = 0;
+
+  for (let i = 0; i < onlineNodes.length; i++) {
+    if (state.stopRequested) { broadcast('log', { msg: '⏹ Stop requested.' }); break; }
+    const { node, status } = onlineNodes[i];
+    state.currentNode = node.address;
+    broadcast('state', { state });
+    broadcast('log', { msg: `[${i + 1}/${onlineNodes.length}] Testing ${node.address.slice(0, 20)}… via Sub. Plan ${planId}` });
+
+    let sessionId = null;
+    try {
+      const sessMsg = {
+        typeUrl: V3_SUB_SESSION_TYPE,
+        value: { from: account.address, id: BigInt(subscriptionId), nodeAddress: node.address },
+      };
+      broadcast('log', { msg: `  Starting session (fee-granted by ${granterAddr.slice(0, 12)}…)` });
+      const sessResult = await broadcastWithFeeGrant(client, account.address, [sessMsg], granterAddr);
+      if (sessResult.code !== 0) {
+        throw new Error(`Session tx failed code=${sessResult.code}: ${sessResult.rawLog}`);
+      }
+      // Wallet pays zero — do NOT increment spentUdvpn on fee-granted TX
+
+      for (const event of (sessResult.events || [])) {
+        if (/session/i.test(event.type)) {
+          for (const attr of event.attributes) {
+            const k = typeof attr.key === 'string' ? attr.key : Buffer.from(attr.key, 'base64').toString('utf8');
+            const v = typeof attr.value === 'string' ? attr.value : Buffer.from(attr.value, 'base64').toString('utf8');
+            if (k === 'session_id' || k === 'id') {
+              const parsed = v.replace(/"/g, '');
+              if (parsed && parseInt(parsed) > 0) sessionId = parsed;
+            }
+          }
+        }
+      }
+      if (!sessionId) throw new Error('No session_id in tx events');
+      broadcast('log', { msg: `  ✓ Session ${sessionId} (fee-granted) — tx=${sessResult.transactionHash}` });
+      await waitForSessionActive(node.address, account.address, 20_000);
+    } catch (err) {
+      broadcast('log', { msg: `  ✗ Fee-granted session start failed: ${err.message}` });
+      subFailed++;
+      const errResult = buildFailResult(node, status, state, `sub-plan-session: ${err.message}`, { planId, subscriptionId, granter: granterAddr });
+      errResult.inPlan = true;
+      errResult.planIds = [planId];
+      errResult.diag = errResult.diag || {};
+      errResult.diag.viaSubscription = true;
+      errResult.diag.feeGranted = true;
+      errResult.diag.granter = granterAddr;
+      upsertResult(errResult);
+      saveResults();
+      broadcast('result', { result: errResult, state });
+      continue;
+    }
+
+    const { result, retried, error } = await testWithRetry(
+      () => testNode(client, account, privkey, node,
+        { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps, nodeStatus: status },
+        BigInt(sessionId), broadcast, state
+      ),
+      broadcast, state, node.address,
+    );
+
+    if (result) {
+      state.testedNodes++;
+      result.inPlan = true;
+      result.planIds = [planId];
+      result.diag = result.diag || {};
+      result.diag.planId = planId;
+      result.diag.subscriptionId = subscriptionId;
+      result.diag.viaSubscription = true;
+      result.diag.feeGranted = true;
+      result.diag.granter = granterAddr;
+      if (result.slaApplicable && result.pass15mbps) state.passed15++;
+      if (result.pass10mbps) state.passed10++;
+      if (result.passBaseline) state.passedBaseline++;
+      upsertResult(result);
+      saveResults();
+      broadcast('result', { result, state });
+      if (result.actualMbps != null) {
+        subPassed++;
+        broadcast('log', { msg: `  ✓ Sub. Plan node OK: ${result.actualMbps} Mbps` });
+      } else {
+        subFailed++;
+        broadcast('log', { msg: `  ✗ Sub. Plan node failed` });
+      }
+    } else if (error?._stopRequested || error?.message === 'Stop requested') {
+      broadcast('log', { msg: `⏸ Sub. Plan test interrupted — remaining nodes untouched` });
+      break;
+    } else {
+      state.failedNodes++;
+      subFailed++;
+      const errMsg = error?.message || 'Unknown error';
+      const failResult = buildFailResult(node, status, state, `sub-plan-test: ${errMsg}`, error?.diag || {});
+      failResult.inPlan = true;
+      failResult.planIds = [planId];
+      failResult.diag = failResult.diag || {};
+      failResult.diag.viaSubscription = true;
+      failResult.diag.feeGranted = true;
+      failResult.diag.granter = granterAddr;
+      upsertResult(failResult);
+      saveResults();
+      broadcast('result', { result: failResult, state });
+      broadcast('log', { msg: `  ✗ Test error: ${errMsg}` });
+    }
+
+    try { await uninstallWgTunnel(); } catch { }
+    emergencyCleanupSync();
+    if (NODE_DELAY > 0) await sleep(NODE_DELAY);
+  }
+
+  emergencyCleanupSync();
+  state.status = 'done';
+  state.completedAt = new Date().toISOString();
+  state.currentNode = null;
+  broadcast('state', { state });
+  broadcast('log', { msg: `✅ Sub. Plan ${planId} test complete. ${subPassed} passed, ${subFailed} failed out of ${onlineNodes.length} tested.` });
+  broadcast('log', { msg: `  Wallet paid: 0 P2P (all gas covered by granter ${granterAddr.slice(0, 16)}…)` });
 }
