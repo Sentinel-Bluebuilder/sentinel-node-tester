@@ -1056,15 +1056,11 @@ export async function runPlanTest(planId, state, broadcast) {
     // LCD fallback if RPC failed
     if (allPlanNodes.length === 0) {
       const activeLcd = await ensureLcd();
-      let pnNextKey = null;
-      do {
-        let pnUrl = `${activeLcd}/sentinel/node/v3/plans/${planId}/nodes?pagination.limit=200`;
-        if (pnNextKey) pnUrl += `&pagination.key=${encodeURIComponent(pnNextKey)}`;
-        const nr = await fetch(pnUrl, { signal: AbortSignal.timeout(15000) });
-        const nd = await nr.json();
-        allPlanNodes.push(...(nd.nodes || []));
-        pnNextKey = nd.pagination?.next_key || null;
-      } while (pnNextKey);
+      // Chain truncates at `limit` without emitting next_key, so request a big page.
+      const pnUrl = `${activeLcd}/sentinel/node/v3/plans/${planId}/nodes?status=1&pagination.limit=10000`;
+      const nr = await fetch(pnUrl, { signal: AbortSignal.timeout(20000) });
+      const nd = await nr.json();
+      allPlanNodes.push(...(nd.nodes || []));
     }
     planNodes = allPlanNodes.map(n => {
       const rawAddr = (n.remote_addrs || [])[0] || '';
@@ -1312,15 +1308,11 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
     }
     if (allPlanNodes.length === 0) {
       const activeLcd = await ensureLcd();
-      let pnNextKey = null;
-      do {
-        let pnUrl = `${activeLcd}/sentinel/node/v3/plans/${planId}/nodes?pagination.limit=200`;
-        if (pnNextKey) pnUrl += `&pagination.key=${encodeURIComponent(pnNextKey)}`;
-        const nr = await fetch(pnUrl, { signal: AbortSignal.timeout(15000) });
-        const nd = await nr.json();
-        allPlanNodes.push(...(nd.nodes || []));
-        pnNextKey = nd.pagination?.next_key || null;
-      } while (pnNextKey);
+      // Chain truncates at `limit` without emitting next_key, so request a big page.
+      const pnUrl = `${activeLcd}/sentinel/node/v3/plans/${planId}/nodes?status=1&pagination.limit=10000`;
+      const nr = await fetch(pnUrl, { signal: AbortSignal.timeout(20000) });
+      const nd = await nr.json();
+      allPlanNodes.push(...(nd.nodes || []));
     }
     planNodes = allPlanNodes.map(n => {
       const rawAddr = (n.remote_addrs || [])[0] || '';
