@@ -105,58 +105,26 @@ async function rpcFetchAllNodes(broadcast) {
  * We use correct field numbers here.
  */
 async function rpcFetchAllNodesPaginated(client, broadcast) {
-  const allNodes = [];
-  let nextKeyBytes = null;
-  let page = 0;
-  const PAGE_SIZE = 100;
-  const MAX_PAGES = 20; // safety: max 2000 nodes
-
+  // Sentinel v3 chain truncates at `limit` without emitting `next_key`.
+  // A single large request returns the full set (chain has its own hard ceiling).
+  const PAGE_SIZE = 10000;
   try {
-    do {
-      const paginationParts = [];
-      if (nextKeyBytes) {
-        // key = field 1 (length-delimited bytes)
-        paginationParts.push(encodeRpcBytes(1, nextKeyBytes));
-      }
-      // limit = field 3 (NOT field 2 which is offset)
-      paginationParts.push(encodeRpcVarintField(3, PAGE_SIZE));
-
-      const pagination = concatBytes(paginationParts);
-      const request = concatBytes([
-        encodeRpcVarintField(1, 1),                // status = active
-        encodeRpcEmbedded(2, pagination),           // pagination
-      ]);
-
-      const result = await client.queryClient.queryAbci(
-        '/sentinel.node.v3.QueryService/QueryNodes',
-        request,
-      );
-      const resp = new Uint8Array(result.value);
-      const fields = decodeRpcProto(resp);
-
-      // Decode nodes (field 1)
-      const nodes = (fields[1] || []).map(entry => decodeRpcNode(decodeRpcProto(entry.value)));
-      allNodes.push(...nodes);
-      page++;
-
-      // Extract pagination response (field 2) for next_key
-      nextKeyBytes = null;
-      if (fields[2] && fields[2][0]) {
-        const pagResp = decodeRpcProto(fields[2][0].value);
-        if (pagResp[1] && pagResp[1][0] && pagResp[1][0].value.length > 0) {
-          nextKeyBytes = pagResp[1][0].value;
-        }
-      }
-
-      // Only stop when next_key is empty — short pages with next_key are valid.
-    } while (nextKeyBytes && page < MAX_PAGES);
-
-    if (broadcast) broadcast('log', { msg: `  RPC: ${allNodes.length} nodes fetched in ${page} pages` });
-    return allNodes;
+    const pagination = encodeRpcVarintField(3, PAGE_SIZE); // limit at field 3
+    const request = concatBytes([
+      encodeRpcVarintField(1, 1),                // status = active
+      encodeRpcEmbedded(2, pagination),           // pagination
+    ]);
+    const result = await client.queryClient.queryAbci(
+      '/sentinel.node.v3.QueryService/QueryNodes',
+      request,
+    );
+    const fields = decodeRpcProto(new Uint8Array(result.value));
+    const nodes = (fields[1] || []).map(entry => decodeRpcNode(decodeRpcProto(entry.value)));
+    if (broadcast) broadcast('log', { msg: `  RPC: ${nodes.length} nodes fetched (limit=${PAGE_SIZE})` });
+    return nodes;
   } catch (err) {
-    if (broadcast) broadcast('log', { msg: `  RPC paginated fetch failed at page ${page}: ${err.message}` });
-    // Return what we have if partial, otherwise null for LCD fallback
-    return allNodes.length > 0 ? allNodes : null;
+    if (broadcast) broadcast('log', { msg: `  RPC fetch failed: ${err.message}` });
+    return null;
   }
 }
 
@@ -174,54 +142,28 @@ async function rpcFetchAllNodesPaginated(client, broadcast) {
  * @returns {Promise<Array<object>>} — empty array on failure
  */
 export async function rpcFetchAllNodesForPlanPaginated(client, planId, broadcast) {
-  const allNodes = [];
-  let nextKeyBytes = null;
-  let page = 0;
-  const PAGE_SIZE = 100;
-  const MAX_PAGES = 50; // safety: up to 5000 nodes
-
+  // Sentinel v3 chain truncates at `limit` without emitting `next_key`.
+  // A single large request returns the full set (observed: plan 36 → 803 nodes
+  // with limit=1000 but only 100 with limit=100, and no next_key either time).
+  const PAGE_SIZE = 10000;
   try {
-    do {
-      const paginationParts = [];
-      if (nextKeyBytes) paginationParts.push(encodeRpcBytes(1, nextKeyBytes));
-      paginationParts.push(encodeRpcVarintField(3, PAGE_SIZE)); // limit at field 3
-      const pagination = concatBytes(paginationParts);
-
-      const request = concatBytes([
-        encodeRpcVarintField(1, BigInt(planId)), // plan id
-        encodeRpcVarintField(2, 1),              // status = active
-        encodeRpcEmbedded(3, pagination),        // pagination
-      ]);
-
-      const result = await client.queryClient.queryAbci(
-        '/sentinel.node.v3.QueryService/QueryNodesForPlan',
-        request,
-      );
-      const resp = new Uint8Array(result.value);
-      const fields = decodeRpcProto(resp);
-
-      const nodes = (fields[1] || []).map(entry => decodeRpcNode(decodeRpcProto(entry.value)));
-      allNodes.push(...nodes);
-      page++;
-
-      nextKeyBytes = null;
-      if (fields[2] && fields[2][0]) {
-        const pagResp = decodeRpcProto(fields[2][0].value);
-        if (pagResp[1] && pagResp[1][0] && pagResp[1][0].value.length > 0) {
-          nextKeyBytes = pagResp[1][0].value;
-        }
-      }
-
-      if (broadcast) broadcast('log', { msg: `  RPC plan ${planId}: page ${page} → ${nodes.length} nodes (${allNodes.length} total)` });
-      // Only stop when next_key is empty. A short page with a next_key is valid:
-      // the chain may return fewer than PAGE_SIZE items per page after status filtering.
-    } while (nextKeyBytes && page < MAX_PAGES);
-
-    if (broadcast) broadcast('log', { msg: `  RPC plan ${planId}: ${allNodes.length} nodes in ${page} pages` });
-    return allNodes;
+    const pagination = encodeRpcVarintField(3, PAGE_SIZE); // limit at field 3
+    const request = concatBytes([
+      encodeRpcVarintField(1, BigInt(planId)), // plan id
+      encodeRpcVarintField(2, 1),              // status = active
+      encodeRpcEmbedded(3, pagination),        // pagination
+    ]);
+    const result = await client.queryClient.queryAbci(
+      '/sentinel.node.v3.QueryService/QueryNodesForPlan',
+      request,
+    );
+    const fields = decodeRpcProto(new Uint8Array(result.value));
+    const nodes = (fields[1] || []).map(entry => decodeRpcNode(decodeRpcProto(entry.value)));
+    if (broadcast) broadcast('log', { msg: `  RPC plan ${planId}: ${nodes.length} nodes (limit=${PAGE_SIZE})` });
+    return nodes;
   } catch (err) {
-    if (broadcast) broadcast('log', { msg: `  RPC plan ${planId} paginated fetch failed at page ${page}: ${err.message}` });
-    return allNodes;
+    if (broadcast) broadcast('log', { msg: `  RPC plan ${planId} fetch failed: ${err.message}` });
+    return [];
   }
 }
 
