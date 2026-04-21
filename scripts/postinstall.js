@@ -6,7 +6,7 @@
 import { createWriteStream, existsSync, mkdirSync, chmodSync, unlinkSync, readdirSync, copyFileSync, rmSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import https from 'https';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -97,12 +97,24 @@ function extractZip(zipPath, destDir) {
   log('Extracting archive...');
 
   if (IS_WINDOWS) {
-    // Use PowerShell Expand-Archive on Windows
+    // Use PowerShell Expand-Archive on Windows (built-in, no extra install needed)
     execSync(
       `powershell -NoProfile -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${tmpDir}' -Force"`,
       { stdio: 'pipe' },
     );
   } else {
+    // Check unzip is available before invoking
+    const whichResult = spawnSync('which', ['unzip'], { encoding: 'utf8' });
+    if (whichResult.status !== 0) {
+      const installHint = process.platform === 'darwin'
+        ? 'brew install unzip'
+        : 'apt-get install unzip  (or equivalent for your distro)';
+      log(`ERROR: 'unzip' not found. Install it with: ${installHint}`);
+      log('V2Ray setup skipped. App will run in limited mode (WireGuard-only nodes).');
+      rmSync(tmpDir, { recursive: true, force: true });
+      if (existsSync(zipPath)) unlinkSync(zipPath);
+      process.exit(0);
+    }
     // Use unzip on macOS/Linux
     execSync(`unzip -o "${zipPath}" -d "${tmpDir}"`, { stdio: 'pipe' });
   }
@@ -145,9 +157,9 @@ async function main() {
   const asset = PLATFORM_MAP[key];
 
   if (!asset) {
-    log(`Unsupported platform: ${key}`);
-    log(`Supported: ${Object.keys(PLATFORM_MAP).join(', ')}`);
-    process.exit(1);
+    log(`WARNING: V2Ray binary not available for ${key}. App will run in limited mode (WireGuard-only nodes).`);
+    log(`Supported platforms: ${Object.keys(PLATFORM_MAP).join(', ')}`);
+    process.exit(0);
   }
 
   log(`Platform: ${key} -> ${asset}`);

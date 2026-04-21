@@ -14,6 +14,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BRIDGE_EXE = path.join(__dirname, '..', 'csharp-bridge', 'bin', 'Debug', 'net8.0', 'win-x64', 'SentinelBridge.exe');
 
 export const BRIDGE_AVAILABLE = existsSync(BRIDGE_EXE);
+if (!BRIDGE_AVAILABLE) {
+  console.log('[bridge] C# bridge not built — running in JS-only mode. This is fine for most users.');
+}
 
 // ─── Execute bridge command ─────────────────────────────────────────────────
 

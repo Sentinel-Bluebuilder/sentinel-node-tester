@@ -8,9 +8,10 @@ on:
 
 jobs:
   test:
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
         node-version: [20, 22]
 
     steps:
@@ -30,7 +31,8 @@ jobs:
       - name: Verify all modules import
         run: node -e "import('./index.js').then(m => { const n = Object.keys(m).length; console.log(n + ' exports OK'); if (n < 50) process.exit(1); })"
 
-      - name: Verify server starts
+      - name: Verify server starts (Windows only)
+        if: matrix.os == 'windows-latest'
         run: |
           $job = Start-Job -ScriptBlock { Set-Location $using:PWD; $env:PORT='3098'; node server.js 2>&1 }
           Start-Sleep -Seconds 5
