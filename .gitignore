@@ -33,3 +33,8 @@ SentinelAudit.exe
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Local test harnesses (not for distribution)
+fresh-clone-test/
+test-tkd-live.mjs
+test-tkd-raw.mjs
