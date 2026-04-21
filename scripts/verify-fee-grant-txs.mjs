@@ -37,8 +37,8 @@ if (!MNEMONIC) {
   process.exit(1);
 }
 
-// Known Sub. Plan fee-granter (plan operator's address)
-const EXPECTED_GRANTER = 'sent1t0xjyflrah5n36rfkpfeuw6pz6vl2g27x2793l';
+// Known Sub. Plan fee-granter (plan operator's address). Override via env.
+const EXPECTED_GRANTER = process.env.EXPECTED_GRANTER || 'sent1t0xjyflrah5n36rfkpfeuw6pz6vl2g27x2793l';
 // Two distinct msg types:
 //   P2P path:      /sentinel.node.v3.MsgStartSessionRequest         (pays own gas)
 //   Sub. Plan:     /sentinel.subscription.v3.MsgStartSessionRequest (fee-granted)

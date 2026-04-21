@@ -23,15 +23,23 @@ async function run() {
     'core/chain.js', 'core/session.js', 'core/transport-cache.js', 'core/countries.js',
     'core/csharp-bridge.js',
     'protocol/v3protocol.js', 'protocol/speedtest.js', 'protocol/diagnostics.js',
-    'platforms/windows/wireguard.js', 'platforms/windows/v2ray.js', 'platforms/windows/network.js',
     'audit/retry.js', 'audit/pipeline.js', 'audit/node-test.js',
     'index.js',
   ];
-  for (const m of modules) {
+  // Windows-only platform modules — skip on other platforms
+  const windowsModules = [
+    'platforms/windows/wireguard.js', 'platforms/windows/v2ray.js', 'platforms/windows/network.js',
+  ];
+  const IS_WIN32 = process.platform === 'win32';
+  if (!IS_WIN32) {
+    console.log('   Skipping Windows-only platform modules on non-Windows platform');
+  }
+  const allModules = IS_WIN32 ? [...modules, ...windowsModules] : modules;
+  for (const m of allModules) {
     try { await import('../' + m); assert(true, m); }
     catch (e) { assert(false, `IMPORT ${m}: ${e.message.split('\n')[0]}`); }
   }
-  console.log(`   ${modules.length} modules checked`);
+  console.log(`   ${allModules.length} modules checked`);
 
   // ─── 2. Index Exports ──────────────────────────────────────────────────
   console.log('2. Index exports...');

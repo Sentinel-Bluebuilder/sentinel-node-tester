@@ -31,6 +31,15 @@ import { SigningStargateClient, GasPrice } from '@cosmjs/stargate';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 process.env.PATH = path.join(__dirname, 'bin') + path.delimiter + (process.env.PATH || '');
 
+// ─── Env sanity check ───────────────────────────────────────────────────────
+if (!MNEMONIC || !MNEMONIC.trim()) {
+  console.warn('');
+  console.warn('⚠  MNEMONIC is not set.');
+  console.warn('   The server will start, but any test that signs a TX will fail.');
+  console.warn('   Fix: copy .env.example to .env and set MNEMONIC to a 12-word Cosmos phrase.');
+  console.warn('');
+}
+
 // ─── WireGuard Safety: cleanup on ANY exit ──────────────────────────────────
 emergencyCleanupSync();
 
