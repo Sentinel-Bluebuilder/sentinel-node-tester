@@ -60,7 +60,11 @@ export function hasSuspiciousDefaultRoute() {
         const match = line.match(/0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)/);
         if (match) {
           const gw = match[1];
-          if (/^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.64\.)/.test(gw)) {
+          // Only flag CGNAT (100.64.0.0/10) and classic VPN client ranges
+          // (10.8.x.x WireGuard default, 10.200.200.x, 10.8.0.x). Plain
+          // 10.x and 172.16-31.x are legitimate home/corporate LANs — the
+          // adapter-name check above is the authoritative VPN signal.
+          if (/^(100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|10\.(8|200)\.)/.test(gw)) {
             return true;
           }
         }

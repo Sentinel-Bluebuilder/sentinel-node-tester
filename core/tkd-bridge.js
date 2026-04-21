@@ -364,19 +364,28 @@ export async function tkdQueryNodes() {
     1,
     { limit: BigInt(5000), offset: BigInt(0), countTotal: true, reverse: false, key: new Uint8Array() },
   );
-  return (result.nodes || []).map(n => ({
-    address: n.address,
-    remoteUrl: n.remoteUrl || '',
-    remoteAddrs: [],
-    gigabyte_prices: (n.gigabytePrices || []).map(p => ({
-      denom: p.denom,
-      base_value: '0',
-      quote_value: p.amount || '0',
-    })),
-    status: 1,
-    planIds: [],
-    _source: 'tkd-rpc',
-  }));
+  return (result.nodes || []).map(n => {
+    const addrs = Array.isArray(n.remoteAddrs) ? n.remoteAddrs : [];
+    // v3 chain returns remoteAddrs as array of "host:port" strings — normalize
+    // to URL form so downstream code can use remoteUrl uniformly.
+    const firstAddr = addrs[0] || '';
+    const remoteUrl = firstAddr
+      ? (firstAddr.startsWith('http') ? firstAddr : `http://${firstAddr}`)
+      : '';
+    return {
+      address: n.address,
+      remoteUrl,
+      remoteAddrs: addrs,
+      gigabyte_prices: (n.gigabytePrices || []).map(p => ({
+        denom: p.denom,
+        base_value: p.baseValue || '0',
+        quote_value: p.quoteValue || p.amount || '0',
+      })),
+      status: n.status ?? 1,
+      planIds: [],
+      _source: 'tkd-rpc',
+    };
+  });
 }
 
 export async function tkdQuerySessions(walletAddress) {
