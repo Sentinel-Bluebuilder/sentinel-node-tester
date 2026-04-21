@@ -11,7 +11,7 @@ import { existsSync } from 'fs';
 
 import { MNEMONIC, DENOM, GAS_PRICE, PORT, LCD_ENDPOINTS, PROJECT_ROOT, DNS_PRESETS, ACTIVE_DNS, setActiveDns } from './core/constants.js';
 import { cachedWalletSetup, createFreshClient } from './core/wallet.js';
-import { ensureLcd, getActiveLcd, cleanupRpc } from './core/chain.js';
+import { ensureLcd, getActiveLcd, cleanupRpc, getAllNodes } from './core/chain.js';
 import { createState, runAudit, runRetestSkips, runPlanTest, runSubPlanTest, getResults, saveResults, setActiveRunDir } from './audit/pipeline.js';
 // Platform-aware WireGuard import — Windows has full implementation, others get stubs
 let emergencyCleanupSync, watchdogCheck, WG_AVAILABLE, IS_ADMIN;
