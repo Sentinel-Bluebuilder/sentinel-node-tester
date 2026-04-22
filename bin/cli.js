@@ -49,7 +49,7 @@ function getVersion() {
  * The file is only imported when actually invoked — cold-start stays fast.
  */
 const COMMAND_GROUPS = {
-  Discovery: ['list', 'functions'],
+  Discovery: ['list', 'functions', 'verify-sdks'],
   Read: ['nodes', 'node', 'balance', 'subscriptions', 'plans'],
   Action: ['speed', 'test', 'audit', 'serve'],
 };
@@ -80,6 +80,7 @@ function printHelp() {
     Discovery
       list              List every command with description + flags (AI registry)
       functions         List every exported SDK function grouped by module
+      verify-sdks       Verify installed SDKs match GitHub tag (byte-for-byte)
 
     Read
       nodes             List all active chain nodes
