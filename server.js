@@ -13,6 +13,7 @@ import { MNEMONIC, DENOM, GAS_PRICE, PORT, LCD_ENDPOINTS, PROJECT_ROOT, DNS_PRES
 import { cachedWalletSetup, createFreshClient } from './core/wallet.js';
 import { ensureLcd, getActiveLcd, cleanupRpc, getAllNodes } from './core/chain.js';
 import { createState, runAudit, runRetestSkips, runPlanTest, runSubPlanTest, getResults, saveResults, setActiveRunDir } from './audit/pipeline.js';
+import { getInstalledVersions, verifyAllSdks, verifySdk } from './core/sdk-verify.js';
 // Platform-aware WireGuard import — Windows has full implementation, others get stubs
 let emergencyCleanupSync, watchdogCheck, WG_AVAILABLE, IS_ADMIN;
 if (process.platform === 'win32') {
@@ -266,6 +267,52 @@ app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 // Fast stats-only (no results payload) — for instant page load
 app.get('/api/stats', (req, res) => {
   res.json({ state });
+});
+
+// ─── SDK version + GitHub parity endpoints ──────────────────────────────────
+
+/** Installed SDK versions — instant, no network. */
+app.get('/api/sdk-versions', async (req, res) => {
+  try {
+    const { readFileSync } = await import('fs');
+    const versions = getInstalledVersions(__dirname);
+    const pkg = JSON.parse(readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
+    res.json({ tester: { version: pkg.version, name: pkg.name }, sdks: versions });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** Cached verification state (avoid re-downloading on every UI poll). */
+let _sdkVerifyCache = { ts: 0, data: null };
+const SDK_VERIFY_TTL_MS = 5 * 60 * 1000;
+
+/** Verify every SDK matches its GitHub tag. Slow (~5s) — downloads tarballs. */
+app.get('/api/sdk-verify', async (req, res) => {
+  const now = Date.now();
+  const forceRefresh = req.query.refresh === '1';
+  if (!forceRefresh && _sdkVerifyCache.data && (now - _sdkVerifyCache.ts) < SDK_VERIFY_TTL_MS) {
+    res.setHeader('x-cache', 'hit');
+    return res.json(_sdkVerifyCache.data);
+  }
+  try {
+    const results = await verifyAllSdks(__dirname);
+    _sdkVerifyCache = { ts: now, data: results };
+    res.setHeader('x-cache', 'miss');
+    res.json(results);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** Verify one SDK by key. ?key=blue-js or ?key=tkd-js */
+app.get('/api/sdk-verify/:key', async (req, res) => {
+  try {
+    const result = await verifySdk(req.params.key, __dirname);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Full state + results

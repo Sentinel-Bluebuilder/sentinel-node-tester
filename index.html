@@ -514,7 +514,7 @@
       <div class="pulse-dot" id="headerDot"></div>
       <div>
         <h1>SENTINEL AUDIT</h1>
-        <span style="font-size:10px;color:var(--text-secondary);letter-spacing:1.5px;font-family:'Outfit',sans-serif;font-weight:400">Built on Sentinel SDK v31</span>
+        <span id="sdkVersionsLabel" title="Click to verify SDKs match GitHub" style="font-size:10px;color:var(--text-secondary);letter-spacing:1.5px;font-family:'Outfit',sans-serif;font-weight:400;cursor:pointer">Loading SDK versions…</span>
         <p style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <select id="runSelect" onchange="loadRun(this.value)" style="background:#111;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:5px;padding:3px 8px;font-size:11px;font-family:'Outfit',sans-serif;font-weight:600;cursor:pointer;letter-spacing:1px">
             <option value="">Loading...</option>
@@ -757,9 +757,50 @@
       fetch('/api/stats').then(r => r.json()).then(d => {
         if (d.state) { state = Object.assign(state, d.state); applyState(); }
       }).catch(() => {});
+      loadSdkVersions();
       connectSSE();
       setInterval(updateETA, 1000);
     });
+
+    function loadSdkVersions() {
+      const el = document.getElementById('sdkVersionsLabel');
+      if (!el) return;
+      fetch('/api/sdk-versions').then(r => r.json()).then(d => {
+        const blue = d.sdks?.['blue-js']?.version;
+        const tkd  = d.sdks?.['tkd-js']?.version;
+        const tester = d.tester?.version;
+        const parts = [];
+        if (tester) parts.push(`Tester v${tester}`);
+        if (blue)   parts.push(`Blue JS v${blue}`);
+        if (tkd)    parts.push(`TKD v${tkd}`);
+        el.textContent = parts.join(' · ');
+        el.onclick = verifySdksUi;
+      }).catch(() => { el.textContent = 'SDK versions unavailable'; });
+    }
+
+    function verifySdksUi() {
+      const el = document.getElementById('sdkVersionsLabel');
+      if (!el) return;
+      const orig = el.textContent;
+      el.textContent = 'Verifying SDKs…';
+      fetch('/api/sdk-verify').then(r => r.json()).then(d => {
+        const blue = d['blue-js'];
+        const tkd  = d['tkd-js'];
+        const fmt = (r) => r?.ok ? 'OK' : (r?.exactRef === false ? 'drift?' : 'MISMATCH');
+        const line = `Blue JS ${fmt(blue)} · TKD ${fmt(tkd)}`;
+        el.textContent = line;
+        const msg = [];
+        for (const [k, r] of Object.entries(d)) {
+          if (r?.warning) msg.push(`${k}: ${r.warning}`);
+          else if (!r?.ok) msg.push(`${k}: ${r.counts?.mismatched || 0} mismatched, ${r.counts?.missingOnGithub || 0} missing on GitHub`);
+        }
+        if (msg.length) alert(msg.join('\n\n'));
+        setTimeout(() => { el.textContent = orig; }, 8000);
+      }).catch(e => {
+        el.textContent = 'Verify failed';
+        setTimeout(() => { el.textContent = orig; }, 4000);
+      });
+    }
 
     function connectSSE() {
       if (eventSource) eventSource.close();
