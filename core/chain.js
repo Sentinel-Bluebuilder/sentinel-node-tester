@@ -18,6 +18,7 @@ import {
   rpcQueryNodesForPlan,
   rpcQueryPlan,
   rpcQuerySubscriptionsForAccount,
+  rpcQueryBalance,
   sentprovToSent,
   queryFeeGrant,
   broadcastWithFeeGrant as sdkBroadcastWithFeeGrant,
@@ -596,8 +597,24 @@ export async function discoverPlans(broadcast, opts = {}) {
 // ─── Subscriptions (delegates to SDK) ───────────────────────────────────────
 
 export async function querySubscriptions(walletAddress) {
-  const lcd = await ensureLcd();
+  // RPC primary
   try {
+    const client = await getRpcClient();
+    if (client) {
+      const rpcResult = await rpcQuerySubscriptionsForAccount(client, walletAddress, { limit: 500 });
+      const subs = (rpcResult.items || rpcResult || []).map(s => ({
+        id: s.id || s.base_subscription?.id,
+        plan_id: s.plan_id || s.base_subscription?.plan_id,
+        status: s.status || s.base_subscription?.status,
+        expiry: s.expiry || s.inactive_at || s.base_subscription?.inactive_at || null,
+      }));
+      return subs;
+    }
+  } catch { }
+
+  // LCD fallback
+  try {
+    const lcd = await ensureLcd();
     const result = await sdkQuerySubscriptions(lcd, walletAddress, { status: 1 });
     return (result.items || result || []).map(s => ({
       id: s.id || s.base_subscription?.id,
@@ -606,6 +623,30 @@ export async function querySubscriptions(walletAddress) {
       expiry: s.expiry || s.inactive_at || s.base_subscription?.inactive_at || null,
     }));
   } catch { return []; }
+}
+
+// ─── Balance (RPC primary, LCD fallback) ────────────────────────────────────
+export async function queryBalance(address, denom = 'udvpn') {
+  // RPC primary
+  try {
+    const client = await getRpcClient();
+    if (client) {
+      const coin = await rpcQueryBalance(client, address, denom);
+      return { denom: coin?.denom || denom, amount: String(coin?.amount || '0') };
+    }
+  } catch { }
+
+  // LCD fallback
+  try {
+    const lcd = await ensureLcd();
+    const r = await fetch(`${lcd}/cosmos/bank/v1beta1/balances/${address}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const coin = (data.balances || []).find(c => c.denom === denom);
+    return { denom, amount: coin ? String(coin.amount) : '0' };
+  } catch { return { denom, amount: '0' }; }
 }
 
 export async function hasActiveSubscription(walletAddress, planId) {

@@ -79,6 +79,8 @@
     "docs/",
     "scripts/postinstall.js",
     "bin/cli.js",
+    "bin/commands/",
+    "bin/lib/",
     ".env.example",
     "README.md",
     "LICENSE"

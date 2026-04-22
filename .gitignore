@@ -6,7 +6,15 @@
 node_modules/
 
 # Binaries (V2Ray, WireGuard — downloaded at setup)
-bin/
+bin/v2ray*
+bin/v2ray.exe
+bin/geoip*.dat
+bin/geosite.dat
+bin/*.zip
+bin/config.json
+bin/vpoint_*.json
+bin/v2ray-*/
+# CLI source IS tracked: bin/cli.js, bin/commands/, bin/lib/
 
 # Runtime data (contains wallet addresses, WG private keys, session credentials)
 results/
