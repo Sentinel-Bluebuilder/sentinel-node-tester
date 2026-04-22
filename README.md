@@ -36,6 +36,34 @@ npm start
 
 Open **http://localhost:3001** in your browser.
 
+The `sentinel-audit` binary also accepts subcommands for scripting and AI agent use. Run `sentinel-audit serve` to start the dashboard (equivalent to `npm start`), or use any other subcommand directly:
+
+```bash
+sentinel-audit serve            # Start dashboard (same as npm start)
+sentinel-audit nodes --pretty   # List all active dVPN nodes as JSON
+sentinel-audit balance          # Check wallet balance
+sentinel-audit test <sentnode1...>  # Test a single node end-to-end
+```
+
+See [docs/CLI.md](docs/CLI.md) for the full subcommand reference.
+
+---
+
+## CLI for AI agents
+
+The `sentinel-audit` CLI emits JSON on stdout for every command, making it straightforward to drive from scripts or autonomous agents. An agent can run `sentinel-audit list --json` to enumerate all subcommands, then `sentinel-audit functions --json` to enumerate every exported SDK function, then issue targeted queries or tests without writing any application code.
+
+| Command | Description |
+|---------|-------------|
+| `sentinel-audit list` | Enumerate all available subcommands |
+| `sentinel-audit nodes` | Fetch all active dVPN nodes from the chain |
+| `sentinel-audit balance` | Show wallet P2P token balance |
+| `sentinel-audit test <node>` | Test a single node end-to-end (paid) |
+| `sentinel-audit audit` | Full network audit across all nodes (paid) |
+| `sentinel-audit serve` | Start the web dashboard |
+
+Full reference: [docs/CLI.md](docs/CLI.md)
+
 ---
 
 ## Configuration
