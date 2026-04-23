@@ -52,6 +52,7 @@ export const RPC_ENDPOINTS = [
 
 // ─── LCD Endpoints (ordered by reliability) ──────────────────────────────────
 export const LCD_ENDPOINTS = [
+  'https://lcd.sentinel.co',
   'https://sentinel-api.polkachu.com',
   'https://api.sentinel.quokkastake.io',
   'https://sentinel-rest.publicnode.com',

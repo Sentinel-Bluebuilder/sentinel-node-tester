@@ -6,6 +6,7 @@
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, renameSync } from 'fs';
 import path from 'path';
+import { EventEmitter } from 'events';
 
 import {
   MNEMONIC, DENOM, GIGS, TEST_MB, MAX_NODES, NODE_DELAY,
@@ -102,6 +103,18 @@ async function waitForInternet(broadcast, state) {
   return false;
 }
 
+// ─── Pipeline Event Emitter ──────────────────────────────────────────────────
+// Allows server.js to subscribe to pipeline events (e.g. public-test:error)
+// without a circular dependency (pipeline → continuous is forbidden).
+export const pipelineEmitter = new EventEmitter();
+pipelineEmitter.setMaxListeners(20);
+
+// Public-mode flag — set by server.js via setPipelinePublicMode() when the
+// continuous loop starts/stops in public mode. upsertResult checks this flag
+// before emitting public-test:error to avoid leaking admin-session failures.
+let _pipelinePublicMode = false;
+export function setPipelinePublicMode(on) { _pipelinePublicMode = !!on; }
+
 // ─── Results & State (shared across pipeline functions) ─────────────────────
 mkdirSync(RESULTS_DIR, { recursive: true });
 
@@ -147,7 +160,27 @@ export function logFailure(nodeAddr, error, context = {}) {
   appendFileSync(FAILURE_LOG, JSON.stringify(entry) + '\n', 'utf8');
 }
 
-function upsertResult(result) {
+// ─── Log-snippet sanitizer ────────────────────────────────────────────────────
+// Strip anything that looks like a wallet address, mnemonic, key material,
+// or auth header before persisting or broadcasting.
+const _WALLET_RE    = /sent1[a-z0-9]{38}/g;
+const _MNEMONIC_RE  = /MNEMONIC\s*=\s*\S+/gi;
+const _HEX64_RE     = /[0-9a-fA-F]{64}/g;
+// Lines containing Bearer tokens or Authorization headers are dropped entirely.
+const _AUTH_LINE_RE = /^.*(?:BEARER\s|Authorization:).*/gim;
+const _MAX_SNIPPET  = 4096;
+
+function _sanitizeSnippet(raw) {
+  if (!raw) return null;
+  const s = String(raw)
+    .replace(_AUTH_LINE_RE, '[auth-redacted]')
+    .replace(_WALLET_RE, '[addr]')
+    .replace(_MNEMONIC_RE, 'MNEMONIC=[redacted]')
+    .replace(_HEX64_RE, '[key]');
+  return s.length > _MAX_SNIPPET ? s.slice(-_MAX_SNIPPET) : s;
+}
+
+function upsertResult(result, logSnippet = null) {
   const idx = results.findIndex(r => r.address === result.address);
   if (idx !== -1) results[idx] = result;
   else results.push(result);
@@ -157,7 +190,6 @@ function upsertResult(result) {
     try {
       const resultId = _dbInsertResult(_activeDbRunId, result);
       // For failed tests, also write a detailed error_log row.
-      // Note: no in-memory log buffer exists in the pipeline, so log_snippet is null.
       if (result.actualMbps == null && result.error && resultId) {
         try {
           // Derive stage from the error text (mirrors deriveStage in db.js)
@@ -169,12 +201,27 @@ function upsertResult(result) {
           else if (/session|sessionid|waitforsession/i.test(err)) stage = 'session';
           else if (/speed|socks5|mbps|tunnel|throughput/i.test(err)) stage = 'speedtest';
           _dbInsertErrorLog({
-            result_id: Number(resultId),
+            result_id:     Number(resultId),
             stage,
             error_code:    result.errorCode || null,
             error_message: err.slice(0, 2048),
-            log_snippet:   null, // no per-node log buffer in pipeline
+            log_snippet:   _sanitizeSnippet(logSnippet),
           });
+          // ─── Public SSE: emit only when loop is running in public mode ───
+          if (_pipelinePublicMode) {
+            pipelineEmitter.emit('public-test:error', {
+              node_addr:     result.address || '',
+              moniker:       result.moniker  || '',
+              country:       result.country  || '',
+              stage,
+              error_code:    result.errorCode || null,
+              error_message: err.slice(0, 200),
+              log_snippet:   _sanitizeSnippet(logSnippet) || null,
+              captured_at:   result.timestamp || new Date().toISOString(),
+              run_id:        _activeDbRunId,
+              iteration:     null, // iteration context not available here; filled by server.js
+            });
+          }
         } catch (elErr) {
           console.error(`[db] insertErrorLog failed: ${elErr.message}`);
         }
@@ -392,7 +439,7 @@ export async function runAudit(resume, state, broadcast) {
     broadcast('log', { msg: `Baseline speed: ${baseline.mbps} Mbps (${baseline.chunks} chunks, ${baseline.adaptive})` });
     broadcast('state', { state });
   } catch (e) {
-    broadcast('log', { msg: `Baseline speed test failed: ${e.message}` });
+    broadcast('log', { msg: `Baseline speed test failed: ${_sanitizeSnippet(e.message)}` });
   }
 
   async function refreshBaseline() {
@@ -422,7 +469,7 @@ export async function runAudit(resume, state, broadcast) {
       new Promise((_, reject) => setTimeout(() => reject(new Error('Plan fetch timeout (30s)')), 30_000)),
     ]);
   } catch (planErr) {
-    broadcast('log', { msg: `⚠ Plan membership skipped: ${planErr.message}` });
+    broadcast('log', { msg: `⚠ Plan membership skipped: ${_sanitizeSnippet(planErr.message)}` });
   }
 
   // ── Phase 2: Parallel online scan ──────────────────────────────────────
@@ -539,11 +586,11 @@ export async function runAudit(resume, state, broadcast) {
         try {
           batchSessionMap = await submitBatchPayment(client, account, DENOM, GIGS, batch, state, broadcast);
         } catch (retryErr) {
-          broadcast('log', { msg: `  Batch retry also failed: ${retryErr.message}` });
+          broadcast('log', { msg: `  Batch retry also failed: ${_sanitizeSnippet(retryErr.message)}` });
           batchSessionMap = new Map();
         }
       } else {
-        broadcast('log', { msg: `  Batch payment FAILED: ${payErr.message}` });
+        broadcast('log', { msg: `  Batch payment FAILED: ${_sanitizeSnippet(payErr.message)}` });
         broadcast('log', { msg: `  Falling back to individual payments per node...` });
         batchSessionMap = new Map();
       }
@@ -570,20 +617,41 @@ export async function runAudit(resume, state, broadcast) {
 
       await refreshBaseline();
 
+      // ─── Per-node log buffer (last 40 lines or 4 KB) ───────────────────
+      // Intercept broadcast('log') during the test to capture log lines for
+      // error_logs.log_snippet. The outer broadcast (SSE + file log) is
+      // still called — we add capture on top.
+      const _nodeLogLines = [];
+      const _MAX_LOG_LINES = 40;
+      const _MAX_LOG_BYTES = 4096;
+      const _capturingBroadcast = (type, data) => {
+        broadcast(type, data);
+        if (type === 'log' && data?.msg) {
+          _nodeLogLines.push(String(data.msg));
+          if (_nodeLogLines.length > _MAX_LOG_LINES) _nodeLogLines.shift();
+        }
+      };
+
       const { result, retried, error } = await testWithRetry(
         () => testNode(client, account, privkey, node,
           { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps, nodeStatus: status },
-          sessionId, broadcast, state
+          sessionId, _capturingBroadcast, state
         ),
-        broadcast, state, node.address,
+        _capturingBroadcast, state, node.address,
       );
+
+      // Build snippet: last 40 lines, trimmed to 4 KB from the tail
+      const _rawSnippet = _nodeLogLines.join('\n');
+      const _logSnippet = _rawSnippet.length > _MAX_LOG_BYTES
+        ? _rawSnippet.slice(-_MAX_LOG_BYTES)
+        : (_rawSnippet || null);
 
       if (result) {
         state.testedNodes++;
         if (result.slaApplicable && result.pass15mbps) state.passed15++;
         if (result.pass10mbps) state.passed10++;
         if (result.passBaseline) state.passedBaseline++;
-        upsertResult(result);
+        upsertResult(result); // success — no snippet needed
         saveResults();
         broadcast('result', { result, state });
         if (result.actualMbps != null) {
@@ -634,7 +702,7 @@ export async function runAudit(resume, state, broadcast) {
                 break;
               }
             } catch (balErr) {
-              broadcast('log', { msg: `💰 Balance check failed: ${balErr.message} — retrying in 5 min` });
+              broadcast('log', { msg: `💰 Balance check failed: ${_sanitizeSnippet(balErr.message)} — retrying in 5 min` });
             }
           }
           if (!balanceRestored) break; // stopRequested
@@ -646,7 +714,7 @@ export async function runAudit(resume, state, broadcast) {
         // FAIL result — zero-skip: explicit failure
         const failResult = buildFailResult(node, status, state, errMsg, error?.diag || {});
         state.failedNodes++;
-        upsertResult(failResult);
+        upsertResult(failResult, _logSnippet);
         saveResults();
         broadcast('result', { result: failResult, state });
         const retryLabel = retried > 0 ? ` (${retried} retries)` : '';
@@ -699,13 +767,24 @@ export async function runAudit(resume, state, broadcast) {
       broadcast('state', { state });
       broadcast('log', { msg: `🌐 [${ri + 1}/${retestNodes.length}] Retesting ${node.address.slice(0, 20)}… (internet-failure recovery)` });
 
+      const _irLogLines = [];
+      const _irBroadcast = (type, data) => {
+        broadcast(type, data);
+        if (type === 'log' && data?.msg) {
+          _irLogLines.push(String(data.msg));
+          if (_irLogLines.length > 40) _irLogLines.shift();
+        }
+      };
+
       const { result, retried, error } = await testWithRetry(
         () => testNode(client, account, privkey, node,
           { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps, nodeStatus: status },
-          null, broadcast, state
+          null, _irBroadcast, state
         ),
-        broadcast, state, node.address,
+        _irBroadcast, state, node.address,
       );
+      const _irRaw = _irLogLines.join('\n');
+      const _irSnippet = _irRaw.length > 4096 ? _irRaw.slice(-4096) : (_irRaw || null);
 
       if (error?._stopRequested || error?.message === 'Stop requested') {
         broadcast('log', { msg: `⏸ Internet-recovery retest interrupted — remaining nodes untouched` });
@@ -723,7 +802,7 @@ export async function runAudit(resume, state, broadcast) {
       } else {
         const errMsg = error?.message || 'Unknown';
         const failResult = buildFailResult(node, status, state, errMsg, error?.diag || {});
-        upsertResult(failResult);
+        upsertResult(failResult, _sanitizeSnippet(_irSnippet));
         saveResults();
         broadcast('result', { result: failResult, state });
         broadcast('log', { msg: `  ✗ Internet-recovery retest FAIL: ${errMsg.slice(0, 80)}` });
@@ -754,13 +833,24 @@ export async function runAudit(resume, state, broadcast) {
       broadcast('state', { state });
       broadcast('log', { msg: `🔄 [${ri + 1}/${retestNodes.length}] Retesting ${node.address.slice(0, 20)}…` });
 
+      const _ironLogLines = [];
+      const _ironBroadcast = (type, data) => {
+        broadcast(type, data);
+        if (type === 'log' && data?.msg) {
+          _ironLogLines.push(String(data.msg));
+          if (_ironLogLines.length > 40) _ironLogLines.shift();
+        }
+      };
+
       const { result, retried, error } = await testWithRetry(
         () => testNode(client, account, privkey, node,
           { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps, nodeStatus: status },
-          null, broadcast, state
+          null, _ironBroadcast, state
         ),
-        broadcast, state, node.address,
+        _ironBroadcast, state, node.address,
       );
+      const _ironRaw = _ironLogLines.join('\n');
+      const _ironSnippet = _ironRaw.length > 4096 ? _ironRaw.slice(-4096) : (_ironRaw || null);
 
       if (error?._stopRequested || error?.message === 'Stop requested') {
         broadcast('log', { msg: `⏸ Iron Rule retest interrupted — remaining nodes untouched` });
@@ -778,7 +868,7 @@ export async function runAudit(resume, state, broadcast) {
       } else {
         const errMsg = error?.message || 'Unknown';
         const failResult = buildFailResult(node, status, state, errMsg, error?.diag || {});
-        upsertResult(failResult);
+        upsertResult(failResult, _sanitizeSnippet(_ironSnippet));
         saveResults();
         broadcast('result', { result: failResult, state });
         broadcast('log', { msg: `  ✗ Retest FAIL: ${errMsg.slice(0, 80)}` });
@@ -856,7 +946,7 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
     const bl = await speedtestDirect();
     state.baselineMbps = bl.mbps;
     broadcast('log', { msg: `Baseline: ${bl.mbps} Mbps` });
-  } catch (e) { broadcast('log', { msg: `Baseline failed: ${e.message}` }); }
+  } catch (e) { broadcast('log', { msg: `Baseline failed: ${_sanitizeSnippet(e.message)}` }); }
 
   broadcast('log', { msg: '🔍 Fetching node list...' });
   const allNodes = await getAllNodes(broadcast);
@@ -910,7 +1000,7 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
           }
         }
       } catch (e) {
-        broadcast('log', { msg: `  ✗ ${addr.slice(0, 20)}… lookup failed: ${e.message?.slice(0, 50)}` });
+        broadcast('log', { msg: `  ✗ ${addr.slice(0, 20)}… lookup failed: ${_sanitizeSnippet(e.message?.slice(0, 50))}` });
       }
     }
   }
@@ -936,13 +1026,24 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
     broadcast('log', { msg: `[#${testNum}/${toTest.length}] Retesting ${node.address.slice(0, 20)}…` });
     logLine(`\n[#${testNum}/${toTest.length}] ${node.address}`);
 
+    const _rrLogLines = [];
+    const _rrBroadcast = (type, data) => {
+      broadcast(type, data);
+      if (type === 'log' && data?.msg) {
+        _rrLogLines.push(String(data.msg));
+        if (_rrLogLines.length > 40) _rrLogLines.shift();
+      }
+    };
+
     const { result, retried, error } = await testWithRetry(
       () => testNode(client, account, privkey, node,
         { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps },
-        null, broadcast, state
+        null, _rrBroadcast, state
       ),
-      broadcast, state, node.address,
+      _rrBroadcast, state, node.address,
     );
+    const _rrRaw = _rrLogLines.join('\n');
+    const _rrSnippet = _rrRaw.length > 4096 ? _rrRaw.slice(-4096) : (_rrRaw || null);
 
     if (error?._stopRequested || error?.message === 'Stop requested') {
       broadcast('log', { msg: `⏸ Retest interrupted — remaining nodes untouched` });
@@ -964,7 +1065,7 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
       const errMsg = error?.message || result?.error || 'Unknown';
       const failResult = result || buildFailResult(node, null, state, errMsg, error?.diag || {});
       recomputeCounters(state);
-      upsertResult(failResult);
+      upsertResult(failResult, _sanitizeSnippet(_rrSnippet));
       saveResults();
       broadcast('result', { result: failResult, state });
       state.retestFailed++;
@@ -1062,9 +1163,9 @@ export async function runPlanTest(planId, state, broadcast) {
     }
     broadcast('log', { msg: `  ✓ Subscribed — subscription_id=${subscriptionId} tx=${subResult.transactionHash}` });
   } catch (err) {
-    broadcast('log', { msg: `  ✗ Subscribe failed: ${err.message}` });
+    broadcast('log', { msg: `  ✗ Subscribe failed: ${_sanitizeSnippet(err.message)}` });
     state.status = 'error';
-    state.errorMessage = `Plan subscribe failed: ${err.message}`;
+    state.errorMessage = `Plan subscribe failed: ${_sanitizeSnippet(err.message)}`;
     broadcast('state', { state });
     return;
   }
@@ -1089,7 +1190,7 @@ export async function runPlanTest(planId, state, broadcast) {
         allPlanNodes = await rpcFetchAllNodesForPlanPaginated(rpcClient, planId, broadcast);
         broadcast('log', { msg: `  Fetched ${allPlanNodes.length} plan nodes via RPC (paginated)` });
       } catch (e) {
-        broadcast('log', { msg: `  RPC plan-nodes fetch failed: ${e.message}` });
+        broadcast('log', { msg: `  RPC plan-nodes fetch failed: ${_sanitizeSnippet(e.message)}` });
         allPlanNodes = [];
       }
     }
@@ -1147,7 +1248,7 @@ export async function runPlanTest(planId, state, broadcast) {
     const bl = await speedtestDirect();
     state.baselineMbps = bl.mbps;
     broadcast('log', { msg: `  Baseline: ${bl.mbps} Mbps` });
-  } catch (e) { broadcast('log', { msg: `  Baseline failed: ${e.message}` }); }
+  } catch (e) { broadcast('log', { msg: `  Baseline failed: ${_sanitizeSnippet(e.message)}` }); }
 
   let planPassed = 0, planFailed = 0;
 
@@ -1159,6 +1260,15 @@ export async function runPlanTest(planId, state, broadcast) {
     broadcast('state', { state });
     broadcast('log', { msg: `[${i + 1}/${shuffled.length}] Testing ${node.address.slice(0, 20)}… via plan ${planId}` });
 
+    const _ptLogLines = [];
+    const _ptBroadcast = (type, data) => {
+      broadcast(type, data);
+      if (type === 'log' && data?.msg) {
+        _ptLogLines.push(String(data.msg));
+        if (_ptLogLines.length > 40) _ptLogLines.shift();
+      }
+    };
+
     // Start session via subscription
     let sessionId = null;
     try {
@@ -1166,8 +1276,8 @@ export async function runPlanTest(planId, state, broadcast) {
         typeUrl: V3_SUB_SESSION_TYPE,
         value: { from: account.address, id: BigInt(subscriptionId), nodeAddress: node.address },
       };
-      broadcast('log', { msg: `  Starting session on subscription ${subscriptionId}...` });
-      const sessResult = await signAndBroadcastRetry(client, account.address, [sessMsg], fee, broadcast);
+      _ptBroadcast('log', { msg: `  Starting session on subscription ${subscriptionId}...` });
+      const sessResult = await signAndBroadcastRetry(client, account.address, [sessMsg], fee, _ptBroadcast);
       if (sessResult.code !== 0) {
         throw new Error(`Session tx failed code=${sessResult.code}: ${sessResult.rawLog}`);
       }
@@ -1187,15 +1297,17 @@ export async function runPlanTest(planId, state, broadcast) {
       }
 
       if (!sessionId) throw new Error('No session_id in tx events');
-      broadcast('log', { msg: `  ✓ Session ${sessionId} via subscription — tx=${sessResult.transactionHash}` });
+      _ptBroadcast('log', { msg: `  ✓ Session ${sessionId} via subscription — tx=${sessResult.transactionHash}` });
       await waitForSessionActive(node.address, account.address, 20_000);
     } catch (err) {
-      broadcast('log', { msg: `  ✗ Session start failed: ${err.message}` });
+      _ptBroadcast('log', { msg: `  ✗ Session start failed: ${_sanitizeSnippet(err.message)}` });
       planFailed++;
-      const errResult = buildFailResult(node, status, state, `plan-session: ${err.message}`, { planId, subscriptionId });
+      const _ptRawSess = _ptLogLines.join('\n');
+      const _ptSnippetSess = _ptRawSess.length > 4096 ? _ptRawSess.slice(-4096) : (_ptRawSess || null);
+      const errResult = buildFailResult(node, status, state, `plan-session: ${_sanitizeSnippet(err.message)}`, { planId, subscriptionId });
       errResult.inPlan = true;
       errResult.planIds = [planId];
-      upsertResult(errResult);
+      upsertResult(errResult, _sanitizeSnippet(_ptSnippetSess));
       saveResults();
       broadcast('result', { result: errResult, state });
       continue;
@@ -1205,10 +1317,12 @@ export async function runPlanTest(planId, state, broadcast) {
     const { result, retried, error } = await testWithRetry(
       () => testNode(client, account, privkey, node,
         { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps, nodeStatus: status },
-        BigInt(sessionId), broadcast, state
+        BigInt(sessionId), _ptBroadcast, state
       ),
-      broadcast, state, node.address,
+      _ptBroadcast, state, node.address,
     );
+    const _ptRaw = _ptLogLines.join('\n');
+    const _ptSnippet = _ptRaw.length > 4096 ? _ptRaw.slice(-4096) : (_ptRaw || null);
 
     if (result) {
       state.testedNodes++;
@@ -1241,7 +1355,7 @@ export async function runPlanTest(planId, state, broadcast) {
       const failResult = buildFailResult(node, status, state, `plan-test: ${errMsg}`, error?.diag || {});
       failResult.inPlan = true;
       failResult.planIds = [planId];
-      upsertResult(failResult);
+      upsertResult(failResult, _sanitizeSnippet(_ptSnippet));
       saveResults();
       broadcast('result', { result: failResult, state });
       broadcast('log', { msg: `  ✗ Test error: ${errMsg}` });
@@ -1301,21 +1415,50 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
   state.spentUdvpn = 0;
   broadcast('state', { state });
 
-  // Verify fee grant is still active (granter may have revoked)
-  const { queryFeeGrant, broadcastWithFeeGrant, hasActiveSubscription, ensureLcd: _ensureLcd } = await import('../core/chain.js');
+  // Pre-broadcast fee grant verification — abort with structured error if missing/expired.
+  // A revoked fee grant means EVERY session TX will fail; fail fast before spending any chain time.
+  const { queryFeeGrant, queryFeeGrantRpcFirst, getRpcClient: _getRpcClient, broadcastWithFeeGrant, hasActiveSubscription, ensureLcd: _ensureLcd } = await import('../core/chain.js');
   const lcd = await _ensureLcd();
+  const _fgRpcClient = await _getRpcClient();
   try {
-    const allowance = await queryFeeGrant(lcd, granterAddr, account.address);
+    const allowance = await queryFeeGrantRpcFirst(_fgRpcClient, lcd, granterAddr, account.address);
     if (!allowance) {
+      const abortErr = {
+        code: 'FEE_GRANT_MISSING_AT_START',
+        granter: granterAddr,
+        grantee: account.address,
+        allowanceType: null,
+        spendLimit: null,
+        message: `Plan owner ${granterAddr.slice(0, 16)}… has no active fee grant for this wallet`,
+      };
       state.status = 'error';
-      state.errorMessage = `Plan owner ${granterAddr.slice(0, 16)}… has no active fee grant for this wallet`;
+      state.errorMessage = abortErr.message;
+      state.errorCode = abortErr.code;
       broadcast('state', { state });
-      broadcast('log', { msg: `  ✗ No fee grant — cannot continue (plan owner must grant first)` });
+      broadcast('log', { msg: `  ✗ FEE_GRANT_MISSING_AT_START — cannot continue (plan owner must grant first)` });
       return;
     }
-    broadcast('log', { msg: `  ✓ Fee grant verified — granter pays gas on every session TX` });
+    // Surface allowance details in log for operator debugging
+    const allowanceType = allowance['@type'] || allowance.type_url || null;
+    const spendLimit = allowance.spend_limit || allowance.allowance?.spend_limit || null;
+    broadcast('log', { msg: `  ✓ Fee grant verified — type=${allowanceType || 'unknown'} limit=${JSON.stringify(spendLimit) || 'none'}` });
   } catch (err) {
-    broadcast('log', { msg: `  ⚠ Fee grant check failed (${err.message}) — proceeding anyway` });
+    // If the query itself throws (network error), abort rather than silently proceeding —
+    // we cannot know whether the grant exists, and every session TX would fail.
+    const abortErr = {
+      code: 'FEE_GRANT_MISSING_AT_START',
+      granter: granterAddr,
+      grantee: account.address,
+      allowanceType: null,
+      spendLimit: null,
+      message: `Fee grant check threw: ${_sanitizeSnippet(err.message)}`,
+    };
+    state.status = 'error';
+    state.errorMessage = abortErr.message;
+    state.errorCode = abortErr.code;
+    broadcast('state', { state });
+    broadcast('log', { msg: `  ✗ FEE_GRANT_MISSING_AT_START — check threw error, aborting: ${_sanitizeSnippet(err.message)}` });
+    return;
   }
 
   // Verify subscription still active
@@ -1342,7 +1485,7 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
         allPlanNodes = await rpcFetchAllNodesForPlanPaginated(rpcClient, planId, broadcast);
         broadcast('log', { msg: `  Fetched ${allPlanNodes.length} plan nodes via RPC (paginated)` });
       } catch (e) {
-        broadcast('log', { msg: `  RPC plan-nodes fetch failed: ${e.message}` });
+        broadcast('log', { msg: `  RPC plan-nodes fetch failed: ${_sanitizeSnippet(e.message)}` });
         allPlanNodes = [];
       }
     }
@@ -1397,7 +1540,7 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
     const bl = await speedtestDirect();
     state.baselineMbps = bl.mbps;
     broadcast('log', { msg: `  Baseline: ${bl.mbps} Mbps` });
-  } catch (e) { broadcast('log', { msg: `  Baseline failed: ${e.message}` }); }
+  } catch (e) { broadcast('log', { msg: `  Baseline failed: ${_sanitizeSnippet(e.message)}` }); }
 
   let subPassed = 0, subFailed = 0;
 
@@ -1408,13 +1551,22 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
     broadcast('state', { state });
     broadcast('log', { msg: `[${i + 1}/${onlineNodes.length}] Testing ${node.address.slice(0, 20)}… via Sub. Plan ${planId}` });
 
+    const _spLogLines = [];
+    const _spBroadcast = (type, data) => {
+      broadcast(type, data);
+      if (type === 'log' && data?.msg) {
+        _spLogLines.push(String(data.msg));
+        if (_spLogLines.length > 40) _spLogLines.shift();
+      }
+    };
+
     let sessionId = null;
     try {
       const sessMsg = {
         typeUrl: V3_SUB_SESSION_TYPE,
         value: { from: account.address, id: BigInt(subscriptionId), nodeAddress: node.address },
       };
-      broadcast('log', { msg: `  Starting session (fee-granted by ${granterAddr.slice(0, 12)}…)` });
+      _spBroadcast('log', { msg: `  Starting session (fee-granted by ${granterAddr.slice(0, 12)}…)` });
       const sessResult = await broadcastWithFeeGrant(client, account.address, [sessMsg], granterAddr);
       if (sessResult.code !== 0) {
         throw new Error(`Session tx failed code=${sessResult.code}: ${sessResult.rawLog}`);
@@ -1434,19 +1586,21 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
         }
       }
       if (!sessionId) throw new Error('No session_id in tx events');
-      broadcast('log', { msg: `  ✓ Session ${sessionId} (fee-granted) — tx=${sessResult.transactionHash}` });
+      _spBroadcast('log', { msg: `  ✓ Session ${sessionId} (fee-granted) — tx=${sessResult.transactionHash}` });
       await waitForSessionActive(node.address, account.address, 20_000);
     } catch (err) {
-      broadcast('log', { msg: `  ✗ Fee-granted session start failed: ${err.message}` });
+      _spBroadcast('log', { msg: `  ✗ Fee-granted session start failed: ${_sanitizeSnippet(err.message)}` });
       subFailed++;
-      const errResult = buildFailResult(node, status, state, `sub-plan-session: ${err.message}`, { planId, subscriptionId, granter: granterAddr });
+      const _spRawSess = _spLogLines.join('\n');
+      const _spSnippetSess = _spRawSess.length > 4096 ? _spRawSess.slice(-4096) : (_spRawSess || null);
+      const errResult = buildFailResult(node, status, state, `sub-plan-session: ${_sanitizeSnippet(err.message)}`, { planId, subscriptionId, granter: granterAddr });
       errResult.inPlan = true;
       errResult.planIds = [planId];
       errResult.diag = errResult.diag || {};
       errResult.diag.viaSubscription = true;
       errResult.diag.feeGranted = true;
       errResult.diag.granter = granterAddr;
-      upsertResult(errResult);
+      upsertResult(errResult, _sanitizeSnippet(_spSnippetSess));
       saveResults();
       broadcast('result', { result: errResult, state });
       continue;
@@ -1455,10 +1609,12 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
     const { result, retried, error } = await testWithRetry(
       () => testNode(client, account, privkey, node,
         { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps, nodeStatus: status },
-        BigInt(sessionId), broadcast, state
+        BigInt(sessionId), _spBroadcast, state
       ),
-      broadcast, state, node.address,
+      _spBroadcast, state, node.address,
     );
+    const _spRaw = _spLogLines.join('\n');
+    const _spSnippet = _spRaw.length > 4096 ? _spRaw.slice(-4096) : (_spRaw || null);
 
     if (result) {
       state.testedNodes++;
@@ -1497,7 +1653,7 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
       failResult.diag.viaSubscription = true;
       failResult.diag.feeGranted = true;
       failResult.diag.granter = granterAddr;
-      upsertResult(failResult);
+      upsertResult(failResult, _sanitizeSnippet(_spSnippet));
       saveResults();
       broadcast('result', { result: failResult, state });
       broadcast('log', { msg: `  ✗ Test error: ${errMsg}` });

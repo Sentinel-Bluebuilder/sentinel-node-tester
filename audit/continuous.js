@@ -77,10 +77,10 @@ async function sleepInterruptible(ms) {
  * @returns {Promise<void>} Throws if no active allowance found.
  */
 async function verifyFeeGrant(granterAddr, granteeAddr) {
-  const { queryFeeGrant } = await import('../core/chain.js');
-  const { ensureLcd } = await import('../core/chain.js');
+  const { queryFeeGrantRpcFirst, getRpcClient, ensureLcd } = await import('../core/chain.js');
   const lcd = await ensureLcd();
-  const grant = await queryFeeGrant(lcd, granterAddr, granteeAddr);
+  const rpcClient = await getRpcClient();
+  const grant = await queryFeeGrantRpcFirst(rpcClient, lcd, granterAddr, granteeAddr);
   if (!grant) {
     throw new Error(
       `No active fee-grant from ${granterAddr} to ${granteeAddr}. ` +
