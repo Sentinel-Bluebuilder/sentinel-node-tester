@@ -10,6 +10,13 @@
  *   'loop:error'          { error: string, iteration }
  *   'iteration:start'     { iteration, mode }
  *   'iteration:end'       { iteration, mode, durationMs, passed, failed }
+ *
+ * Batch-model events (each full node-sweep is one batch):
+ *   'batch:start'         { batchId, snapshotSize, mode, startedAt }
+ *   'batch:node:result'   { batchId, address, moniker, country, city, type,
+ *                           actualMbps, peers, maxPeers, error, errorCode, testedAt }
+ *   'batch:end'           { batchId, passed, failed, durationMs }
+ *   'batch:gap'           { gapMs, nextBatchAt }
  */
 
 import { EventEmitter } from 'events';
@@ -89,15 +96,75 @@ async function verifyFeeGrant(granterAddr, granteeAddr) {
   }
 }
 
+// ─── Batch State ──────────────────────────────────────────────────────────────
+
+/** Incremented each time a new batch starts. Module-scoped for export via status(). */
+let _batchId = 0;
+
+/**
+ * Build a sanitized `batch:node:result` payload from a raw pipeline result.
+ * Strips wallet, SDK, OS, baseline, inPlan, diag fields — public-safe only.
+ *
+ * @param {object} result - Raw pipeline result object
+ * @param {number} batchId
+ * @returns {object}
+ */
+function _sanitizeBatchNodeResult(result, batchId) {
+  return {
+    batchId,
+    address:   result.address   || '',
+    moniker:   result.moniker   || null,
+    country:   result.country   || null,
+    city:      result.city      || null,
+    type:      result.type      || null,
+    actualMbps: result.actualMbps ?? null,
+    peers:     result.peers     ?? null,
+    maxPeers:  result.maxPeers  ?? null,
+    error:     result.error     ? String(result.error).slice(0, 200) : null,
+    errorCode: result.errorCode || null,
+    testedAt:  Date.now(),
+  };
+}
+
 // ─── Core Loop ────────────────────────────────────────────────────────────────
 
 /**
  * Run one audit pass (p2p or subscription) and return summary counts.
+ * During the pass, each node result is captured and emitted as `batch:node:result`
+ * and persisted to the `batch_results` DB table.
  *
  * @param {object} loopState - Pipeline state object (created fresh per iteration)
+ * @param {number} batchId   - Current batch DB id
  * @returns {Promise<{ passed: number, failed: number }>}
  */
-async function _runOnePass(loopState) {
+async function _runOnePass(loopState, batchId) {
+  // Build a broadcast intercept that captures 'result' events for batch tracking.
+  // All other broadcast types (log, state) are silently dropped (noop) —
+  // the continuous loop emits its own high-level events instead.
+  let _dbModule = null;
+  const _getDb = async () => {
+    if (!_dbModule && !_runnerFn) {
+      try { _dbModule = await import('../core/db.js'); } catch { /* non-fatal */ }
+    }
+    return _dbModule;
+  };
+
+  function batchBroadcast(type, data) {
+    if (type !== 'result') return; // only care about per-node results
+    const raw = data?.result;
+    if (!raw) return;
+    const payload = _sanitizeBatchNodeResult(raw, batchId);
+    _emitter.emit('batch:node:result', payload);
+    // Also emit old-compat event so existing public SSE listeners see per-node data
+    _emitter.emit('public-test:node:result', payload);
+    // Persist to batch_results (non-blocking, non-fatal)
+    _getDb().then(db => {
+      if (db) {
+        try { db.insertBatchResult(batchId, payload); } catch { /* non-fatal */ }
+      }
+    }).catch(() => {});
+  }
+
   // Use injected mock runner if provided (test path), otherwise resolve real pipeline.
   // ES module imports are cached by Node so repeated imports are near-zero cost.
   let runner = _runnerFn;
@@ -109,9 +176,9 @@ async function _runOnePass(loopState) {
           _ctrl.subscriptionId,
           _ctrl.subscriptionGranter,
           st,
-          () => {}, // noop broadcast — loop emits its own events
+          batchBroadcast,
         )
-      : (st) => pipeline.runAudit(false, st, () => {});
+      : (st) => pipeline.runAudit(false, st, batchBroadcast);
   }
 
   await runner(loopState);
@@ -120,6 +187,24 @@ async function _runOnePass(loopState) {
   const passed = loopState.testedNodes || 0;
   const failed  = loopState.failedNodes  || 0;
   return { passed, failed };
+}
+
+/**
+ * Resolve the number of nodes in the current snapshot (best-effort).
+ * Used to populate `snapshot_size` on the batch record.
+ * Returns 0 on any error rather than blocking loop startup.
+ *
+ * @returns {Promise<number>}
+ */
+async function _resolveSnapshotSize() {
+  try {
+    const { getAllNodes, ensureLcd } = await import('../core/chain.js');
+    await ensureLcd();
+    const nodes = await getAllNodes(() => {});
+    return Array.isArray(nodes) ? nodes.length : 0;
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -167,7 +252,7 @@ async function _runLoop() {
         if (_ctrl.stopRequested) break;
       }
 
-      // ─── Persistence: open a DB run record ──────────────────────────────
+      // ─── Persistence: open a DB run record (legacy runs table) ──────────
       // Skip DB writes when a mock runner is injected (test path). Tests that
       // need DB persistence should use their own :memory: handle via useDb().
       let dbRunId = null;
@@ -190,12 +275,41 @@ async function _runLoop() {
         }
       }
 
+      // ─── Batch: open a batch record ──────────────────────────────────────
+      // Each iteration of the continuous loop is one "batch" — a complete
+      // sweep of the node snapshot. batchId is module-scoped so status() can
+      // expose it and API endpoints can query it.
+      let currentBatchId = 0;
+      let snapshotSize = 0;
+      if (!_runnerFn) {
+        snapshotSize = await _resolveSnapshotSize();
+        try {
+          const { insertBatch } = await import('../core/db.js');
+          currentBatchId = insertBatch({
+            started_at:    iterStart,
+            snapshot_size: snapshotSize,
+            mode:          _ctrl.mode || 'p2p',
+          });
+          _batchId = currentBatchId;
+        } catch (dbErr) {
+          console.error(`[continuous] insertBatch failed: ${dbErr.message}`);
+        }
+      }
+
+      _emitter.emit('batch:start', {
+        batchId:      currentBatchId,
+        snapshotSize,
+        mode:         _ctrl.mode,
+        startedAt:    iterStart,
+        iteration:    _ctrl.iteration,
+      });
+
       let passed = 0;
       let failed = 0;
       let iterErr = null;
 
       try {
-        ({ passed, failed } = await _runOnePass(loopState));
+        ({ passed, failed } = await _runOnePass(loopState, currentBatchId));
       } catch (err) {
         iterErr = err;
         _ctrl.lastError = err.message || String(err);
@@ -207,7 +321,7 @@ async function _runLoop() {
 
       const durationMs = Date.now() - iterStart;
 
-      // ─── Persistence: close the DB run record ───────────────────────────
+      // ─── Persistence: close the DB run record (legacy) ──────────────────
       if (dbRunId != null) {
         try {
           const { updateRunOnFinish } = await import('../core/db.js');
@@ -220,6 +334,28 @@ async function _runLoop() {
           console.error(`[continuous] updateRunOnFinish failed: ${dbErr.message}`);
         }
       }
+
+      // ─── Batch: close the batch record ──────────────────────────────────
+      if (!_runnerFn && currentBatchId > 0) {
+        try {
+          const { updateBatchOnFinish } = await import('../core/db.js');
+          updateBatchOnFinish(currentBatchId, {
+            finished_at: Date.now(),
+            passed,
+            failed,
+          });
+        } catch (dbErr) {
+          console.error(`[continuous] updateBatchOnFinish failed: ${dbErr.message}`);
+        }
+      }
+
+      _emitter.emit('batch:end', {
+        batchId:   currentBatchId,
+        passed,
+        failed,
+        durationMs,
+        iteration: _ctrl.iteration,
+      });
 
       _emitter.emit('iteration:end', {
         iteration: _ctrl.iteration,
@@ -238,6 +374,14 @@ async function _runLoop() {
 
       // Interruptible delay before the next iteration
       const delayMs = _delayOverride !== null ? _delayOverride : _ctrl.minDelayMs;
+      const nextBatchAt = Date.now() + delayMs;
+
+      _emitter.emit('batch:gap', {
+        gapMs:       delayMs,
+        nextBatchAt,
+        iteration:   _ctrl.iteration,
+      });
+
       const interrupted = await sleepInterruptible(delayMs);
       if (interrupted) {
         stopReason = 'requested';
@@ -386,6 +530,7 @@ export function status() {
     startedAt:    _ctrl.startedAt,
     lastError:    _ctrl.lastError,
     uptime:       _ctrl.startedAt ? Date.now() - _ctrl.startedAt : null,
+    batchId:      _batchId,
   };
 }
 

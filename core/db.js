@@ -203,6 +203,45 @@ function runMigrations(db) {
     db.prepare('UPDATE schema_version SET version = 3').run();
     })();
   }
+
+  if (current < 4) {
+    db.transaction(() => {
+    // ── Migration v4: public batch-model tables ──────────────────────────────
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS batches (
+        id           INTEGER PRIMARY KEY,
+        started_at   INTEGER NOT NULL,
+        finished_at  INTEGER,
+        snapshot_size INTEGER NOT NULL DEFAULT 0,
+        passed       INTEGER NOT NULL DEFAULT 0,
+        failed       INTEGER NOT NULL DEFAULT 0,
+        mode         TEXT NOT NULL DEFAULT 'p2p'
+      );
+
+      CREATE TABLE IF NOT EXISTS batch_results (
+        id          INTEGER PRIMARY KEY,
+        batch_id    INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+        node_address TEXT NOT NULL,
+        type        TEXT,
+        moniker     TEXT,
+        country     TEXT,
+        city        TEXT,
+        actual_mbps REAL,
+        peers       INTEGER,
+        max_peers   INTEGER,
+        error       TEXT,
+        error_code  TEXT,
+        tested_at   INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_batch_results_batch_id    ON batch_results(batch_id);
+      CREATE INDEX IF NOT EXISTS idx_batch_results_node_address ON batch_results(node_address);
+      CREATE INDEX IF NOT EXISTS idx_batches_started_at        ON batches(started_at);
+    `);
+
+    db.prepare('UPDATE schema_version SET version = 4').run();
+    })();
+  }
 }
 
 // ─── Run Mutations ───────────────────────────────────────────────────────────
@@ -873,6 +912,177 @@ export function getCountryList() {
     GROUP BY country
     ORDER BY node_count DESC, country ASC
   `).all();
+}
+
+// ─── Cross-Node Error Search ─────────────────────────────────────────────────
+
+/**
+ * Search error_logs across ALL nodes, joined with results for node metadata.
+ *
+ * @param {object} [opts]
+ * @param {string}  [opts.q]      - free-text: matches node_addr, moniker, or error_message (LIKE)
+ * @param {string}  [opts.stage]  - exact match on error_logs.stage
+ * @param {number}  [opts.limit=100]  - cap 500
+ * @param {number}  [opts.offset=0]
+ * @returns {{ total: number, items: object[] }}
+ */
+export function searchErrors({ q = null, stage = null, limit = 100, offset = 0 } = {}) {
+  const db = getDb();
+  const cappedLimit = Math.min(Math.max(1, parseInt(limit, 10) || 100), 500);
+  const safeOffset  = Math.max(0, parseInt(offset, 10) || 0);
+
+  const conditions = [];
+  const params = {};
+
+  if (stage) {
+    conditions.push('el.stage = @stage');
+    params.stage = stage;
+  }
+  if (q) {
+    conditions.push(
+      '(r.node_addr LIKE @q OR r.moniker LIKE @q OR el.error_message LIKE @q)',
+    );
+    params.q = `%${q}%`;
+  }
+
+  const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+  const countRow = db.prepare(`
+    SELECT COUNT(*) AS n
+    FROM error_logs el
+    INNER JOIN results r ON el.result_id = r.id
+    ${where}
+  `).get(params);
+
+  const total = countRow ? countRow.n : 0;
+
+  if (total === 0) return { total: 0, items: [] };
+
+  params.limit  = cappedLimit;
+  params.offset = safeOffset;
+
+  const rows = db.prepare(`
+    SELECT
+      el.id           AS error_log_id,
+      el.result_id,
+      r.node_addr,
+      r.moniker,
+      r.country,
+      el.stage,
+      el.error_code,
+      el.error_message,
+      el.log_snippet,
+      el.captured_at,
+      r.run_id,
+      r.iteration
+    FROM error_logs el
+    INNER JOIN results r ON el.result_id = r.id
+    ${where}
+    ORDER BY el.captured_at DESC
+    LIMIT @limit OFFSET @offset
+  `).all(params);
+
+  return { total, items: rows };
+}
+
+// ─── Batch Mutations ──────────────────────────────────────────────────────────
+
+/**
+ * Insert a new batch record. Returns the inserted batch id.
+ *
+ * @param {{ started_at: number, snapshot_size: number, mode?: string }} opts
+ * @returns {number} batch id
+ */
+export function insertBatch({ started_at, snapshot_size, mode = 'p2p' }) {
+  const db = getDb();
+  const info = db.prepare(`
+    INSERT INTO batches (started_at, snapshot_size, passed, failed, mode)
+    VALUES (@started_at, @snapshot_size, 0, 0, @mode)
+  `).run({ started_at, snapshot_size, mode });
+  return info.lastInsertRowid;
+}
+
+/**
+ * Update a batch record on completion.
+ *
+ * @param {number} batchId
+ * @param {{ finished_at: number, passed: number, failed: number }} opts
+ */
+export function updateBatchOnFinish(batchId, { finished_at, passed, failed }) {
+  getDb().prepare(`
+    UPDATE batches SET finished_at = @finished_at, passed = @passed, failed = @failed
+    WHERE id = @id
+  `).run({ id: batchId, finished_at, passed, failed });
+}
+
+/**
+ * Insert a single batch_results row (called as each node finishes).
+ *
+ * @param {number} batch_id
+ * @param {object} r - Sanitized result object
+ * @returns {number} inserted row id
+ */
+export function insertBatchResult(batch_id, r) {
+  const db = getDb();
+  const info = db.prepare(`
+    INSERT INTO batch_results
+      (batch_id, node_address, type, moniker, country, city,
+       actual_mbps, peers, max_peers, error, error_code, tested_at)
+    VALUES
+      (@batch_id, @node_address, @type, @moniker, @country, @city,
+       @actual_mbps, @peers, @max_peers, @error, @error_code, @tested_at)
+  `).run({
+    batch_id,
+    node_address: r.address || r.node_address || '',
+    type:         r.type || null,
+    moniker:      r.moniker || null,
+    country:      r.country || null,
+    city:         r.city || null,
+    actual_mbps:  r.actualMbps ?? r.actual_mbps ?? null,
+    peers:        r.peers ?? null,
+    max_peers:    r.maxPeers ?? r.max_peers ?? null,
+    error:        r.error ? String(r.error).slice(0, 500) : null,
+    error_code:   r.errorCode || r.error_code || null,
+    tested_at:    r.testedAt || r.tested_at || Date.now(),
+  });
+  return info.lastInsertRowid;
+}
+
+/**
+ * List the most recent batches, newest first.
+ *
+ * @param {{ limit?: number }} [opts]
+ * @returns {object[]}
+ */
+export function listBatches({ limit = 50 } = {}) {
+  return getDb().prepare(`
+    SELECT id, started_at, finished_at, snapshot_size, passed, failed, mode
+    FROM batches
+    ORDER BY started_at DESC
+    LIMIT @limit
+  `).all({ limit });
+}
+
+/**
+ * Get the public-safe node results for a single batch.
+ *
+ * @param {number} batchId
+ * @param {{ limit?: number, offset?: number }} [opts]
+ * @returns {{ batch: object|null, results: object[] }}
+ */
+export function getBatchResults(batchId, { limit = 500, offset = 0 } = {}) {
+  const db = getDb();
+  const batch = db.prepare('SELECT * FROM batches WHERE id = @id').get({ id: batchId });
+  if (!batch) return { batch: null, results: [] };
+  const results = db.prepare(`
+    SELECT node_address, type, moniker, country, city,
+           actual_mbps, peers, max_peers, error, error_code, tested_at
+    FROM batch_results
+    WHERE batch_id = @batch_id
+    ORDER BY tested_at ASC
+    LIMIT @limit OFFSET @offset
+  `).all({ batch_id: batchId, limit, offset });
+  return { batch, results };
 }
 
 // ─── Close ────────────────────────────────────────────────────────────────────
