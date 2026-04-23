@@ -39,6 +39,7 @@ import { checkAndPauseIfInterference, classifyFailure } from '../protocol/diagno
 import { loadTransportCache, getCacheStats, saveTransportCache } from '../core/transport-cache.js';
 import { testNode } from './node-test.js';
 import { testWithRetry } from './retry.js';
+import { insertResult as _dbInsertResult, insertErrorLog as _dbInsertErrorLog } from '../core/db.js';
 
 // ─── Internet Health Check & Auto-Resume ─────────────────────────────────────
 const INTERNET_CHECK_TARGETS = ['https://www.google.com', 'https://1.1.1.1', 'https://www.cloudflare.com'];
@@ -115,8 +116,14 @@ export function getResults() { return results; }
 // Write to temp file then rename (atomic on most filesystems).
 // Also continuously save to the active run directory so a kill never loses data.
 let _activeRunDir = null;
+let _activeDbRunId = null;
 
 export function setActiveRunDir(dir) { _activeRunDir = dir; }
+
+/** Set the SQLite run_id for the current audit run (called from server.js). */
+export function setActiveDbRunId(id) { _activeDbRunId = id; }
+/** Get the current SQLite run_id (null if not yet set). */
+export function getActiveDbRunId() { return _activeDbRunId; }
 
 export function saveResults() {
   const data = JSON.stringify(results, null, 2);
@@ -144,6 +151,39 @@ function upsertResult(result) {
   const idx = results.findIndex(r => r.address === result.address);
   if (idx !== -1) results[idx] = result;
   else results.push(result);
+
+  // ─── SQLite persistence (non-blocking — failure must not stop the audit) ─
+  if (_activeDbRunId != null) {
+    try {
+      const resultId = _dbInsertResult(_activeDbRunId, result);
+      // For failed tests, also write a detailed error_log row.
+      // Note: no in-memory log buffer exists in the pipeline, so log_snippet is null.
+      if (result.actualMbps == null && result.error && resultId) {
+        try {
+          // Derive stage from the error text (mirrors deriveStage in db.js)
+          const err = result.error || '';
+          let stage = 'other';
+          if (/insufficient|no udvpn pricing|no pricing/i.test(err)) stage = 'wallet';
+          else if (/rpc|abci query|broadcast|tx failed|sign|code: 1\d\d/i.test(err)) stage = 'rpc';
+          else if (/handshake|address mismatch|already exists|409|does not exist/i.test(err)) stage = 'handshake';
+          else if (/session|sessionid|waitforsession/i.test(err)) stage = 'session';
+          else if (/speed|socks5|mbps|tunnel|throughput/i.test(err)) stage = 'speedtest';
+          _dbInsertErrorLog({
+            result_id: Number(resultId),
+            stage,
+            error_code:    result.errorCode || null,
+            error_message: err.slice(0, 2048),
+            log_snippet:   null, // no per-node log buffer in pipeline
+          });
+        } catch (elErr) {
+          console.error(`[db] insertErrorLog failed: ${elErr.message}`);
+        }
+      }
+    } catch (dbErr) {
+      // Log but never throw — JSON file is the authoritative backup
+      console.error(`[db] insertResult failed: ${dbErr.message}`);
+    }
+  }
 }
 
 /**

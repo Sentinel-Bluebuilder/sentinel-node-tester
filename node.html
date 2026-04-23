@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Node Detail — Sentinel Audit</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0a0e1a;
+      --panel: #121826;
+      --panel2: #1a2332;
+      --border: #2a3548;
+      --text: #e8ecf5;
+      --muted: #8a96ab;
+      --accent: #4a9eff;
+      --pass: #2ecc71;
+      --fail: #e74c3c;
+      --warn: #f39c12;
+      --none: #3a4558;
+    }
+    html, body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      line-height: 1.45;
+      min-height: 100vh;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    header {
+      padding: 20px 24px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    .back { display: inline-block; margin-bottom: 10px; font-size: 13px; }
+    .title {
+      display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px;
+    }
+    .title h1 { font-size: 20px; font-weight: 600; }
+    .title .addr {
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      font-size: 12px;
+      color: var(--muted);
+      word-break: break-all;
+    }
+    .meta { margin-top: 6px; color: var(--muted); font-size: 13px; }
+    .meta span { margin-right: 12px; }
+    .copy-btn {
+      background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+      border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;
+    }
+    .copy-btn:hover { background: var(--border); }
+
+    main { padding: 20px 24px; max-width: 1200px; margin: 0 auto; }
+    section { margin-bottom: 28px; }
+    h2 {
+      font-size: 15px; font-weight: 600; margin-bottom: 12px;
+      color: var(--text); text-transform: uppercase; letter-spacing: 0.5px;
+    }
+
+    .summary-grid {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+    }
+    .summary-cell {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+      padding: 14px;
+    }
+    .summary-cell .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    .summary-cell .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
+
+    .chart-wrap {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+      padding: 16px;
+    }
+    .chart-wrap svg { width: 100%; height: 240px; display: block; }
+    .chart-legend { margin-top: 8px; font-size: 12px; color: var(--muted); }
+    .chart-legend .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+
+    .uptime-bar {
+      display: flex; gap: 2px; background: var(--panel); padding: 12px;
+      border: 1px solid var(--border); border-radius: 6px;
+      overflow-x: auto;
+    }
+    .uptime-seg { flex: 1 0 6px; height: 32px; border-radius: 2px; min-width: 6px; }
+    .uptime-seg.pass { background: var(--pass); }
+    .uptime-seg.fail { background: var(--fail); }
+    .uptime-seg.none { background: var(--none); }
+
+    table {
+      width: 100%; border-collapse: collapse; font-size: 13px;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+      overflow: hidden;
+    }
+    th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+    th { background: var(--panel2); font-weight: 600; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+    tr:last-child td { border-bottom: none; }
+    td.mono { font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 12px; }
+    td.pass { color: var(--pass); }
+    td.fail { color: var(--fail); }
+
+    .error-group {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+      padding: 12px; margin-bottom: 8px;
+    }
+    .error-group .eg-head {
+      display: flex; justify-content: space-between; align-items: baseline;
+      cursor: pointer;
+    }
+    .error-group .eg-code { font-weight: 600; color: var(--warn); font-family: ui-monospace, monospace; }
+    .error-group .eg-count { color: var(--muted); font-size: 12px; }
+    .error-group .eg-msg { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .error-group .eg-list { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); display: none; }
+    .error-group.open .eg-list { display: block; }
+    .error-group .eg-list div { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); margin-bottom: 4px; word-break: break-all; }
+
+    .loading { color: var(--muted); padding: 40px; text-align: center; }
+    .error-msg { color: var(--fail); padding: 20px; background: var(--panel); border: 1px solid var(--fail); border-radius: 6px; }
+
+    @media (max-width: 768px) {
+      .summary-grid { grid-template-columns: repeat(2, 1fr); }
+      main { padding: 14px; }
+      header { padding: 14px; }
+      .title h1 { font-size: 17px; }
+      .chart-wrap svg { height: 180px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="/" class="back">&larr; Back to dashboard</a>
+    <div class="title">
+      <h1 id="moniker">Loading&hellip;</h1>
+      <span class="addr" id="addr"></span>
+      <button class="copy-btn" id="copyBtn" onclick="copyAddr()">Copy</button>
+    </div>
+    <div class="meta" id="meta"></div>
+  </header>
+
+  <main>
+    <div id="content"><div class="loading">Loading node detail&hellip;</div></div>
+  </main>
+
+  <script>
+    const addr = decodeURIComponent(window.location.pathname.replace(/^\/node\//, ''));
+    document.getElementById('addr').textContent = addr;
+
+    function copyAddr() {
+      navigator.clipboard.writeText(addr);
+      const btn = document.getElementById('copyBtn');
+      const old = btn.textContent;
+      btn.textContent = 'Copied';
+      setTimeout(() => { btn.textContent = old; }, 1200);
+    }
+
+    function fmtMbps(v)   { return v == null ? '-' : v.toFixed(2) + ' Mbps'; }
+    function fmtRel(ts)   {
+      const s = Math.floor((Date.now() - ts) / 1000);
+      if (s < 60) return s + 's ago';
+      if (s < 3600) return Math.floor(s / 60) + 'm ago';
+      if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+      return Math.floor(s / 86400) + 'd ago';
+    }
+    function fmtDate(ts)  { return new Date(ts).toLocaleString(); }
+    function esc(s)       { return String(s || '').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])); }
+
+    async function fetchJson(url) {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }
+
+    function buildBandwidthChart(history) {
+      if (!history || history.length === 0) {
+        return '<div class="chart-wrap"><div class="loading">No bandwidth data yet.</div></div>';
+      }
+      // history is newest first; reverse to oldest->newest for chart
+      const data = history.slice().reverse();
+      const W = 800, H = 240, PAD = 32;
+      const mbpsVals = data.map(d => d.actual_mbps).filter(v => v != null);
+      const maxY = Math.max(10, ...mbpsVals, ...data.map(d => d.advertised_mbps || 0));
+      const xStep = (W - PAD * 2) / Math.max(1, data.length - 1);
+      const points = data.map((d, i) => {
+        const x = PAD + i * xStep;
+        const y = H - PAD - ((d.actual_mbps || 0) / maxY) * (H - PAD * 2);
+        return x.toFixed(1) + ',' + y.toFixed(1);
+      }).join(' ');
+      const adv = data[data.length - 1]?.advertised_mbps;
+      const advY = adv ? (H - PAD - (adv / maxY) * (H - PAD * 2)).toFixed(1) : null;
+
+      return `
+        <div class="chart-wrap">
+          <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+            <line x1="${PAD}" y1="${H - PAD}" x2="${W - PAD}" y2="${H - PAD}" stroke="#2a3548" stroke-width="1"/>
+            <line x1="${PAD}" y1="${PAD}" x2="${PAD}" y2="${H - PAD}" stroke="#2a3548" stroke-width="1"/>
+            ${advY != null ? `<line x1="${PAD}" y1="${advY}" x2="${W - PAD}" y2="${advY}" stroke="#f39c12" stroke-width="1" stroke-dasharray="4 4"/>` : ''}
+            <polyline points="${points}" fill="none" stroke="#4a9eff" stroke-width="2"/>
+            <text x="${PAD - 4}" y="${PAD + 4}" fill="#8a96ab" font-size="10" text-anchor="end">${maxY.toFixed(0)}</text>
+            <text x="${PAD - 4}" y="${H - PAD}" fill="#8a96ab" font-size="10" text-anchor="end">0</text>
+          </svg>
+          <div class="chart-legend">
+            <span><span class="dot" style="background:#4a9eff"></span>Actual Mbps (last ${data.length})</span>
+            ${adv ? `<span style="margin-left:16px"><span class="dot" style="background:#f39c12"></span>Advertised: ${adv.toFixed(1)} Mbps</span>` : ''}
+          </div>
+        </div>
+      `;
+    }
+
+    function buildUptimeBar(history) {
+      if (!history || history.length === 0) {
+        return '<div class="uptime-bar"><div style="color:var(--muted)">No tests yet.</div></div>';
+      }
+      // history is newest first; reverse to oldest->newest
+      const segs = history.slice().reverse().map(h => {
+        const pass = h.pass === 1 || (h.actual_mbps != null && h.actual_mbps > 0);
+        const cls = h.actual_mbps != null ? (pass ? 'pass' : 'fail') : (pass ? 'pass' : 'fail');
+        const title = `${fmtDate(h.tested_at)} — ${pass ? 'PASS' : 'FAIL'}${h.actual_mbps != null ? ' ' + h.actual_mbps.toFixed(2) + ' Mbps' : ''}`;
+        return `<div class="uptime-seg ${cls}" title="${esc(title)}"></div>`;
+      }).join('');
+      return `<div class="uptime-bar">${segs}</div>`;
+    }
+
+    function buildErrorGroups(errors) {
+      if (!errors || errors.length === 0) {
+        return '<div style="color:var(--muted)">No errors logged.</div>';
+      }
+      const byCode = {};
+      for (const e of errors) {
+        const key = e.error_code || e.stage || 'unknown';
+        if (!byCode[key]) byCode[key] = [];
+        byCode[key].push(e);
+      }
+      return Object.entries(byCode)
+        .sort((a, b) => b[1].length - a[1].length)
+        .map(([code, list]) => {
+          const recent = list[0];
+          const items = list.slice(0, 20).map(e => {
+            const msg = (e.error_message || e.log_snippet || '').slice(0, 200);
+            return `<div>${fmtDate(e.tested_at || e.created_at)} &mdash; ${esc(msg)}</div>`;
+          }).join('');
+          return `
+            <div class="error-group" onclick="this.classList.toggle('open')">
+              <div class="eg-head">
+                <span class="eg-code">${esc(code)}</span>
+                <span class="eg-count">${list.length} occurrence${list.length > 1 ? 's' : ''}</span>
+              </div>
+              <div class="eg-msg">${esc((recent.error_message || recent.log_snippet || '').slice(0, 160))}</div>
+              <div class="eg-list">${items}</div>
+            </div>
+          `;
+        }).join('');
+    }
+
+    function buildHistoryTable(history) {
+      if (!history || history.length === 0) {
+        return '<div style="color:var(--muted)">No history.</div>';
+      }
+      const SDK_NAMES = { js:'Blue JS', csharp:'Blue C#', tkd:'TKD', rust:'Rust', swift:'Swift', go:'Go' };
+      const OS_NAMES  = { win32:'Win', darwin:'mac', linux:'Lin' };
+      const rows = history.slice(0, 50).map(h => {
+        const pass = h.pass === 1 || (h.actual_mbps != null && h.actual_mbps > 0);
+        const sdk = h.sdk ? (SDK_NAMES[h.sdk] || h.sdk) : '—';
+        const os  = h.tester_os ? (OS_NAMES[h.tester_os] || h.tester_os) : '';
+        const testedBy = sdk + (os ? ' · ' + os : '');
+        return `
+          <tr>
+            <td class="mono">${fmtDate(h.tested_at)}</td>
+            <td>${h.actual_mbps != null ? fmtMbps(h.actual_mbps) : '-'}</td>
+            <td class="${pass ? 'pass' : 'fail'}">${pass ? 'PASS' : 'FAIL'}</td>
+            <td style="font-size:11px;color:var(--muted)">${esc(testedBy)}</td>
+            <td>${esc((h.error_message || '').slice(0, 80))}</td>
+          </tr>
+        `;
+      }).join('');
+      return `<table><thead><tr><th>Time</th><th>Speed</th><th>Result</th><th>Tested by</th><th>Error</th></tr></thead><tbody>${rows}</tbody></table>`;
+    }
+
+    async function render() {
+      try {
+        const [detail, errData, bwData] = await Promise.all([
+          fetchJson(`/api/public/node/${encodeURIComponent(addr)}?historyLimit=100`),
+          fetchJson(`/api/public/node/${encodeURIComponent(addr)}/errors?limit=200`),
+          fetchJson(`/api/public/node/${encodeURIComponent(addr)}/bandwidth?limit=100`),
+        ]);
+
+        const node    = detail.node || {};
+        const history = detail.history || [];
+        const errors  = errData.errors || [];
+        const bwHist  = bwData.history || [];
+
+        const CONTINENT_NAMES = { EU:'Europe', AS:'Asia', NA:'N. America', SA:'S. America', AF:'Africa', OC:'Oceania', AN:'Antarctica', ZZ:'Unknown' };
+        const SDK_NAMES = { js:'Blue JS', csharp:'Blue C#', tkd:'TKD', rust:'Rust', swift:'Swift', go:'Go' };
+        const OS_NAMES = { win32:'Windows', darwin:'macOS', linux:'Linux' };
+        const continentLabel = c => c ? (CONTINENT_NAMES[c] || c) : '—';
+        const sdkLabel = s => s ? (SDK_NAMES[s] || s) : '—';
+        const osLabel  = p => p ? (OS_NAMES[p]  || p) : '';
+
+        document.getElementById('moniker').textContent = node.moniker || '(no moniker)';
+        const metaParts = [];
+        if (node.country)      metaParts.push(`<span>${esc(node.country)}</span>`);
+        if (node.city)         metaParts.push(`<span>${esc(node.city)}</span>`);
+        if (node.continent)    metaParts.push(`<span>${continentLabel(node.continent)}</span>`);
+        if (node.service_type) metaParts.push(`<span>${esc(node.service_type)}</span>`);
+        document.getElementById('meta').innerHTML = metaParts.join(' · ');
+
+        const passCount = history.filter(h => h.pass === 1 || (h.actual_mbps != null && h.actual_mbps > 0)).length;
+        const total = history.length;
+        const passRate = total > 0 ? ((passCount / total) * 100).toFixed(1) : '0.0';
+        let streak = 0;
+        for (const h of history) {
+          const pass = h.pass === 1 || (h.actual_mbps != null && h.actual_mbps > 0);
+          if (pass) streak++; else break;
+        }
+
+        document.getElementById('content').innerHTML = `
+          <section>
+            <h2>Summary</h2>
+            <div class="summary-grid">
+              <div class="summary-cell"><div class="label">Total Tests</div><div class="value">${total}</div></div>
+              <div class="summary-cell"><div class="label">Passes</div><div class="value">${passCount}</div></div>
+              <div class="summary-cell"><div class="label">Pass Rate</div><div class="value">${passRate}%</div></div>
+              <div class="summary-cell"><div class="label">Current Streak</div><div class="value">${streak}</div></div>
+              <div class="summary-cell"><div class="label">Region</div><div class="value" style="font-size:16px">${continentLabel(node.continent)}</div></div>
+              <div class="summary-cell"><div class="label">Tested SDK</div><div class="value" style="font-size:16px">${sdkLabel(node.sdk)}</div></div>
+              <div class="summary-cell"><div class="label">Tester Device</div><div class="value" style="font-size:16px">${osLabel(node.tester_os) || '—'}</div></div>
+            </div>
+          </section>
+          <section>
+            <h2>Bandwidth History</h2>
+            ${buildBandwidthChart(bwHist)}
+          </section>
+          <section>
+            <h2>Uptime (last ${history.length})</h2>
+            ${buildUptimeBar(history)}
+          </section>
+          <section>
+            <h2>Error Log (grouped)</h2>
+            ${buildErrorGroups(errors)}
+          </section>
+          <section>
+            <h2>Recent Tests</h2>
+            ${buildHistoryTable(history)}
+          </section>
+        `;
+      } catch (err) {
+        document.getElementById('content').innerHTML = `<div class="error-msg">Failed to load node: ${esc(err.message)}</div>`;
+      }
+    }
+
+    render();
+  </script>
+</body>
+</html>

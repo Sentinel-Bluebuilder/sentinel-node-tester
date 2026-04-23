@@ -90,6 +90,47 @@ export function getFlagEmoji(code) {
   return String.fromCodePoint(upper.charCodeAt(0) + 0x1F1A5, upper.charCodeAt(1) + 0x1F1A5);
 }
 
+// ─── Country Code → Continent Map ──────────────────────────────────────────
+
+const CONTINENT_BY_CODE = Object.freeze({
+  // Europe
+  DE: 'EU', FR: 'EU', GB: 'EU', NL: 'EU', ES: 'EU', IT: 'EU', SE: 'EU', NO: 'EU',
+  FI: 'EU', CH: 'EU', AT: 'EU', IE: 'EU', PT: 'EU', CZ: 'EU', HU: 'EU', BG: 'EU',
+  GR: 'EU', UA: 'EU', RU: 'EU', RO: 'EU', PL: 'EU', TR: 'EU', LV: 'EU', LT: 'EU',
+  EE: 'EU', HR: 'EU', RS: 'EU', DK: 'EU', BE: 'EU', LU: 'EU', MT: 'EU', CY: 'EU',
+  IS: 'EU', SK: 'EU', AL: 'EU', MD: 'EU', BA: 'EU', MK: 'EU', ME: 'EU', XK: 'EU',
+  SI: 'EU', GE: 'EU',
+  // Asia
+  JP: 'AS', SG: 'AS', IN: 'AS', KR: 'AS', HK: 'AS', TW: 'AS', TH: 'AS', VN: 'AS',
+  ID: 'AS', PH: 'AS', MY: 'AS', BD: 'AS', PK: 'AS', CN: 'AS', SA: 'AS', KZ: 'AS',
+  MN: 'AS', IL: 'AS', AE: 'AS', KG: 'AS', UZ: 'AS', TJ: 'AS', BH: 'AS',
+  // North America
+  US: 'NA', CA: 'NA', MX: 'NA', GT: 'NA', PR: 'NA', JM: 'NA', CR: 'NA', PA: 'NA',
+  DO: 'NA', SV: 'NA', HN: 'NA', NI: 'NA', CU: 'NA', HT: 'NA', TT: 'NA',
+  // South America
+  BR: 'SA', AR: 'SA', CL: 'SA', CO: 'SA', PE: 'SA', VE: 'SA', BO: 'SA', EC: 'SA',
+  UY: 'SA', PY: 'SA',
+  // Africa
+  ZA: 'AF', NG: 'AF', EG: 'AF', KE: 'AF', MA: 'AF', CD: 'AF',
+  // Oceania
+  AU: 'OC', NZ: 'OC',
+});
+
+export const CONTINENT_NAMES = Object.freeze({
+  EU: 'Europe', AS: 'Asia', NA: 'North America', SA: 'South America',
+  AF: 'Africa', OC: 'Oceania', AN: 'Antarctica', ZZ: 'Unknown',
+});
+
+/**
+ * Map a country (name or ISO code) to a continent code: EU/AS/NA/SA/AF/OC/ZZ.
+ */
+export function countryToContinent(country) {
+  if (!country) return null;
+  const code = country.length === 2 ? country.toUpperCase() : countryNameToCode(country);
+  if (!code) return null;
+  return CONTINENT_BY_CODE[code] || null;
+}
+
 /**
  * Group nodes by country. Returns sorted array of country groups.
  */

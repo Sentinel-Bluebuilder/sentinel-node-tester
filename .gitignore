@@ -20,6 +20,9 @@ bin/v2ray-*/
 results/
 *.log
 
+# SQLite database (runtime, not for version control)
+data/
+
 # Internal dev files (session handoff, internal suggestions)
 HANDOFF.md
 suggestions/
