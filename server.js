@@ -4,15 +4,23 @@
  */
 
 import express from 'express';
+import cookieParser from 'cookie-parser';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { EventEmitter } from 'events';
 import { existsSync } from 'fs';
+import { adminOnly, attachAdminFlag } from './core/auth.js';
 
 import { MNEMONIC, DENOM, GAS_PRICE, PORT, LCD_ENDPOINTS, PROJECT_ROOT, DNS_PRESETS, ACTIVE_DNS, setActiveDns } from './core/constants.js';
 import { cachedWalletSetup, createFreshClient } from './core/wallet.js';
 import { ensureLcd, getActiveLcd, cleanupRpc, getAllNodes } from './core/chain.js';
-import { createState, runAudit, runRetestSkips, runPlanTest, runSubPlanTest, getResults, saveResults, setActiveRunDir } from './audit/pipeline.js';
+import { createState, runAudit, runRetestSkips, runPlanTest, runSubPlanTest, getResults, saveResults, setActiveRunDir, setActiveDbRunId } from './audit/pipeline.js';
+import {
+  insertRun, updateRunOnFinish,
+  searchNodes, getNodeDetail, getNodeErrors, getCountryList,
+  getActiveRun, getLastCompletedRun, getBandwidthHistory,
+} from './core/db.js';
+import * as continuous from './audit/continuous.js';
 import { getInstalledVersions, verifyAllSdks, verifySdk } from './core/sdk-verify.js';
 // Platform-aware WireGuard import — Windows has full implementation, others get stubs
 let emergencyCleanupSync, watchdogCheck, WG_AVAILABLE, IS_ADMIN;
@@ -33,6 +41,21 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 process.env.PATH = path.join(__dirname, 'bin') + path.delimiter + (process.env.PATH || '');
 
 // ─── Env sanity check ───────────────────────────────────────────────────────
+const PUBLIC_MODE = process.env.PUBLIC_MODE === 'true';
+const ADMIN_PATH = process.env.ADMIN_PATH || '/admin';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+const COOKIE_SECRET = ADMIN_TOKEN || 'sentinel-local-dev-secret';
+
+if (PUBLIC_MODE && !ADMIN_TOKEN) {
+  console.error('');
+  console.error('ERROR: PUBLIC_MODE=true requires ADMIN_TOKEN to be set.');
+  console.error('  Without ADMIN_TOKEN, the admin surface has no protection.');
+  console.error('  Generate one:  node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
+  console.error('  Then add ADMIN_TOKEN=<value> to your .env file.');
+  console.error('');
+  process.exit(1);
+}
+
 if (!MNEMONIC || !MNEMONIC.trim()) {
   console.warn('');
   console.warn('⚠  MNEMONIC is not set.');
@@ -103,6 +126,18 @@ function broadcast(type, data = {}) {
   }
   if (type === 'state' || type === 'result') saveStateSnapshot();
   emitter.emit('update', { type, ...data });
+}
+
+// ─── Continuous Loop SSE forwarding ─────────────────────────────────────────
+// Forward loop events from the continuous runner as 'public-test:*' SSE events.
+{
+  const LOOP_EVENTS = [
+    'loop:started', 'loop:stopping', 'loop:stopped', 'loop:error',
+    'iteration:start', 'iteration:end',
+  ];
+  for (const evt of LOOP_EVENTS) {
+    continuous.on(evt, (data) => broadcast(`public-test:${evt}`, data || {}));
+  }
 }
 
 // ─── State ──────────────────────────────────────────────────────────────────
@@ -194,6 +229,19 @@ function saveCurrentRun(label) {
   index.activeRun = num;
   saveRunsIndex(index);
 
+  // ─── SQLite: mark the run as finished ────────────────────────────────────
+  if (state.activeDbRunId) {
+    try {
+      updateRunOnFinish(state.activeDbRunId, {
+        finished_at: Date.now(),
+        node_count:  results.length,
+        pass_count:  passed.length,
+      });
+    } catch (dbErr) {
+      console.error(`[db] updateRunOnFinish failed: ${dbErr.message}`);
+    }
+  }
+
   return num;
 }
 
@@ -260,19 +308,259 @@ function rehydrateState(results) {
 // ─── Express ────────────────────────────────────────────────────────────────
 const app = express();
 app.use(express.json());
-app.use(express.static(__dirname));
+// cookie-parser with HMAC signing so admin_token cookie cannot be forged
+app.use(cookieParser(COOKIE_SECRET));
+// Serve static assets (logo, fonts etc.) but do NOT auto-serve index files.
+// Routes below explicitly control which HTML file each path gets.
+app.use(express.static(__dirname, { index: false }));
 
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+// ─── Public routes: no auth, read-only ──────────────────────────────────────
 
-// Fast stats-only (no results payload) — for instant page load
-app.get('/api/stats', (req, res) => {
+// Root: serve public dashboard when PUBLIC_MODE=true, otherwise admin.html (or redirect to login)
+app.get('/', attachAdminFlag, (req, res) => {
+  if (PUBLIC_MODE) {
+    return res.sendFile(path.join(__dirname, 'public.html'));
+  }
+  // PUBLIC_MODE=false: no auth check needed for local/single-user setups
+  if (!ADMIN_TOKEN || req.admin) {
+    return res.sendFile(path.join(__dirname, 'admin.html'));
+  }
+  res.redirect(ADMIN_PATH + '/login');
+});
+
+// Per-node detail page (public, read-only SPA served on any /node/:addr path)
+app.get('/node/:addr', attachAdminFlag, (req, res) => {
+  res.sendFile(path.join(__dirname, 'node.html'));
+});
+
+// ─── Public API: read-only, no wallet or chain writes ────────────────────────
+// NOTE: these handlers MUST NOT import from audit/, core/wallet.js, or chain write paths.
+// A grep-based assertion in test/security.test.js enforces this invariant on every build.
+
+/**
+ * GET /api/public/nodes
+ * Query params: q, country, service, sort, window, limit, offset
+ * Returns one row per node with pass_count, pass_rate, pass_bar.
+ */
+app.get('/api/public/nodes', attachAdminFlag, (req, res) => {
+  try {
+    const q       = req.query.q       || null;
+    const country = req.query.country || null;
+    const service = req.query.service || null;
+    const sort    = req.query.sort    || 'tested_desc';
+    const win     = Math.min(parseInt(req.query.window || '25', 10), 100);
+    const limit   = Math.min(parseInt(req.query.limit  || '50',  10), 500);
+    const offset  = parseInt(req.query.offset || '0', 10);
+    const runId   = req.query.runId ? parseInt(req.query.runId, 10) : null;
+
+    const nodes = searchNodes({ q, country, service, sort, window: win, limit, offset, runId });
+
+    res.json({ total: nodes.length, offset, limit, window: win, results: nodes });
+  } catch (err) {
+    console.error('[api/public/nodes]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/public/node/:addr?historyLimit=N
+ * Returns { node, history, errors } for a single node.
+ */
+app.get('/api/public/node/:addr', attachAdminFlag, (req, res) => {
+  try {
+    const addr   = req.params.addr;
+    const hLimit = parseInt(req.query.historyLimit || '100', 10);
+    const detail = getNodeDetail(addr, { historyLimit: hLimit });
+    if (!detail.node) {
+      return res.status(404).json({ error: 'Node not found' });
+    }
+    res.json(detail);
+  } catch (err) {
+    console.error('[api/public/node]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/public/node/:addr/errors?limit=N&stage=X
+ * Returns error_log rows for a node, optionally filtered by stage.
+ */
+app.get('/api/public/node/:addr/errors', attachAdminFlag, (req, res) => {
+  try {
+    const addr   = req.params.addr;
+    const limit  = parseInt(req.query.limit || '50', 10);
+    const stage  = req.query.stage || null;
+    const errors = getNodeErrors(addr, { limit, stage });
+    res.json({ node_addr: addr, total: errors.length, errors });
+  } catch (err) {
+    console.error('[api/public/node/errors]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/public/countries
+ * Returns distinct countries with node counts.
+ */
+app.get('/api/public/countries', attachAdminFlag, (req, res) => {
+  try {
+    const countries = getCountryList();
+    res.json({ total: countries.length, countries });
+  } catch (err) {
+    console.error('[api/public/countries]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/public/runs/current — current in-progress run, or 404.
+ */
+app.get('/api/public/runs/current', attachAdminFlag, (req, res) => {
+  try {
+    const run = getActiveRun();
+    if (!run) return res.status(404).json({ error: 'No active run' });
+    res.json(run);
+  } catch (err) {
+    console.error('[api/public/runs/current]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/public/runs/last — most recent completed run, or 404.
+ */
+app.get('/api/public/runs/last', attachAdminFlag, (req, res) => {
+  try {
+    const run = getLastCompletedRun();
+    if (!run) return res.status(404).json({ error: 'No completed runs' });
+    res.json(run);
+  } catch (err) {
+    console.error('[api/public/runs/last]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/public/node/:addr/bandwidth?limit=N — bandwidth chart data.
+ */
+app.get('/api/public/node/:addr/bandwidth', attachAdminFlag, (req, res) => {
+  try {
+    const addr = req.params.addr;
+    const limit = Math.min(parseInt(req.query.limit || '100', 10), 500);
+    const history = getBandwidthHistory(addr, { limit });
+    res.json({ node_addr: addr, total: history.length, history });
+  } catch (err) {
+    console.error('[api/public/node/bandwidth]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/public/runs', attachAdminFlag, (req, res) => {
+  const index = loadRunsIndex();
+  const safe = (index.runs || []).map(r => ({
+    number: r.number,
+    label: r.label,
+    date: r.date,
+    total: r.total,
+    passed: r.passed,
+    failed: r.failed,
+    pass10: r.pass10,
+  }));
+  res.json({ runs: safe, total: safe.length });
+});
+
+app.get('/api/public/stats', attachAdminFlag, (req, res) => {
+  const results = getResults();
+  const total = results.length;
+  const passed = results.filter(r => r.actualMbps != null).length;
+  const failed = results.filter(r => r.actualMbps == null).length;
+  const pass10 = results.filter(r => r.actualMbps != null && r.actualMbps >= 10).length;
+  const passRate = total > 0 ? (passed / total * 100).toFixed(1) : '0.0';
+  res.json({
+    total,
+    passed,
+    failed,
+    pass10,
+    passRate: passRate + '%',
+    status: state.status,
+    activeRunNumber: state.activeRunNumber,
+  });
+});
+
+// ─── Admin login / logout ─────────────────────────────────────────────────────
+app.get(ADMIN_PATH + '/login', (req, res) => {
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sentinel Audit — Admin Login</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #080808; color: #f0f0f0; font-family: Inter, sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .card { background: rgba(16,16,16,0.9); border: 1px solid rgba(255,255,255,0.07); border-radius: 14px; padding: 40px 36px; max-width: 380px; width: 90%; }
+    h1 { font-family: Outfit, sans-serif; font-size: 20px; font-weight: 700; letter-spacing: 2px; margin-bottom: 6px; }
+    p { font-size: 12px; color: #666; margin-bottom: 28px; }
+    label { font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px; color: #666; display: block; margin-bottom: 6px; }
+    input[type=password] { width: 100%; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); border-radius: 7px; color: #f0f0f0; font-size: 14px; padding: 10px 14px; outline: none; margin-bottom: 20px; transition: border-color 0.2s; }
+    input[type=password]:focus { border-color: rgba(255,255,255,0.25); }
+    button { width: 100%; background: #00c853; color: #000; border: none; border-radius: 7px; font-family: Outfit, sans-serif; font-weight: 700; font-size: 13px; letter-spacing: 1px; padding: 12px; cursor: pointer; transition: opacity 0.2s; }
+    button:hover { opacity: 0.85; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>SENTINEL AUDIT</h1>
+    <p>Admin access required</p>
+    <form method="POST" action="${ADMIN_PATH}/login">
+      <label for="token">Admin Token</label>
+      <input type="password" id="token" name="token" placeholder="Enter admin token" autocomplete="current-password" required>
+      <button type="submit">Sign In</button>
+    </form>
+  </div>
+</body>
+</html>`);
+});
+
+app.post(ADMIN_PATH + '/login', (req, res) => {
+  const { token } = req.body || {};
+  if (token && ADMIN_TOKEN && token === ADMIN_TOKEN) {
+    res.cookie('admin_token', token, {
+      signed: true,
+      httpOnly: true,
+      sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    });
+    return res.redirect(ADMIN_PATH);
+  }
+  res.status(401).send(`<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Login failed</title>
+<style>body{background:#080808;color:#f0f0f0;font-family:Inter,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}</style>
+</head><body><div style="text-align:center">
+  <div style="color:#ff1744;font-size:20px;margin-bottom:12px">Invalid token</div>
+  <a href="${ADMIN_PATH}/login" style="color:#448aff">Try again</a>
+</div></body></html>`);
+});
+
+app.post(ADMIN_PATH + '/logout', (req, res) => {
+  res.clearCookie('admin_token');
+  res.redirect(PUBLIC_MODE ? '/' : ADMIN_PATH + '/login');
+});
+
+// ─── Admin dashboard ──────────────────────────────────────────────────────────
+app.get(ADMIN_PATH, adminOnly, (req, res) => {
+  res.sendFile(path.join(__dirname, 'admin.html'));
+});
+
+// Fast stats-only (no results payload) — admin only (includes wallet balance)
+app.get('/api/stats', adminOnly, (req, res) => {
   res.json({ state });
 });
 
 // ─── SDK version + GitHub parity endpoints ──────────────────────────────────
 
 /** Installed SDK versions — instant, no network. */
-app.get('/api/sdk-versions', async (req, res) => {
+app.get('/api/sdk-versions', adminOnly, async (req, res) => {
   try {
     const { readFileSync } = await import('fs');
     const versions = getInstalledVersions(__dirname);
@@ -288,7 +576,7 @@ let _sdkVerifyCache = { ts: 0, data: null };
 const SDK_VERIFY_TTL_MS = 5 * 60 * 1000;
 
 /** Verify every SDK matches its GitHub tag. Slow (~5s) — downloads tarballs. */
-app.get('/api/sdk-verify', async (req, res) => {
+app.get('/api/sdk-verify', adminOnly, async (req, res) => {
   const now = Date.now();
   const forceRefresh = req.query.refresh === '1';
   if (!forceRefresh && _sdkVerifyCache.data && (now - _sdkVerifyCache.ts) < SDK_VERIFY_TTL_MS) {
@@ -306,7 +594,7 @@ app.get('/api/sdk-verify', async (req, res) => {
 });
 
 /** Verify one SDK by key. ?key=blue-js or ?key=tkd-js */
-app.get('/api/sdk-verify/:key', async (req, res) => {
+app.get('/api/sdk-verify/:key', adminOnly, async (req, res) => {
   try {
     const result = await verifySdk(req.params.key, __dirname);
     res.json(result);
@@ -316,12 +604,12 @@ app.get('/api/sdk-verify/:key', async (req, res) => {
 });
 
 // Full state + results
-app.get('/api/state', (req, res) => {
+app.get('/api/state', adminOnly, (req, res) => {
   const results = getResults();
   res.json({ state, results });
 });
 
-app.get('/api/results', (req, res) => {
+app.get('/api/results', adminOnly, (req, res) => {
   const results = getResults();
   const page = parseInt(req.query.page || '1', 10);
   const limit = parseInt(req.query.limit || '100', 10);
@@ -329,7 +617,109 @@ app.get('/api/results', (req, res) => {
   res.json({ total: results.length, page, results: results.slice(start, start + limit) });
 });
 
-app.get('/api/events', (req, res) => {
+// ─── Public SSE stream ──────────────────────────────────────────────────────
+// Broadcasts the same events but strips any operator-only fields.
+const PUBLIC_EVENT_WHITELIST = new Set([
+  'public-test:loop:started',
+  'public-test:loop:stopping',
+  'public-test:loop:stopped',
+  'public-test:loop:error',
+  'public-test:iteration:start',
+  'public-test:iteration:end',
+  'result',
+]);
+function sanitizeForPublic(evt) {
+  const safe = { type: evt.type };
+  if (evt.iteration != null)  safe.iteration = evt.iteration;
+  if (evt.mode != null)       safe.mode = evt.mode;
+  if (evt.passed != null)     safe.passed = evt.passed;
+  if (evt.failed != null)     safe.failed = evt.failed;
+  if (evt.durationMs != null) safe.durationMs = evt.durationMs;
+  if (evt.error != null)      safe.error = String(evt.error).slice(0, 200);
+  return safe;
+}
+app.get('/api/public/events', attachAdminFlag, (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+  const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+  send({ type: 'init', status: continuous.status() });
+  const handler = (data) => {
+    if (!PUBLIC_EVENT_WHITELIST.has(data.type)) return;
+    send(sanitizeForPublic(data));
+  };
+  emitter.on('update', handler);
+  req.on('close', () => emitter.off('update', handler));
+});
+
+/**
+ * GET /api/public/test/status
+ * Read-only view of the public-test loop. No wallet / plan IDs.
+ */
+app.get('/api/public/test/status', attachAdminFlag, (req, res) => {
+  const s = continuous.status();
+  res.json({
+    running:   s.running,
+    iteration: s.iteration,
+    mode:      s.mode,
+    startedAt: s.startedAt,
+    uptime:    s.uptime,
+    lastError: s.lastError ? String(s.lastError).slice(0, 200) : null,
+    allowPublicStart: process.env.ALLOW_PUBLIC_TEST === 'true',
+  });
+});
+
+// Rate-limit: one public start per IP per minute
+const _publicStartLast = new Map();
+function publicStartRateOk(ip) {
+  const now = Date.now();
+  const prev = _publicStartLast.get(ip) || 0;
+  if (now - prev < 60_000) return false;
+  _publicStartLast.set(ip, now);
+  return true;
+}
+
+/**
+ * POST /api/public/test/start
+ * Gated by ALLOW_PUBLIC_TEST=true. Body: { mode: 'p2p' | 'subscription' }.
+ * Subscription mode requires ADMIN to have pre-configured a plan — public body
+ * cannot supply planId or wallet. If not configured, start is rejected.
+ */
+app.post('/api/public/test/start', attachAdminFlag, async (req, res) => {
+  if (process.env.ALLOW_PUBLIC_TEST !== 'true') {
+    return res.status(403).json({ error: 'Public test start disabled' });
+  }
+  const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim();
+  if (!publicStartRateOk(ip)) {
+    return res.status(429).json({ error: 'Rate limit: one start per minute per IP' });
+  }
+  const mode = (req.body?.mode === 'subscription') ? 'subscription' : 'p2p';
+  const planId = mode === 'subscription' ? process.env.PUBLIC_TEST_PLAN_ID : undefined;
+  const subscriptionId = mode === 'subscription' ? process.env.PUBLIC_TEST_SUB_ID : undefined;
+  const subscriptionGranter = mode === 'subscription' ? process.env.PUBLIC_TEST_SUB_GRANTER : undefined;
+  if (mode === 'subscription' && !planId) {
+    return res.status(400).json({ error: 'Subscription mode not configured on this server' });
+  }
+  const result = await continuous.start({ mode, planId, subscriptionId, subscriptionGranter });
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  res.json({ ok: true, mode, iteration: result.iteration });
+});
+
+/**
+ * POST /api/public/test/stop
+ * Also gated by ALLOW_PUBLIC_TEST.
+ */
+app.post('/api/public/test/stop', attachAdminFlag, (req, res) => {
+  if (process.env.ALLOW_PUBLIC_TEST !== 'true') {
+    return res.status(403).json({ error: 'Public test stop disabled' });
+  }
+  const result = continuous.stop();
+  res.json(result);
+});
+
+app.get('/api/events', adminOnly, (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -346,7 +736,7 @@ app.get('/api/events', (req, res) => {
 // ─── Audit Control Routes ───────────────────────────────────────────────────
 
 // Shared helper: save current run (if any), clear results, allocate new run number + dir.
-function startFreshRun(label) {
+function startFreshRun(label, { mode = 'p2p', plan_id = null } = {}) {
   const prevResults = getResults();
   if (prevResults.length > 0) {
     const runDir = path.join(RUNS_DIR, `test-${String(state.activeRunNumber).padStart(3, '0')}`);
@@ -397,11 +787,27 @@ function startFreshRun(label) {
   idx2.activeRun = newNum;
   saveRunsIndex(idx2);
 
+  // ─── SQLite: open a new run record ────────────────────────────────────────
+  try {
+    const dbRunId = insertRun({
+      started_at:     Date.now(),
+      mode,
+      plan_id:        plan_id || null,
+      wallet_address: state.walletAddress || null,
+      tester_sdk:     state.activeSDK || 'js',
+      tester_os:      process.platform,
+    });
+    setActiveDbRunId(dbRunId);
+    state.activeDbRunId = Number(dbRunId);
+  } catch (dbErr) {
+    console.error(`[db] insertRun failed: ${dbErr.message}`);
+  }
+
   return { newNum, newRunDir };
 }
 
 // Start NEW test (saves current, clears, starts fresh)
-app.post('/api/start', async (req, res) => {
+app.post('/api/start', adminOnly, async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
 
@@ -421,7 +827,7 @@ app.post('/api/start', async (req, res) => {
 });
 
 // Resume CURRENT test from where it left off (skips already-tested nodes)
-app.post('/api/resume', async (req, res) => {
+app.post('/api/resume', adminOnly, async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const results = getResults();
@@ -445,16 +851,16 @@ app.post('/api/resume', async (req, res) => {
   });
 });
 
-app.post('/api/stop', (req, res) => { state.stopRequested = true; res.json({ ok: true }); });
+app.post('/api/stop', adminOnly, (req, res) => { state.stopRequested = true; res.json({ ok: true }); });
 
-app.post('/api/economy', (req, res) => {
+app.post('/api/economy', adminOnly, (req, res) => {
   state.economyMode = !state.economyMode;
   broadcast('state', { state });
   broadcast('log', { msg: `${state.economyMode ? '♻ Economy mode ON — caps nodes to what balance can afford' : '💳 Economy mode OFF — tests all nodes'}` });
   res.json({ ok: true, economyMode: state.economyMode });
 });
 
-app.post('/api/retest-skips', async (req, res) => {
+app.post('/api/retest-skips', adminOnly, async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const results = getResults();
@@ -469,7 +875,7 @@ app.post('/api/retest-skips', async (req, res) => {
   });
 });
 
-app.post('/api/retest-fails', async (req, res) => {
+app.post('/api/retest-fails', adminOnly, async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const results = getResults();
@@ -491,7 +897,7 @@ app.post('/api/retest-fails', async (req, res) => {
 });
 
 // DEPRECATED: Plan testing is WIP — hidden from dashboard, endpoint still functional for API callers
-app.post('/api/test-plan', async (req, res) => {
+app.post('/api/test-plan', adminOnly, async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const { planId } = req.body;
@@ -505,7 +911,7 @@ app.post('/api/test-plan', async (req, res) => {
   });
 });
 
-app.get('/api/plans', async (req, res) => {
+app.get('/api/plans', adminOnly, async (req, res) => {
   try {
     const { discoverPlans } = await import('./core/chain.js');
     const plans = await discoverPlans(null, { maxId: 100 });
@@ -516,7 +922,7 @@ app.get('/api/plans', async (req, res) => {
   }
 });
 
-app.get('/api/subscriptions', async (req, res) => {
+app.get('/api/subscriptions', adminOnly, async (req, res) => {
   try {
     const { querySubscriptions } = await import('./core/chain.js');
     const subs = await querySubscriptions(state.walletAddress);
@@ -527,7 +933,7 @@ app.get('/api/subscriptions', async (req, res) => {
 });
 
 // Sub. Plan mode: enriched subs with plan owner + fee-grant status + node count
-app.get('/api/sub-plans', async (req, res) => {
+app.get('/api/sub-plans', adminOnly, async (req, res) => {
   try {
     const addr = req.query.address || state.walletAddress;
     if (!addr) return res.json({ plans: [], walletAddress: null });
@@ -540,7 +946,7 @@ app.get('/api/sub-plans', async (req, res) => {
 });
 
 // Sub. Plan mode: run fee-granted plan test — starts as a fresh run with clean counters.
-app.post('/api/test-sub-plan', async (req, res) => {
+app.post('/api/test-sub-plan', adminOnly, async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const { planId, subscriptionId, granter } = req.body || {};
@@ -548,7 +954,7 @@ app.post('/api/test-sub-plan', async (req, res) => {
   if (!subscriptionId) return res.status(400).json({ error: 'subscriptionId required' });
   if (!granter) return res.status(400).json({ error: 'granter (sent1...) required' });
 
-  const { newNum } = startFreshRun(`Sub. Plan ${planId}`);
+  const { newNum } = startFreshRun(`Sub. Plan ${planId}`, { mode: 'subscription', plan_id: String(planId) });
   broadcast('state', { state, results: getResults() });
   broadcast('log', { msg: `🚀 Starting Test #${newNum} — Sub. Plan ${planId} (fee-granted, wallet pays zero gas)` });
   res.json({ ok: true, testNumber: newNum, planId, subscriptionId, granter });
@@ -563,7 +969,7 @@ app.post('/api/test-sub-plan', async (req, res) => {
   });
 });
 
-app.post('/api/clear', (req, res) => {
+app.post('/api/clear', adminOnly, (req, res) => {
   const results = getResults();
   results.length = 0;
   state.testedNodes = state.failedNodes = state.passed15 = state.passed10 = state.passedBaseline = 0;
@@ -575,8 +981,72 @@ app.post('/api/clear', (req, res) => {
   res.json({ ok: true });
 });
 
+// ─── Admin: Continuous Loop Control ─────────────────────────────────────────
+// All routes gated by adminOnly (Bearer token or signed cookie).
+
+/**
+ * POST /api/admin/public-test/start
+ * Body: { mode, planId?, subscriptionId?, subscriptionGranter?, minDelayMs? }
+ */
+app.post('/api/admin/public-test/start', adminOnly, async (req, res) => {
+  const {
+    mode = 'p2p',
+    planId,
+    subscriptionId,
+    subscriptionGranter,
+    minDelayMs,
+  } = req.body || {};
+
+  const result = await continuous.start({
+    mode,
+    planId: planId ? String(planId) : undefined,
+    subscriptionId: subscriptionId ? String(subscriptionId) : undefined,
+    subscriptionGranter: subscriptionGranter ? String(subscriptionGranter) : undefined,
+    minDelayMs: minDelayMs != null ? Number(minDelayMs) : undefined,
+  });
+
+  if (!result.ok) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+/**
+ * POST /api/admin/public-test/stop
+ * Requests the loop to stop. Returns immediately; loop finishes current pass then stops.
+ */
+app.post('/api/admin/public-test/stop', adminOnly, (req, res) => {
+  const result = continuous.stop();
+  res.json(result);
+});
+
+/**
+ * GET /api/admin/public-test/status
+ * Returns current loop status snapshot.
+ */
+app.get('/api/admin/public-test/status', adminOnly, (req, res) => {
+  res.json(continuous.status());
+});
+
+/**
+ * GET /api/admin/plans
+ * Lists available Sentinel plans (delegates to discoverPlans in chain.js).
+ * Optional query param: ?maxId=200
+ */
+app.get('/api/admin/plans', adminOnly, async (req, res) => {
+  try {
+    const { discoverPlans } = await import('./core/chain.js');
+    const maxId = req.query.maxId ? parseInt(req.query.maxId, 10) : 100;
+    const plans = await discoverPlans(null, { maxId });
+    plans.sort((a, b) => b.subscribers - a.subscribers);
+    res.json({ plans });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Failure Analysis API ────────────────────────────────────────────────────
-app.get('/api/failure-analysis', (req, res) => {
+app.get('/api/failure-analysis', adminOnly, (req, res) => {
   const results = getResults();
   const failed = results.filter(r => r.actualMbps == null);
   const analysis = {
@@ -637,7 +1107,7 @@ app.get('/api/failure-analysis', (req, res) => {
 });
 
 // ─── Rescan: re-fetch node list from chain to verify current total ───────────
-app.post('/api/rescan', async (req, res) => {
+app.post('/api/rescan', adminOnly, async (req, res) => {
   try {
     broadcast('log', { msg: '🔍 Rescanning chain for current node count...' });
     await ensureLcd();
@@ -655,13 +1125,13 @@ app.post('/api/rescan', async (req, res) => {
 });
 
 // ─── Transport Intelligence Cache API ────────────────────────────────────────
-app.get('/api/transport-cache', (req, res) => {
+app.get('/api/transport-cache', adminOnly, (req, res) => {
   loadTransportCache();
   res.json(getCacheStats());
 });
 
 // Auto-retest: analyze failures, retest all retestable nodes in one shot
-app.post('/api/auto-retest', async (req, res) => {
+app.post('/api/auto-retest', adminOnly, async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
 
@@ -689,12 +1159,12 @@ app.post('/api/auto-retest', async (req, res) => {
 });
 
 // ─── Test Run Management API ────────────────────────────────────────────────
-app.get('/api/runs', (req, res) => {
+app.get('/api/runs', adminOnly, (req, res) => {
   const index = loadRunsIndex();
   res.json({ runs: index.runs, activeRun: state.activeRunNumber });
 });
 
-app.post('/api/runs/save', (req, res) => {
+app.post('/api/runs/save', adminOnly, (req, res) => {
   const label = req.body?.label || '';
   const num = saveCurrentRun(label);
   if (num) {
@@ -706,7 +1176,7 @@ app.post('/api/runs/save', (req, res) => {
   }
 });
 
-app.get('/api/runs/:num', (req, res) => {
+app.get('/api/runs/:num', adminOnly, (req, res) => {
   const num = parseInt(req.params.num);
   const data = loadRun(num);
   if (!data) return res.status(404).json({ error: `Test #${num} not found` });
@@ -722,7 +1192,7 @@ app.get('/api/runs/:num', (req, res) => {
   });
 });
 
-app.post('/api/runs/load/:num', (req, res) => {
+app.post('/api/runs/load/:num', adminOnly, (req, res) => {
   const num = parseInt(req.params.num);
   const data = loadRun(num);
   if (!data) return res.status(404).json({ error: `Test #${num} not found` });
@@ -741,7 +1211,7 @@ app.post('/api/runs/load/:num', (req, res) => {
 });
 
 // ─── SDK Toggle ─────────────────────────────────────────────────────────────
-app.post('/api/sdk', (req, res) => {
+app.post('/api/sdk', adminOnly, (req, res) => {
   const { sdk } = req.body;
   const SDK_LABELS = { js: 'Blue JS', csharp: 'Blue C#', tkd: 'TKD JS (Official)' };
   if (SDK_LABELS[sdk]) {
@@ -755,12 +1225,12 @@ app.post('/api/sdk', (req, res) => {
   }
 });
 
-app.get('/api/sdk', (req, res) => {
+app.get('/api/sdk', adminOnly, (req, res) => {
   res.json({ sdk: state.activeSDK });
 });
 
 // ─── Health Check (prelaunch validation for AI/automation) ─────────────────
-app.get('/api/health', async (req, res) => {
+app.get('/api/health', adminOnly, async (req, res) => {
   const { checkV2Ray } = process.platform === 'win32'
     ? await import('./platforms/windows/v2ray.js')
     : { checkV2Ray: async () => { try { const { execSync } = await import('child_process'); execSync('which v2ray', { stdio: 'pipe' }); return true; } catch { return false; } } };
@@ -784,7 +1254,7 @@ app.get('/api/health', async (req, res) => {
 });
 
 // ─── Cross-SDK Comparison Data ─────────────────────────────────────────────
-app.get('/api/cross-sdk', (req, res) => {
+app.get('/api/cross-sdk', adminOnly, (req, res) => {
   // Build a map of nodeAddress → { sdk: { passed, speed, error, run, date } } from all saved runs
   const map = {};
   const idx = loadRunsIndex();
@@ -822,11 +1292,11 @@ app.get('/api/cross-sdk', (req, res) => {
 });
 
 // ─── DNS Configuration ──────────────────────────────────────────────────────
-app.get('/api/dns', (req, res) => {
+app.get('/api/dns', adminOnly, (req, res) => {
   res.json({ servers: ACTIVE_DNS, presets: Object.keys(DNS_PRESETS) });
 });
 
-app.post('/api/dns', (req, res) => {
+app.post('/api/dns', adminOnly, (req, res) => {
   const { preset, servers } = req.body || {};
   if (preset && DNS_PRESETS[preset]) {
     setActiveDns([...DNS_PRESETS[preset]]);
@@ -844,7 +1314,7 @@ app.post('/api/dns', (req, res) => {
 // ─── Dictator Mode ──────────────────────────────────────────────────────────
 app.get('/dictator', (req, res) => res.sendFile(path.join(__dirname, 'dictator.html')));
 
-app.get('/api/dictator', (req, res) => {
+app.get('/api/dictator', adminOnly, (req, res) => {
   const results = getResults();
   const countryMap = {};
   for (const r of results) {
