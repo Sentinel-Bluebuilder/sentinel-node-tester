@@ -20,6 +20,10 @@ import { sleep } from '../protocol/speedtest.js';
 
 const MIN_DELAY_MS = 30_000;       // Hard floor — prevent chain spam
 const SLEEP_TICK_MS = 1_000;       // Interruptible-sleep check interval
+const MIN_INSERT_INTERVAL_MS = 1_000; // Lowest rate at which a runs row may be inserted
+const SAFETY_MAX_ITERATIONS = 100_000; // Absolute loop-iteration ceiling
+
+let _lastInsertAt = 0;             // Row-insert rate fuse (module-scoped)
 
 // ─── Internal State ───────────────────────────────────────────────────────────
 
@@ -131,6 +135,14 @@ async function _runLoop() {
 
   try {
     while (!_ctrl.stopRequested) {
+      // Absolute ceiling: no real operator wants 100K iterations; if we hit
+      // this, the sleep/yield logic has failed and we must bail.
+      if (_ctrl.iteration >= SAFETY_MAX_ITERATIONS) {
+        stopReason = 'safety-max-iterations';
+        _ctrl.lastError = `continuous loop exceeded ${SAFETY_MAX_ITERATIONS} iterations — aborting`;
+        break;
+      }
+
       _ctrl.iteration += 1;
       const iterStart = Date.now();
 
@@ -142,6 +154,18 @@ async function _runLoop() {
       // Fresh pipeline state per iteration so counters reset cleanly
       const loopState = createState();
       loopState.stopRequested = false;
+
+      // ─── Rate fuse ───────────────────────────────────────────────────────
+      // Refuse to insert more than 1 runs row per second. Any caller that
+      // bypasses the delay floor (bad test, misconfigured override) is
+      // short-circuited here so the DB cannot explode.
+      const sinceLast = iterStart - _lastInsertAt;
+      if (_lastInsertAt !== 0 && sinceLast < MIN_INSERT_INTERVAL_MS) {
+        const backoff = MIN_INSERT_INTERVAL_MS - sinceLast;
+        console.warn(`[continuous] insert rate fuse engaged — sleeping ${backoff}ms`);
+        await sleep(backoff);
+        if (_ctrl.stopRequested) break;
+      }
 
       // ─── Persistence: open a DB run record ──────────────────────────────
       // Skip DB writes when a mock runner is injected (test path). Tests that
@@ -159,6 +183,7 @@ async function _runLoop() {
             tester_sdk:     _ctrl.activeSDK || 'js',
             tester_os:      process.platform,
           });
+          _lastInsertAt = iterStart;
         } catch (dbErr) {
           // Non-fatal — audit continues without DB tracking
           console.error(`[continuous] insertRun failed: ${dbErr.message}`);
@@ -409,6 +434,18 @@ export function _injectRunnerFn(fn) {
  * @param {number|null} ms
  */
 export function _setDelayOverride(ms) {
+  // Guard: only tests may drop below the production floor. Opening this to
+  // prod callers would defeat MIN_DELAY_MS and the insert-rate fuse together.
+  if (ms !== null && ms < MIN_DELAY_MS) {
+    const isTest = process.env.NODE_ENV === 'test'
+      || /\.test\.m?js/.test(process.argv.join(' '));
+    if (!isTest) {
+      throw new Error(
+        `_setDelayOverride(${ms}) refused: sub-floor values are test-only. ` +
+        `Set NODE_ENV=test or invoke from a *.test.js process.`
+      );
+    }
+  }
   _delayOverride = ms;
 }
 

@@ -4,6 +4,18 @@
  * Public routes use attachAdminFlag for optional context.
  */
 
+import { timingSafeEqual } from 'node:crypto';
+
+// Constant-time string compare. Returns false on any length mismatch
+// without leaking length via early-exit timing.
+function safeEq(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
 // ─── adminOnly ───────────────────────────────────────────────────────────────
 // Blocks the request if no valid ADMIN_TOKEN is presented.
 // Accepts:  Authorization: Bearer <token>
@@ -31,7 +43,7 @@ export function adminOnly(req, res, next) {
 
   const presented = bearerToken || cookieToken;
 
-  if (presented === token) {
+  if (safeEq(presented, token)) {
     req.admin = true;
     return next();
   }
@@ -56,6 +68,6 @@ export function attachAdminFlag(req, res, next) {
   const cookieToken = req.signedCookies?.admin_token || null;
   const presented = bearerToken || cookieToken;
 
-  req.admin = !!(presented && presented === token);
+  req.admin = safeEq(presented, token);
   next();
 }
