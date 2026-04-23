@@ -372,6 +372,44 @@ const rlPublicRead = rateLimit({ windowMs: 60_000, max: 120, bucket: 'public-rea
 // "public-sse": max 5 concurrent SSE connections per IP.
 const rlPublicSse = sseLimit({ maxPerIp: 5, bucket: 'public-sse' });
 
+// ─── Server-side Mode (public | dev) ─────────────────────────────────────────
+// Admin sets the mode via POST /admin/mode. The value is stored as a signed
+// cookie. Routes that require a specific mode use requireMode(). This separates
+// "dev" (local audit + sub-plan tests) from "public" (automated batch sweeps).
+//
+// Cookie: `server_mode` (signed, HttpOnly, SameSite=strict)
+// Values: 'public' | 'dev'  — anything else → MODE_NOT_SET
+
+const VALID_MODES = new Set(['public', 'dev']);
+
+/**
+ * Returns the active server mode from the signed cookie, or null if unset/invalid.
+ *
+ * @param {import('express').Request} req
+ * @returns {'public'|'dev'|null}
+ */
+function getServerMode(req) {
+  const raw = req.signedCookies?.server_mode;
+  return VALID_MODES.has(raw) ? raw : null;
+}
+
+/**
+ * Express middleware: require the server to be in a specific mode.
+ * Returns 403 with { error: 'MODE_NOT_SET' } if no mode cookie is set.
+ * Returns 403 with { error: 'WRONG_MODE', required: mode } if mode mismatch.
+ *
+ * @param {'public'|'dev'} mode
+ * @returns {import('express').RequestHandler}
+ */
+function requireMode(mode) {
+  return (req, res, next) => {
+    const current = getServerMode(req);
+    if (!current) return res.status(403).json({ error: 'MODE_NOT_SET' });
+    if (current !== mode) return res.status(403).json({ error: 'WRONG_MODE', required: mode });
+    next();
+  };
+}
+
 // ─── Public routes: no auth, read-only ──────────────────────────────────────
 
 // Root: serve public dashboard when PUBLIC_MODE=true, otherwise admin.html (or redirect to login)
@@ -683,7 +721,45 @@ app.post(ADMIN_PATH + '/logout', (req, res) => {
     return res.status(403).json({ error: 'Forbidden', hint: 'Include X-Admin-Request: 1 header' });
   }
   res.clearCookie('admin_token');
+  res.clearCookie('server_mode');
   res.redirect(PUBLIC_MODE ? '/' : ADMIN_PATH + '/login');
+});
+
+// ─── Mode management ─────────────────────────────────────────────────────────
+
+const _modeCookieOpts = {
+  signed:   true,
+  httpOnly: true,
+  sameSite: 'strict',
+  secure:   process.env.INSECURE_COOKIE !== 'true',
+  maxAge:   30 * 24 * 60 * 60 * 1000, // 30 days
+};
+
+/**
+ * POST /admin/mode
+ * Body: { mode: 'public' | 'dev' }
+ * Sets the server_mode signed cookie. Admin-only.
+ */
+app.post('/admin/mode', adminOnly, (req, res) => {
+  const { mode } = req.body || {};
+  if (!VALID_MODES.has(mode)) {
+    return res.status(400).json({
+      error: 'INVALID_MODE',
+      message: `mode must be "public" or "dev"`,
+      received: mode ?? null,
+    });
+  }
+  res.cookie('server_mode', mode, _modeCookieOpts);
+  res.json({ ok: true, mode });
+});
+
+/**
+ * GET /admin/mode
+ * Returns the current server mode. Admin-only.
+ */
+app.get('/admin/mode', adminOnly, (req, res) => {
+  const mode = getServerMode(req);
+  res.json({ mode: mode ?? null });
 });
 
 // ─── Admin dashboard ──────────────────────────────────────────────────────────
@@ -1031,7 +1107,7 @@ function startFreshRun(label, { mode = 'p2p', plan_id = null } = {}) {
 }
 
 // Start NEW test (saves current, clears, starts fresh)
-app.post('/api/start', adminOnly, async (req, res) => {
+app.post('/api/start', adminOnly, requireMode('dev'), async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (continuous.status().running) return res.status(409).json({ error: 'Public Testing Mode is live — stop it first before starting a regular audit.' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
@@ -1052,7 +1128,7 @@ app.post('/api/start', adminOnly, async (req, res) => {
 });
 
 // Resume CURRENT test from where it left off (skips already-tested nodes)
-app.post('/api/resume', adminOnly, async (req, res) => {
+app.post('/api/resume', adminOnly, requireMode('dev'), async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (continuous.status().running) return res.status(409).json({ error: 'Public Testing Mode is live — stop it first before resuming a regular audit.' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
@@ -1086,7 +1162,7 @@ app.post('/api/economy', adminOnly, (req, res) => {
   res.json({ ok: true, economyMode: state.economyMode });
 });
 
-app.post('/api/retest-skips', adminOnly, async (req, res) => {
+app.post('/api/retest-skips', adminOnly, requireMode('dev'), async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const results = getResults();
@@ -1101,7 +1177,7 @@ app.post('/api/retest-skips', adminOnly, async (req, res) => {
   });
 });
 
-app.post('/api/retest-fails', adminOnly, async (req, res) => {
+app.post('/api/retest-fails', adminOnly, requireMode('dev'), async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const results = getResults();
@@ -1123,7 +1199,7 @@ app.post('/api/retest-fails', adminOnly, async (req, res) => {
 });
 
 // DEPRECATED: Plan testing is WIP — hidden from dashboard, endpoint still functional for API callers
-app.post('/api/test-plan', adminOnly, async (req, res) => {
+app.post('/api/test-plan', adminOnly, requireMode('dev'), async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const { planId } = req.body;
@@ -1137,7 +1213,7 @@ app.post('/api/test-plan', adminOnly, async (req, res) => {
   });
 });
 
-app.get('/api/plans', adminOnly, async (req, res) => {
+app.get('/api/plans', adminOnly, requireMode('dev'), async (req, res) => {
   try {
     const { discoverPlans } = await import('./core/chain.js');
     const plans = await discoverPlans(null, { maxId: 100 });
@@ -1149,7 +1225,7 @@ app.get('/api/plans', adminOnly, async (req, res) => {
   }
 });
 
-app.get('/api/subscriptions', adminOnly, async (req, res) => {
+app.get('/api/subscriptions', adminOnly, requireMode('dev'), async (req, res) => {
   try {
     const { querySubscriptions } = await import('./core/chain.js');
     const subs = await querySubscriptions(state.walletAddress);
@@ -1161,7 +1237,7 @@ app.get('/api/subscriptions', adminOnly, async (req, res) => {
 });
 
 // Sub. Plan mode: enriched subs with plan owner + fee-grant status + node count
-app.get('/api/sub-plans', adminOnly, async (req, res) => {
+app.get('/api/sub-plans', adminOnly, requireMode('dev'), async (req, res) => {
   try {
     const addr = req.query.address || state.walletAddress;
     if (!addr) return res.json({ plans: [], walletAddress: null });
@@ -1175,7 +1251,7 @@ app.get('/api/sub-plans', adminOnly, async (req, res) => {
 });
 
 // Sub. Plan mode: run fee-granted plan test — starts as a fresh run with clean counters.
-app.post('/api/test-sub-plan', adminOnly, async (req, res) => {
+app.post('/api/test-sub-plan', adminOnly, requireMode('dev'), async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const { planId, subscriptionId, granter } = req.body || {};
@@ -1217,7 +1293,7 @@ app.post('/api/clear', adminOnly, (req, res) => {
  * POST /api/admin/public-test/start
  * Body: { mode, planId?, subscriptionId?, subscriptionGranter?, minDelayMs? }
  */
-app.post('/api/admin/public-test/start', adminOnly, async (req, res) => {
+app.post('/api/admin/public-test/start', adminOnly, requireMode('public'), async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') {
     return res.status(409).json({ error: 'A regular audit is running — stop it first before starting Public Testing Mode.' });
   }
@@ -1247,7 +1323,7 @@ app.post('/api/admin/public-test/start', adminOnly, async (req, res) => {
  * POST /api/admin/public-test/stop
  * Requests the loop to stop. Returns immediately; loop finishes current pass then stops.
  */
-app.post('/api/admin/public-test/stop', adminOnly, (req, res) => {
+app.post('/api/admin/public-test/stop', adminOnly, requireMode('public'), (req, res) => {
   const result = continuous.stop();
   res.json(result);
 });
@@ -1445,7 +1521,7 @@ app.post('/api/runs/load/:num', adminOnly, (req, res) => {
 });
 
 // ─── SDK Toggle ─────────────────────────────────────────────────────────────
-app.post('/api/sdk', adminOnly, (req, res) => {
+app.post('/api/sdk', adminOnly, requireMode('dev'), (req, res) => {
   const { sdk } = req.body;
   const SDK_LABELS = { js: 'Blue JS', csharp: 'Blue C#', tkd: 'TKD JS (Official)' };
   if (SDK_LABELS[sdk]) {
@@ -1459,7 +1535,7 @@ app.post('/api/sdk', adminOnly, (req, res) => {
   }
 });
 
-app.get('/api/sdk', adminOnly, (req, res) => {
+app.get('/api/sdk', adminOnly, requireMode('dev'), (req, res) => {
   res.json({ sdk: state.activeSDK });
 });
 
@@ -1526,11 +1602,11 @@ app.get('/api/cross-sdk', adminOnly, (req, res) => {
 });
 
 // ─── DNS Configuration ──────────────────────────────────────────────────────
-app.get('/api/dns', adminOnly, (req, res) => {
+app.get('/api/dns', adminOnly, requireMode('dev'), (req, res) => {
   res.json({ servers: ACTIVE_DNS, presets: Object.keys(DNS_PRESETS) });
 });
 
-app.post('/api/dns', adminOnly, (req, res) => {
+app.post('/api/dns', adminOnly, requireMode('dev'), (req, res) => {
   const { preset, servers } = req.body || {};
   if (preset && DNS_PRESETS[preset]) {
     setActiveDns([...DNS_PRESETS[preset]]);
