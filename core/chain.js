@@ -580,13 +580,50 @@ export async function fetchPlanMembership(nodes, broadcast) {
   }
 }
 
-// ─── Plan Discovery (delegates to SDK) ──────────────────────────────────────
+// ─── Plan Discovery (RPC-first, LCD fallback) ───────────────────────────────
 
 export async function discoverPlans(broadcast, opts = {}) {
+  // Try RPC ABCI first: /sentinel.plan.v3.QueryService/QueryPlans
+  // Request proto: field 1 = status (varint enum 1=active), field 2 = pagination
+  try {
+    const rpcClient = await getRpcClient();
+    if (rpcClient) {
+      const PAGE_SIZE = 1000;
+      const pagination = encodeRpcVarintField(3, PAGE_SIZE);
+      const request = concatBytes([
+        encodeRpcVarintField(1, 1),       // status = active
+        encodeRpcEmbedded(2, pagination), // pagination
+      ]);
+      const result = await rpcClient.queryClient.queryAbci(
+        '/sentinel.plan.v3.QueryService/QueryPlans',
+        request,
+      );
+      if (result?.value && result.value.length > 0) {
+        const fields = decodeRpcProto(new Uint8Array(result.value));
+        if (fields[1] && fields[1].length > 0) {
+          const plans = fields[1].map(entry => {
+            const pf = decodeRpcProto(entry.value);
+            return {
+              id: pf[1]?.[0] ? String(pf[1][0].value) : null,
+              provAddress: pf[2]?.[0] ? decodeRpcString(pf[2][0].value) : null,
+              status: 'active',
+            };
+          }).filter(p => p.id);
+          if (broadcast) broadcast('log', { msg: `Discovered ${plans.length} active plans (RPC)` });
+          return plans;
+        }
+      }
+    }
+  } catch (rpcErr) {
+    // TODO(wave-a-blocker): RPC plan discovery failed — check if /sentinel.plan.v3.QueryService/QueryPlans is the correct ABCI path on this chain version
+    console.warn('[discoverPlans] RPC failed, falling back to LCD:', rpcErr.message);
+  }
+
+  // LCD fallback
   const lcd = await ensureLcd();
   try {
     const plans = await sdkDiscoverPlans(lcd, opts);
-    if (broadcast) broadcast('log', { msg: `Discovered ${plans.length} active plans` });
+    if (broadcast) broadcast('log', { msg: `Discovered ${plans.length} active plans (LCD)` });
     return plans;
   } catch (err) {
     if (broadcast) broadcast('log', { msg: `Plan discovery failed: ${err.message}` });
@@ -596,33 +633,80 @@ export async function discoverPlans(broadcast, opts = {}) {
 
 // ─── Subscriptions (delegates to SDK) ───────────────────────────────────────
 
-export async function querySubscriptions(walletAddress) {
-  // RPC primary
-  try {
-    const client = await getRpcClient();
-    if (client) {
-      const rpcResult = await rpcQuerySubscriptionsForAccount(client, walletAddress, { limit: 500 });
-      const subs = (rpcResult.items || rpcResult || []).map(s => ({
-        id: s.id || s.base_subscription?.id,
-        plan_id: s.plan_id || s.base_subscription?.plan_id,
-        status: s.status || s.base_subscription?.status,
-        expiry: s.expiry || s.inactive_at || s.base_subscription?.inactive_at || null,
-      }));
-      return subs;
-    }
-  } catch { }
+/**
+ * Check if a subscription status value represents "active".
+ * Chain v3 returns "STATUS_ACTIVE"; older clients may return "active" or
+ * numeric 1. Accept all three forms so the filter never silently drops subs.
+ *
+ * @param {string|number} status
+ * @returns {boolean}
+ */
+function isActiveStatus(status) {
+  if (status === 1 || status === '1') return true;
+  const s = String(status).toLowerCase();
+  return s === 'active' || s === 'status_active';
+}
 
-  // LCD fallback
+export async function querySubscriptions(walletAddress) {
+  // RPC-first: rpcQuerySubscriptionsForAccount returns raw Any-bytes per sub.
+  // Decode each entry to extract plan_id and subscription_id via _decodePlanSubscription.
   try {
-    const lcd = await ensureLcd();
-    const result = await sdkQuerySubscriptions(lcd, walletAddress, { status: 1 });
-    return (result.items || result || []).map(s => ({
-      id: s.id || s.base_subscription?.id,
-      plan_id: s.plan_id || s.base_subscription?.plan_id,
-      status: s.status || s.base_subscription?.status,
-      expiry: s.expiry || s.inactive_at || s.base_subscription?.inactive_at || null,
-    }));
-  } catch { return []; }
+    const rpcClient = await getRpcClient();
+    if (rpcClient) {
+      const rawEntries = await rpcQuerySubscriptionsForAccount(rpcClient, walletAddress);
+      if (rawEntries && rawEntries.length > 0) {
+        const out = [];
+        for (const entry of rawEntries) {
+          try {
+            // Each entry may be an Any-wrapped bytes blob or already-decoded object
+            const bytes = entry instanceof Uint8Array ? entry
+              : entry.value instanceof Uint8Array ? entry.value
+              : null;
+            if (!bytes) continue;
+            const anyDecoded = _decodeAny(bytes);
+            if (!anyDecoded.valueBytes) continue;
+            const sub = _decodePlanSubscription(anyDecoded.valueBytes);
+            if (!sub.planId) continue; // not a plan subscription
+            out.push({
+              id: sub.subscriptionId,
+              plan_id: sub.planId,
+              status: 'STATUS_ACTIVE', // RPC only returns active subs when status=1
+              expiry: null,
+            });
+          } catch { /* skip malformed entries */ }
+        }
+        if (out.length > 0) return out;
+        // RPC returned entries but none decoded as plan subs — fall through to LCD
+      }
+    }
+  } catch (rpcErr) {
+    console.warn('[querySubscriptions] RPC failed, falling back to LCD:', rpcErr.message);
+  }
+
+  // LCD fallback: direct query with ?status=1 so chain pre-filters at source.
+  // Also filter client-side with isActiveStatus() to handle both chain v2
+  // ("active") and chain v3 ("STATUS_ACTIVE") response formats.
+  const lcd = await ensureLcd();
+  try {
+    const r = await fetch(
+      `${lcd}/sentinel/subscription/v3/accounts/${walletAddress}/subscriptions?status=1&pagination.limit=500`,
+      { signal: AbortSignal.timeout(15_000) },
+    );
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const raw = Array.isArray(data.subscriptions) ? data.subscriptions : [];
+    return raw
+      .filter(s => s.acc_address === walletAddress)
+      .filter(s => isActiveStatus(s.status))
+      .map(s => ({
+        id: s.id,
+        plan_id: s.plan_id,
+        status: s.status,
+        expiry: s.inactive_at || null,
+      }));
+  } catch {
+    return [];
+  }
 }
 
 // ─── Balance (RPC primary, LCD fallback) ────────────────────────────────────
@@ -720,11 +804,15 @@ export async function querySubscriberPlansEnriched(walletAddress) {
     }
 
     let feeGrantActive = false;
+    let feeGrantCheckFailed = false;
     if (ownerSentAddr) {
       try {
-        const allowance = await queryFeeGrant(lcd, ownerSentAddr, walletAddress);
+        const allowance = await queryFeeGrantRpcFirst(rpcClient, lcd, ownerSentAddr, walletAddress);
         feeGrantActive = !!allowance;
-      } catch { }
+      } catch (e) {
+        console.warn('[querySubscriberPlansEnriched] feeGrant query', e.message);
+        feeGrantCheckFailed = true;
+      }
     }
 
     let nodeCount = nodeCountCache.get(planId);
@@ -734,7 +822,9 @@ export async function querySubscriberPlansEnriched(walletAddress) {
         try {
           const nodes = await rpcQueryNodesForPlan(rpcClient, BigInt(planId), { status: 1, limit: 500 });
           nodeCount = nodes.length;
-        } catch { }
+        } catch (e) {
+          console.warn('[querySubscriberPlansEnriched] rpcQueryNodesForPlan', e.message);
+        }
       }
       if (nodeCount === 0) {
         try {
@@ -743,7 +833,9 @@ export async function querySubscriberPlansEnriched(walletAddress) {
           });
           const d = await r.json();
           nodeCount = (d.nodes || []).length;
-        } catch { }
+        } catch (e) {
+          console.warn('[querySubscriberPlansEnriched] LCD nodeCount', e.message);
+        }
       }
       nodeCountCache.set(planId, nodeCount);
     }
@@ -754,6 +846,7 @@ export async function querySubscriberPlansEnriched(walletAddress) {
       ownerSentAddr: ownerSentAddr || null,
       expiry: s.expiry || null,
       feeGrantActive,
+      feeGrantCheckFailed,
       nodeCount,
     });
   }
@@ -767,4 +860,54 @@ export async function querySubscriberPlansEnriched(walletAddress) {
  */
 export async function broadcastWithFeeGrant(client, signerAddress, msgs, granterAddress, memo = '') {
   return sdkBroadcastWithFeeGrant(client, signerAddress, msgs, granterAddress, memo);
+}
+
+// ─── Fee Grant: RPC-first query ───────────────────────────────────────────────
+/**
+ * Query a fee-grant allowance via RPC ABCI first, falling back to LCD.
+ *
+ * ABCI path: /cosmos.feegrant.v1beta1.Query/Allowance
+ * Request proto: field 1 = granter (string), field 2 = grantee (string)
+ * On RPC failure, delegates to the SDK's LCD queryFeeGrant.
+ *
+ * Returns the allowance object, or null/undefined if not found.
+ *
+ * @param {{ queryClient: any }} client  - RPC query client (from getRpcClient())
+ * @param {string} lcd                   - Active LCD URL (for fallback)
+ * @param {string} granter               - sent1... address of the fee granter
+ * @param {string} grantee               - sent1... address of the fee grantee
+ * @returns {Promise<object|null>}
+ */
+export async function queryFeeGrantRpcFirst(client, lcd, granter, grantee) {
+  // Try RPC ABCI first
+  if (client) {
+    try {
+      const granterBytes = new TextEncoder().encode(granter);
+      const granteeBytes = new TextEncoder().encode(grantee);
+      const request = concatBytes([
+        encodeRpcBytes(1, granterBytes),
+        encodeRpcBytes(2, granteeBytes),
+      ]);
+      const result = await client.queryClient.queryAbci(
+        '/cosmos.feegrant.v1beta1.Query/Allowance',
+        request,
+      );
+      if (result?.value && result.value.length > 0) {
+        // Successfully got a response — the allowance exists.
+        // Decode the response: field 1 = Grant proto (embedded)
+        const fields = decodeRpcProto(new Uint8Array(result.value));
+        if (fields[1]?.[0]) {
+          // Minimal: return a truthy object indicating active grant.
+          // Full decode would require the Grant proto schema; enough to signal "exists".
+          return { exists: true, _rpcSource: true };
+        }
+      }
+      // Empty response = no grant found
+      return null;
+    } catch (e) {
+      console.warn('[queryFeeGrantRpcFirst] RPC failed, falling back to LCD:', e.message);
+    }
+  }
+  // LCD fallback
+  return queryFeeGrant(lcd, granter, grantee);
 }
