@@ -16,6 +16,13 @@ function assert(condition, name) {
 async function run() {
   console.log('Sentinel Node Tester — Smoke Tests\n');
 
+  // Redirect the DB singleton to :memory: before any module that imports
+  // core/db.js can touch production audit.db. Defense-in-depth: this file
+  // does not currently run audits, but a future edit that adds one must not
+  // silently write to prod.
+  const { getDb, useDb } = await import('../core/db.js');
+  useDb(getDb(':memory:'));
+
   // ─── 1. Module Imports ──────────────────────────────────────────────────
   console.log('1. Module imports...');
   const modules = [

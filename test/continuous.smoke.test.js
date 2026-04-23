@@ -30,6 +30,14 @@ async function waitFor(predicate, ms = 3000) {
 async function run() {
   console.log('Continuous Loop — Smoke Tests\n');
 
+  // ─── 0. DB redirect (MUST happen before ANY audit/* import) ──────────────
+  // The continuous-loop test once poisoned prod audit.db with 55M rows because
+  // this :memory: redirect used to run AFTER audit/continuous.js was imported.
+  // Keep this as the first action — do not move audit imports above it.
+  process.env.NODE_ENV = 'test';
+  const { getDb, useDb } = await import('../core/db.js');
+  useDb(getDb(':memory:'));
+
   // ─── 1. Module Import ────────────────────────────────────────────────────
   console.log('1. Module import...');
   let cont;
@@ -50,13 +58,6 @@ async function run() {
   assert(typeof off === 'function', 'export: off');
   assert(typeof _injectRunnerFn === 'function', 'export: _injectRunnerFn');
   assert(typeof _setDelayOverride === 'function', 'export: _setDelayOverride');
-
-  // Redirect the DB singleton to an in-memory database so the continuous-loop
-  // persistence path (when it runs) can never poison the production audit.db.
-  // The mock-runner branch in continuous.js already skips insertRun, but tests
-  // that enable the real runner or forget _injectRunnerFn still need safety.
-  const { getDb, useDb } = await import('../core/db.js');
-  useDb(getDb(':memory:'));
 
   // Enable zero-delay mode so iterations fire immediately without waiting 30s
   _setDelayOverride(0);

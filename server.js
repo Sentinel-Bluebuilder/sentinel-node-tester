@@ -69,8 +69,18 @@ emergencyCleanupSync();
 
 function onProcessExit() { cleanupRpc(); emergencyCleanupSync(); }
 process.on('exit', onProcessExit);
-process.on('SIGINT', () => { onProcessExit(); process.exit(130); });
-process.on('SIGTERM', () => { onProcessExit(); process.exit(143); });
+
+// Graceful shutdown: stop the continuous loop before exit so it can't keep
+// writing `runs` rows after the HTTP listener closes. Best-effort only; the
+// hard exit fires after 2s regardless so Ctrl-C is still snappy.
+function gracefulShutdown(signal, exitCode) {
+  console.log(`[server] ${signal} received — stopping continuous loop`);
+  try { continuous.stop(); } catch {}
+  onProcessExit();
+  setTimeout(() => process.exit(exitCode), 2_000).unref();
+}
+process.on('SIGINT', () => gracefulShutdown('SIGINT', 130));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM', 143));
 process.on('uncaughtException', (err) => {
   const msg = err?.stack || err?.message || String(err);
   console.error(`[uncaughtException] ${msg}`);
@@ -388,7 +398,7 @@ app.get('/api/public/node/:addr', attachAdminFlag, (req, res) => {
 app.get('/api/public/node/:addr/errors', attachAdminFlag, (req, res) => {
   try {
     const addr   = req.params.addr;
-    const limit  = parseInt(req.query.limit || '50', 10);
+    const limit  = Math.min(parseInt(req.query.limit || '50', 10) || 50, 500);
     const stage  = req.query.stage || null;
     const errors = getNodeErrors(addr, { limit, stage });
     res.json({ node_addr: addr, total: errors.length, errors });
@@ -529,6 +539,9 @@ app.post(ADMIN_PATH + '/login', (req, res) => {
       signed: true,
       httpOnly: true,
       sameSite: 'lax',
+      // secure when deployed publicly — if PUBLIC_MODE is on we're behind
+      // TLS in practice, and NODE_ENV=production is the traditional signal.
+      secure: process.env.NODE_ENV === 'production' || PUBLIC_MODE,
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     });
     return res.redirect(ADMIN_PATH);
@@ -671,15 +684,24 @@ app.get('/api/public/test/status', attachAdminFlag, (req, res) => {
   });
 });
 
-// Rate-limit: one public start per IP per minute
+// Rate-limit: one public start per IP per minute. Entries older than the
+// window are useless; sweep them every 5 min so the Map can't grow unbounded
+// under internet exposure.
 const _publicStartLast = new Map();
+const _RATE_WINDOW_MS = 60_000;
 function publicStartRateOk(ip) {
   const now = Date.now();
   const prev = _publicStartLast.get(ip) || 0;
-  if (now - prev < 60_000) return false;
+  if (now - prev < _RATE_WINDOW_MS) return false;
   _publicStartLast.set(ip, now);
   return true;
 }
+setInterval(() => {
+  const cutoff = Date.now() - _RATE_WINDOW_MS;
+  for (const [ip, ts] of _publicStartLast) {
+    if (ts < cutoff) _publicStartLast.delete(ip);
+  }
+}, 5 * 60_000).unref();
 
 /**
  * POST /api/public/test/start
@@ -1312,7 +1334,7 @@ app.post('/api/dns', adminOnly, (req, res) => {
 });
 
 // ─── Dictator Mode ──────────────────────────────────────────────────────────
-app.get('/dictator', (req, res) => res.sendFile(path.join(__dirname, 'dictator.html')));
+app.get('/dictator', adminOnly, (req, res) => res.sendFile(path.join(__dirname, 'dictator.html')));
 
 app.get('/api/dictator', adminOnly, (req, res) => {
   const results = getResults();

@@ -38,12 +38,50 @@ let _db = null;
 export function getDb(dbPath) {
   if (_db && !dbPath) return _db;
   const target = dbPath || DB_PATH;
+
+  // Tripwire: prod DB must never be opened from a test process.
+  // A runaway continuous-loop test once wrote 55M rows to data/audit.db
+  // before anyone noticed (WAL ballooned to 13GB). This hard-fails loudly
+  // instead of silently accepting the writes.
+  if (target !== ':memory:' && isTestEnv()) {
+    throw new Error(
+      `getDb() blocked: refusing to open prod DB (${target}) from a test process. ` +
+      `Call useDb(getDb(":memory:")) at the top of your test's run() before any audit/* import.`
+    );
+  }
+
   const db = new Database(target);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   runMigrations(db);
+
+  // Row-count fuse: if the runs table is absurdly large, a runaway writer
+  // has already struck. Refuse to start so the operator sees the damage
+  // before it grows further.
+  if (target !== ':memory:') {
+    const row = db.prepare('SELECT COUNT(*) AS c FROM runs').get();
+    if (row && row.c > 100_000) {
+      db.close();
+      throw new Error(
+        `FATAL: runs table has ${row.c.toLocaleString()} rows (limit: 100,000). ` +
+        `This indicates a runaway writer. Run: node scripts/cleanup-runaway-runs.mjs --yes`
+      );
+    }
+  }
+
   if (!dbPath) _db = db;
   return db;
+}
+
+function isTestEnv() {
+  // Only fire when the PROCESS ITSELF is running a test file. We explicitly do
+  // NOT check NODE_ENV alone because `security.test.js` spawns a real server
+  // child with NODE_ENV=test — that child legitimately opens the prod DB.
+  // Match only when argv[1] (the entry script) points into test/*.test.*js.
+  const entry = (process.argv[1] || '').replace(/\\/g, '/');
+  if (/\/test\/.*\.test\.m?js$/.test(entry)) return true;
+  if (/\.smoke\.test\.m?js$/.test(entry)) return true;
+  return false;
 }
 
 /**
@@ -70,7 +108,11 @@ function runMigrations(db) {
   const row = db.prepare('SELECT version FROM schema_version LIMIT 1').get();
   const current = row ? row.version : 0;
 
+  // Each migration runs inside a transaction so the DDL and the version
+  // bump are atomic. If the process dies mid-migration, SQLite rolls back
+  // and the next startup re-applies the whole block cleanly.
   if (current < 1) {
+    db.transaction(() => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS runs (
         id          INTEGER PRIMARY KEY,
@@ -110,9 +152,11 @@ function runMigrations(db) {
 
       INSERT INTO schema_version (version) VALUES (1);
     `);
+    })();
   }
 
   if (current < 2) {
+    db.transaction(() => {
     // ── Migration v2: error_logs table + pass/stage columns on results ──────
     // Add pass (derived 0/1) and stage (failure stage) columns if absent.
     // SQLite does not support IF NOT EXISTS on ALTER TABLE — probe first.
@@ -141,9 +185,11 @@ function runMigrations(db) {
 
     // Bump version to 2 (works whether we came from 0→2 or 1→2)
     db.prepare('UPDATE schema_version SET version = 2').run();
+    })();
   }
 
   if (current < 3) {
+    db.transaction(() => {
     // ── Migration v3: tester identity + continent on results ────────────────
     const resultCols = db.prepare(`PRAGMA table_info(results)`).all().map(c => c.name);
     if (!resultCols.includes('sdk'))         db.exec(`ALTER TABLE results ADD COLUMN sdk TEXT`);
@@ -155,6 +201,7 @@ function runMigrations(db) {
     if (!runCols.includes('tester_os'))     db.exec(`ALTER TABLE runs ADD COLUMN tester_os TEXT`);
 
     db.prepare('UPDATE schema_version SET version = 3').run();
+    })();
   }
 }
 
