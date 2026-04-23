@@ -9,16 +9,19 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { EventEmitter } from 'events';
 import { existsSync } from 'fs';
-import { adminOnly, attachAdminFlag } from './core/auth.js';
+import { adminOnly, attachAdminFlag, safeEq } from './core/auth.js';
+import { rateLimit, sseLimit } from './core/rate-limit.js';
 
 import { MNEMONIC, DENOM, GAS_PRICE, PORT, LCD_ENDPOINTS, PROJECT_ROOT, DNS_PRESETS, ACTIVE_DNS, setActiveDns } from './core/constants.js';
 import { cachedWalletSetup, createFreshClient } from './core/wallet.js';
 import { ensureLcd, getActiveLcd, cleanupRpc, getAllNodes } from './core/chain.js';
-import { createState, runAudit, runRetestSkips, runPlanTest, runSubPlanTest, getResults, saveResults, setActiveRunDir, setActiveDbRunId } from './audit/pipeline.js';
+import { createState, runAudit, runRetestSkips, runPlanTest, runSubPlanTest, getResults, saveResults, setActiveRunDir, setActiveDbRunId, pipelineEmitter, setPipelinePublicMode } from './audit/pipeline.js';
 import {
   insertRun, updateRunOnFinish,
   searchNodes, getNodeDetail, getNodeErrors, getCountryList,
   getActiveRun, getLastCompletedRun, getBandwidthHistory,
+  searchErrors, getNetworkStats,
+  listBatches, getBatchResults,
 } from './core/db.js';
 import * as continuous from './audit/continuous.js';
 import { getInstalledVersions, verifyAllSdks, verifySdk } from './core/sdk-verify.js';
@@ -140,6 +143,8 @@ function broadcast(type, data = {}) {
 
 // ─── Continuous Loop SSE forwarding ─────────────────────────────────────────
 // Forward loop events from the continuous runner as 'public-test:*' SSE events.
+// Batch-model events (batch:start, batch:node:result, batch:end, batch:gap)
+// are forwarded directly — no prefix — so clients can subscribe by event type.
 {
   const LOOP_EVENTS = [
     'loop:started', 'loop:stopping', 'loop:stopped', 'loop:error',
@@ -147,6 +152,12 @@ function broadcast(type, data = {}) {
   ];
   for (const evt of LOOP_EVENTS) {
     continuous.on(evt, (data) => broadcast(`public-test:${evt}`, data || {}));
+  }
+
+  // Batch events — forwarded with their own type names (no prefix)
+  const BATCH_EVENTS = ['batch:start', 'batch:node:result', 'batch:end', 'batch:gap'];
+  for (const evt of BATCH_EVENTS) {
+    continuous.on(evt, (data) => broadcast(evt, data || {}));
   }
 }
 
@@ -317,6 +328,11 @@ function rehydrateState(results) {
 
 // ─── Express ────────────────────────────────────────────────────────────────
 const app = express();
+// Trust exactly one proxy hop so that req.ip is populated from X-Forwarded-For
+// only when a real reverse proxy (nginx, Caddy, etc.) sits in front.
+// Without this, req.ip is always the direct socket address — which is what
+// clientIp() in core/rate-limit.js now uses exclusively (F-02).
+app.set('trust proxy', 1);
 app.use(express.json());
 // cookie-parser with HMAC signing so admin_token cookie cannot be forged
 app.use(cookieParser(COOKIE_SECRET));
@@ -324,11 +340,44 @@ app.use(cookieParser(COOKIE_SECRET));
 // Routes below explicitly control which HTML file each path gets.
 app.use(express.static(__dirname, { index: false }));
 
+// ─── Security headers (all responses) ───────────────────────────────────────
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
+
+// ─── CSP helper (public HTML responses only) ─────────────────────────────────
+const PUBLIC_CSP = [
+  "default-src 'self'",
+  "img-src 'self' data:",
+  // Google Fonts stylesheet is served from fonts.googleapis.com; the font
+  // files themselves come from fonts.gstatic.com.
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "script-src 'self' 'unsafe-inline'",
+  "connect-src 'self'",
+  "font-src 'self' data: https://fonts.gstatic.com",
+  "frame-ancestors 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+].join('; ');
+
+function setPublicCsp(res) {
+  res.setHeader('Content-Security-Policy', PUBLIC_CSP);
+}
+
+// ─── Rate-limit tiers ────────────────────────────────────────────────────────
+// "public-read": 120 req / 60 s for all read-only public API endpoints.
+const rlPublicRead = rateLimit({ windowMs: 60_000, max: 120, bucket: 'public-read' });
+// "public-sse": max 5 concurrent SSE connections per IP.
+const rlPublicSse = sseLimit({ maxPerIp: 5, bucket: 'public-sse' });
+
 // ─── Public routes: no auth, read-only ──────────────────────────────────────
 
 // Root: serve public dashboard when PUBLIC_MODE=true, otherwise admin.html (or redirect to login)
 app.get('/', attachAdminFlag, (req, res) => {
   if (PUBLIC_MODE) {
+    setPublicCsp(res);
     return res.sendFile(path.join(__dirname, 'public.html'));
   }
   // PUBLIC_MODE=false: no auth check needed for local/single-user setups
@@ -340,7 +389,14 @@ app.get('/', attachAdminFlag, (req, res) => {
 
 // Per-node detail page (public, read-only SPA served on any /node/:addr path)
 app.get('/node/:addr', attachAdminFlag, (req, res) => {
+  setPublicCsp(res);
   res.sendFile(path.join(__dirname, 'node.html'));
+});
+
+// Public live-testing view — shareable URL, zero action buttons
+app.get('/live', attachAdminFlag, (req, res) => {
+  setPublicCsp(res);
+  res.sendFile(path.join(__dirname, 'live.html'));
 });
 
 // ─── Public API: read-only, no wallet or chain writes ────────────────────────
@@ -352,7 +408,7 @@ app.get('/node/:addr', attachAdminFlag, (req, res) => {
  * Query params: q, country, service, sort, window, limit, offset
  * Returns one row per node with pass_count, pass_rate, pass_bar.
  */
-app.get('/api/public/nodes', attachAdminFlag, (req, res) => {
+app.get('/api/public/nodes', attachAdminFlag, rlPublicRead, (req, res) => {
   try {
     const q       = req.query.q       || null;
     const country = req.query.country || null;
@@ -367,8 +423,8 @@ app.get('/api/public/nodes', attachAdminFlag, (req, res) => {
 
     res.json({ total: nodes.length, offset, limit, window: win, results: nodes });
   } catch (err) {
-    console.error('[api/public/nodes]', err.message);
-    res.status(500).json({ error: err.message });
+    console.error('[api/public/nodes]', err);
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
@@ -376,7 +432,7 @@ app.get('/api/public/nodes', attachAdminFlag, (req, res) => {
  * GET /api/public/node/:addr?historyLimit=N
  * Returns { node, history, errors } for a single node.
  */
-app.get('/api/public/node/:addr', attachAdminFlag, (req, res) => {
+app.get('/api/public/node/:addr', attachAdminFlag, rlPublicRead, (req, res) => {
   try {
     const addr   = req.params.addr;
     const hLimit = parseInt(req.query.historyLimit || '100', 10);
@@ -386,8 +442,8 @@ app.get('/api/public/node/:addr', attachAdminFlag, (req, res) => {
     }
     res.json(detail);
   } catch (err) {
-    console.error('[api/public/node]', err.message);
-    res.status(500).json({ error: err.message });
+    console.error('[api/public/node]', err);
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
@@ -395,7 +451,7 @@ app.get('/api/public/node/:addr', attachAdminFlag, (req, res) => {
  * GET /api/public/node/:addr/errors?limit=N&stage=X
  * Returns error_log rows for a node, optionally filtered by stage.
  */
-app.get('/api/public/node/:addr/errors', attachAdminFlag, (req, res) => {
+app.get('/api/public/node/:addr/errors', attachAdminFlag, rlPublicRead, (req, res) => {
   try {
     const addr   = req.params.addr;
     const limit  = Math.min(parseInt(req.query.limit || '50', 10) || 50, 500);
@@ -403,8 +459,29 @@ app.get('/api/public/node/:addr/errors', attachAdminFlag, (req, res) => {
     const errors = getNodeErrors(addr, { limit, stage });
     res.json({ node_addr: addr, total: errors.length, errors });
   } catch (err) {
-    console.error('[api/public/node/errors]', err.message);
-    res.status(500).json({ error: err.message });
+    console.error('[api/public/node/errors]', err);
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/**
+ * GET /api/public/errors?q=&stage=&limit=&offset=
+ * Cross-node error search. Returns recent failures across ALL nodes.
+ * q matches node_addr, moniker, or error_message (LIKE, case-insensitive).
+ * stage filters error_logs.stage exactly.
+ * limit default 100 cap 500; offset default 0. Ordered by captured_at DESC.
+ */
+app.get('/api/public/errors', attachAdminFlag, rlPublicRead, (req, res) => {
+  try {
+    const q      = req.query.q     || null;
+    const stage  = req.query.stage || null;
+    const limit  = Math.min(parseInt(req.query.limit  || '100', 10) || 100, 500);
+    const offset = Math.max(parseInt(req.query.offset || '0',   10) || 0,   0);
+    const { total, items } = searchErrors({ q, stage, limit, offset });
+    res.json({ total, items });
+  } catch (err) {
+    console.error('[api/public/errors]', err);
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
@@ -412,60 +489,60 @@ app.get('/api/public/node/:addr/errors', attachAdminFlag, (req, res) => {
  * GET /api/public/countries
  * Returns distinct countries with node counts.
  */
-app.get('/api/public/countries', attachAdminFlag, (req, res) => {
+app.get('/api/public/countries', attachAdminFlag, rlPublicRead, (req, res) => {
   try {
     const countries = getCountryList();
     res.json({ total: countries.length, countries });
   } catch (err) {
-    console.error('[api/public/countries]', err.message);
-    res.status(500).json({ error: err.message });
+    console.error('[api/public/countries]', err);
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
 /**
  * GET /api/public/runs/current — current in-progress run, or 404.
  */
-app.get('/api/public/runs/current', attachAdminFlag, (req, res) => {
+app.get('/api/public/runs/current', attachAdminFlag, rlPublicRead, (req, res) => {
   try {
     const run = getActiveRun();
     if (!run) return res.status(404).json({ error: 'No active run' });
     res.json(run);
   } catch (err) {
-    console.error('[api/public/runs/current]', err.message);
-    res.status(500).json({ error: err.message });
+    console.error('[api/public/runs/current]', err);
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
 /**
  * GET /api/public/runs/last — most recent completed run, or 404.
  */
-app.get('/api/public/runs/last', attachAdminFlag, (req, res) => {
+app.get('/api/public/runs/last', attachAdminFlag, rlPublicRead, (req, res) => {
   try {
     const run = getLastCompletedRun();
     if (!run) return res.status(404).json({ error: 'No completed runs' });
     res.json(run);
   } catch (err) {
-    console.error('[api/public/runs/last]', err.message);
-    res.status(500).json({ error: err.message });
+    console.error('[api/public/runs/last]', err);
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
 /**
  * GET /api/public/node/:addr/bandwidth?limit=N — bandwidth chart data.
  */
-app.get('/api/public/node/:addr/bandwidth', attachAdminFlag, (req, res) => {
+app.get('/api/public/node/:addr/bandwidth', attachAdminFlag, rlPublicRead, (req, res) => {
   try {
     const addr = req.params.addr;
     const limit = Math.min(parseInt(req.query.limit || '100', 10), 500);
     const history = getBandwidthHistory(addr, { limit });
     res.json({ node_addr: addr, total: history.length, history });
   } catch (err) {
-    console.error('[api/public/node/bandwidth]', err.message);
-    res.status(500).json({ error: err.message });
+    console.error('[api/public/node/bandwidth]', err);
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
-app.get('/api/public/runs', attachAdminFlag, (req, res) => {
+app.get('/api/public/runs', attachAdminFlag, rlPublicRead, (req, res) => {
   const index = loadRunsIndex();
   const safe = (index.runs || []).map(r => ({
     number: r.number,
@@ -479,22 +556,60 @@ app.get('/api/public/runs', attachAdminFlag, (req, res) => {
   res.json({ runs: safe, total: safe.length });
 });
 
-app.get('/api/public/stats', attachAdminFlag, (req, res) => {
-  const results = getResults();
-  const total = results.length;
-  const passed = results.filter(r => r.actualMbps != null).length;
-  const failed = results.filter(r => r.actualMbps == null).length;
-  const pass10 = results.filter(r => r.actualMbps != null && r.actualMbps >= 10).length;
-  const passRate = total > 0 ? (passed / total * 100).toFixed(1) : '0.0';
-  res.json({
-    total,
-    passed,
-    failed,
-    pass10,
-    passRate: passRate + '%',
-    status: state.status,
-    activeRunNumber: state.activeRunNumber,
-  });
+app.get('/api/public/stats', attachAdminFlag, rlPublicRead, (req, res) => {
+  try {
+    // Use DB aggregate instead of iterating the in-memory results array (F-13).
+    const { totalNodes, passingPct, medianMbps, lastRunAt } = getNetworkStats();
+    res.json({
+      totalNodes,
+      passingPct,
+      medianMbps,
+      lastRunAt,
+      status: state.status,
+      activeRunNumber: state.activeRunNumber,
+    });
+  } catch (err) {
+    console.error('[api/public/stats]', err);
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/**
+ * GET /api/public/batches?limit=N
+ * Returns the last N batches (default 50, max 100), newest first.
+ * Each batch has: id, started_at, finished_at, snapshot_size, passed, failed, mode.
+ */
+app.get('/api/public/batches', attachAdminFlag, rlPublicRead, (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit || '50', 10) || 50, 100);
+    const batches = listBatches({ limit });
+    res.json({ total: batches.length, batches });
+  } catch (err) {
+    console.error('[api/public/batches]', err);
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/**
+ * GET /api/public/batch/:id?limit=N&offset=N
+ * Returns the batch header + public-safe node results for one batch.
+ * Strips wallet, SDK, OS, diag fields — only:
+ *   node_address, type, moniker, country, city, actual_mbps,
+ *   peers, max_peers, error, error_code, tested_at
+ */
+app.get('/api/public/batch/:id', attachAdminFlag, rlPublicRead, (req, res) => {
+  try {
+    const batchId = parseInt(req.params.id, 10);
+    if (!batchId || batchId < 1) return res.status(400).json({ error: 'Invalid batch id' });
+    const limit  = Math.min(parseInt(req.query.limit  || '500', 10) || 500, 1000);
+    const offset = Math.max(parseInt(req.query.offset || '0',   10) || 0,   0);
+    const { batch, results } = getBatchResults(batchId, { limit, offset });
+    if (!batch) return res.status(404).json({ error: 'Batch not found' });
+    res.json({ batch, results, total: results.length });
+  } catch (err) {
+    console.error('[api/public/batch]', err);
+    res.status(500).json({ error: 'Internal error' });
+  }
 });
 
 // ─── Admin login / logout ─────────────────────────────────────────────────────
@@ -505,57 +620,68 @@ app.get(ADMIN_PATH + '/login', (req, res) => {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Sentinel Audit — Admin Login</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/sentinel.css">
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: #080808; color: #f0f0f0; font-family: Inter, sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
-    .card { background: rgba(16,16,16,0.9); border: 1px solid rgba(255,255,255,0.07); border-radius: 14px; padding: 40px 36px; max-width: 380px; width: 90%; }
-    h1 { font-family: Outfit, sans-serif; font-size: 20px; font-weight: 700; letter-spacing: 2px; margin-bottom: 6px; }
-    p { font-size: 12px; color: #666; margin-bottom: 28px; }
-    label { font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px; color: #666; display: block; margin-bottom: 6px; }
-    input[type=password] { width: 100%; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); border-radius: 7px; color: #f0f0f0; font-size: 14px; padding: 10px 14px; outline: none; margin-bottom: 20px; transition: border-color 0.2s; }
-    input[type=password]:focus { border-color: rgba(255,255,255,0.25); }
-    button { width: 100%; background: #00c853; color: #000; border: none; border-radius: 7px; font-family: Outfit, sans-serif; font-weight: 700; font-size: 13px; letter-spacing: 1px; padding: 12px; cursor: pointer; transition: opacity 0.2s; }
-    button:hover { opacity: 0.85; }
+    body { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+    .login-card { max-width: 380px; width: 100%; padding: 40px 36px; }
+    .login-title { font-family: var(--font-display); font-size: 20px; font-weight: 700; letter-spacing: 2px; margin: 0 0 6px; color: var(--text); }
+    .login-sub { font-size: 12px; color: var(--text-dim); margin: 0 0 28px; }
+    .login-label { font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--text-dim); display: block; margin-bottom: 6px; }
+    .login-input { width: 100%; margin-bottom: 20px; }
   </style>
 </head>
-<body>
-  <div class="card">
-    <h1>SENTINEL AUDIT</h1>
-    <p>Admin access required</p>
+<body class="boot-pending">
+  <script>document.documentElement.dataset.theme = localStorage.getItem('theme') || 'dark'; document.addEventListener('DOMContentLoaded', () => document.body.classList.remove('boot-pending'));</script>
+  <div class="card login-card">
+    <h1 class="login-title">SENTINEL AUDIT</h1>
+    <p class="login-sub">Admin access required</p>
     <form method="POST" action="${ADMIN_PATH}/login">
-      <label for="token">Admin Token</label>
-      <input type="password" id="token" name="token" placeholder="Enter admin token" autocomplete="current-password" required>
-      <button type="submit">Sign In</button>
+      <label class="login-label" for="token">Admin Token</label>
+      <input class="login-input" type="password" id="token" name="token" placeholder="Enter admin token" autocomplete="current-password" required>
+      <button class="btn-primary btn-block" type="submit">Sign In</button>
     </form>
   </div>
 </body>
 </html>`);
 });
 
-app.post(ADMIN_PATH + '/login', (req, res) => {
+app.post(ADMIN_PATH + '/login', rateLimit({ windowMs: 60_000, max: 10, bucket: 'login' }), (req, res) => {
   const { token } = req.body || {};
-  if (token && ADMIN_TOKEN && token === ADMIN_TOKEN) {
+  if (token && ADMIN_TOKEN && safeEq(token, ADMIN_TOKEN)) {
     res.cookie('admin_token', token, {
       signed: true,
       httpOnly: true,
-      sameSite: 'lax',
-      // secure when deployed publicly — if PUBLIC_MODE is on we're behind
-      // TLS in practice, and NODE_ENV=production is the traditional signal.
-      secure: process.env.NODE_ENV === 'production' || PUBLIC_MODE,
+      sameSite: 'strict',
+      // secure: true always, except when INSECURE_COOKIE=true (dev without TLS).
+      // In production behind TLS, never set this escape hatch.
+      secure: process.env.INSECURE_COOKIE !== 'true',
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     });
     return res.redirect(ADMIN_PATH);
   }
   res.status(401).send(`<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>Login failed</title>
-<style>body{background:#080808;color:#f0f0f0;font-family:Inter,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}</style>
-</head><body><div style="text-align:center">
-  <div style="color:#ff1744;font-size:20px;margin-bottom:12px">Invalid token</div>
-  <a href="${ADMIN_PATH}/login" style="color:#448aff">Try again</a>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Login failed</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/sentinel.css">
+<style>body{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}.fail{max-width:380px;width:100%;text-align:center}.fail a{color:var(--accent);text-decoration:none;font-weight:600}.fail a:hover{color:var(--accent-bright)}</style>
+</head><body class="boot-pending">
+<script>document.documentElement.dataset.theme = localStorage.getItem('theme') || 'dark'; document.addEventListener('DOMContentLoaded', () => document.body.classList.remove('boot-pending'));</script>
+<div class="fail">
+  <div class="callout-error" style="margin-bottom:16px">Invalid token</div>
+  <a href="${ADMIN_PATH}/login">Try again</a>
 </div></body></html>`);
 });
 
 app.post(ADMIN_PATH + '/logout', (req, res) => {
+  if (req.headers['x-admin-request'] !== '1') {
+    return res.status(403).json({ error: 'Forbidden', hint: 'Include X-Admin-Request: 1 header' });
+  }
   res.clearCookie('admin_token');
   res.redirect(PUBLIC_MODE ? '/' : ADMIN_PATH + '/login');
 });
@@ -580,7 +706,8 @@ app.get('/api/sdk-versions', adminOnly, async (req, res) => {
     const pkg = JSON.parse(readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
     res.json({ tester: { version: pkg.version, name: pkg.name }, sdks: versions });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[api/sdk-versions]', err);
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
@@ -602,7 +729,8 @@ app.get('/api/sdk-verify', adminOnly, async (req, res) => {
     res.setHeader('x-cache', 'miss');
     res.json(results);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[api/sdk-verify]', err);
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
@@ -612,7 +740,8 @@ app.get('/api/sdk-verify/:key', adminOnly, async (req, res) => {
     const result = await verifySdk(req.params.key, __dirname);
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[api/sdk-verify]', err);
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
@@ -632,6 +761,7 @@ app.get('/api/results', adminOnly, (req, res) => {
 
 // ─── Public SSE stream ──────────────────────────────────────────────────────
 // Broadcasts the same events but strips any operator-only fields.
+// public-test:error is added here; it is forwarded from pipelineEmitter below.
 const PUBLIC_EVENT_WHITELIST = new Set([
   'public-test:loop:started',
   'public-test:loop:stopping',
@@ -639,19 +769,77 @@ const PUBLIC_EVENT_WHITELIST = new Set([
   'public-test:loop:error',
   'public-test:iteration:start',
   'public-test:iteration:end',
+  'public-test:error',
+  // Batch-model events (each full node-sweep is one batch)
+  'batch:start',
+  'batch:node:result',
+  'batch:end',
+  'batch:gap',
   'result',
 ]);
 function sanitizeForPublic(evt) {
   const safe = { type: evt.type };
-  if (evt.iteration != null)  safe.iteration = evt.iteration;
-  if (evt.mode != null)       safe.mode = evt.mode;
-  if (evt.passed != null)     safe.passed = evt.passed;
-  if (evt.failed != null)     safe.failed = evt.failed;
-  if (evt.durationMs != null) safe.durationMs = evt.durationMs;
-  if (evt.error != null)      safe.error = String(evt.error).slice(0, 200);
+  if (evt.iteration != null)   safe.iteration   = evt.iteration;
+  if (evt.mode != null)        safe.mode        = evt.mode;
+  if (evt.passed != null)      safe.passed      = evt.passed;
+  if (evt.failed != null)      safe.failed      = evt.failed;
+  if (evt.durationMs != null)  safe.durationMs  = evt.durationMs;
+  if (evt.error != null)       safe.error       = String(evt.error).slice(0, 200);
+  // public-test:error fields (node failure details)
+  if (evt.node_addr != null)   safe.node_addr   = evt.node_addr;
+  if (evt.moniker != null)     safe.moniker     = evt.moniker;
+  if (evt.country != null)     safe.country     = evt.country;
+  if (evt.stage != null)       safe.stage       = evt.stage;
+  if (evt.error_code != null)  safe.error_code  = evt.error_code;
+  if (evt.error_message != null) safe.error_message = String(evt.error_message).slice(0, 200);
+  if (evt.log_snippet != null) safe.log_snippet = String(evt.log_snippet).slice(0, 400);
+  if (evt.captured_at != null) safe.captured_at = evt.captured_at;
+  if (evt.run_id != null)      safe.run_id      = evt.run_id;
+  // batch:* event fields — only public-safe node-level data
+  if (evt.batchId != null)      safe.batchId      = evt.batchId;
+  if (evt.snapshotSize != null) safe.snapshotSize = evt.snapshotSize;
+  if (evt.startedAt != null)    safe.startedAt    = evt.startedAt;
+  if (evt.gapMs != null)        safe.gapMs        = evt.gapMs;
+  if (evt.nextBatchAt != null)  safe.nextBatchAt  = evt.nextBatchAt;
+  // batch:node:result public-safe fields
+  if (evt.address != null)    safe.address    = evt.address;
+  if (evt.type != null)       safe.type       = evt.type; // already set above as evt.type but redundant is fine
+  if (evt.city != null)       safe.city       = evt.city;
+  if (evt.actualMbps != null) safe.actualMbps = evt.actualMbps;
+  if (evt.peers != null)      safe.peers      = evt.peers;
+  if (evt.maxPeers != null)   safe.maxPeers   = evt.maxPeers;
+  if (evt.errorCode != null)  safe.errorCode  = evt.errorCode;
+  if (evt.testedAt != null)   safe.testedAt   = evt.testedAt;
   return safe;
 }
-app.get('/api/public/events', attachAdminFlag, (req, res) => {
+
+// ─── Forward pipelineEmitter public-test:error into the main broadcast bus ──
+// The event arrives on pipelineEmitter (pipeline.js module-level emitter) and
+// is forwarded as an 'update' event so the existing SSE fan-out picks it up.
+// The iteration field is filled here from continuous.status() since pipeline
+// has no access to the loop counter.
+pipelineEmitter.on('public-test:error', (data) => {
+  const s = continuous.status();
+  emitter.emit('update', {
+    type: 'public-test:error',
+    ...data,
+    iteration: s.iteration,
+  });
+});
+
+// ─── Sync pipeline public-mode flag with continuous loop state ───────────────
+// When the continuous loop starts or stops, tell pipeline.js whether to emit
+// public-test:error events. Avoids leaking admin-session failures.
+continuous.on('loop:started', () => {
+  const s = continuous.status();
+  setPipelinePublicMode(s.running && (s.mode === 'p2p' || s.mode === 'subscription'));
+});
+continuous.on('loop:stopped', () => setPipelinePublicMode(false));
+continuous.on('loop:error',   () => setPipelinePublicMode(false));
+
+const SSE_PING_MS = 20_000; // 20-second heartbeat keeps proxies from dropping the connection
+
+app.get('/api/public/events', attachAdminFlag, rlPublicSse, (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -664,14 +852,19 @@ app.get('/api/public/events', attachAdminFlag, (req, res) => {
     send(sanitizeForPublic(data));
   };
   emitter.on('update', handler);
-  req.on('close', () => emitter.off('update', handler));
+  // 20s heartbeat comment-line — keeps the TCP connection alive through proxies
+  const pingInterval = setInterval(() => { try { res.write(':\n\n'); } catch (_) {} }, SSE_PING_MS);
+  req.on('close', () => {
+    emitter.off('update', handler);
+    clearInterval(pingInterval);
+  });
 });
 
 /**
  * GET /api/public/test/status
  * Read-only view of the public-test loop. No wallet / plan IDs.
  */
-app.get('/api/public/test/status', attachAdminFlag, (req, res) => {
+app.get('/api/public/test/status', attachAdminFlag, rlPublicRead, (req, res) => {
   const s = continuous.status();
   res.json({
     running:   s.running,
@@ -717,6 +910,9 @@ app.post('/api/public/test/start', attachAdminFlag, async (req, res) => {
   if (!publicStartRateOk(ip)) {
     return res.status(429).json({ error: 'Rate limit: one start per minute per IP' });
   }
+  if (state.status === 'running' || state.status === 'paused') {
+    return res.status(409).json({ error: 'A regular audit is running — try again later.' });
+  }
   const mode = (req.body?.mode === 'subscription') ? 'subscription' : 'p2p';
   const planId = mode === 'subscription' ? process.env.PUBLIC_TEST_PLAN_ID : undefined;
   const subscriptionId = mode === 'subscription' ? process.env.PUBLIC_TEST_SUB_ID : undefined;
@@ -741,7 +937,8 @@ app.post('/api/public/test/stop', attachAdminFlag, (req, res) => {
   res.json(result);
 });
 
-app.get('/api/events', adminOnly, (req, res) => {
+const rlAdminSse = sseLimit({ maxPerIp: 10, bucket: 'admin-sse' });
+app.get('/api/events', adminOnly, rlAdminSse, (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -752,7 +949,12 @@ app.get('/api/events', adminOnly, (req, res) => {
   send({ type: 'init', state, results, logs: logBuffer.slice() });
   const handler = (data) => send(data);
   emitter.on('update', handler);
-  req.on('close', () => emitter.off('update', handler));
+  // 20s heartbeat comment-line — keeps the TCP connection alive through proxies
+  const pingInterval = setInterval(() => { try { res.write(':\n\n'); } catch (_) {} }, SSE_PING_MS);
+  req.on('close', () => {
+    emitter.off('update', handler);
+    clearInterval(pingInterval);
+  });
 });
 
 // ─── Audit Control Routes ───────────────────────────────────────────────────
@@ -831,6 +1033,7 @@ function startFreshRun(label, { mode = 'p2p', plan_id = null } = {}) {
 // Start NEW test (saves current, clears, starts fresh)
 app.post('/api/start', adminOnly, async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
+  if (continuous.status().running) return res.status(409).json({ error: 'Public Testing Mode is live — stop it first before starting a regular audit.' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
 
   const { newNum } = startFreshRun(`Test #${getNextRunNumber()}`);
@@ -851,6 +1054,7 @@ app.post('/api/start', adminOnly, async (req, res) => {
 // Resume CURRENT test from where it left off (skips already-tested nodes)
 app.post('/api/resume', adminOnly, async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
+  if (continuous.status().running) return res.status(409).json({ error: 'Public Testing Mode is live — stop it first before resuming a regular audit.' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const results = getResults();
   if (results.length === 0) return res.json({ error: 'No results to resume from. Use Start to begin a new test.' });
@@ -940,7 +1144,8 @@ app.get('/api/plans', adminOnly, async (req, res) => {
     plans.sort((a, b) => b.subscribers - a.subscribers);
     res.json({ plans });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[api/plans]', err);
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
@@ -950,7 +1155,8 @@ app.get('/api/subscriptions', adminOnly, async (req, res) => {
     const subs = await querySubscriptions(state.walletAddress);
     res.json({ subscriptions: subs });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[api/subscriptions]', err);
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
@@ -963,7 +1169,8 @@ app.get('/api/sub-plans', adminOnly, async (req, res) => {
     const plans = await querySubscriberPlansEnriched(addr);
     res.json({ plans, walletAddress: addr });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[api/sub-plans]', err);
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
@@ -1011,6 +1218,9 @@ app.post('/api/clear', adminOnly, (req, res) => {
  * Body: { mode, planId?, subscriptionId?, subscriptionGranter?, minDelayMs? }
  */
 app.post('/api/admin/public-test/start', adminOnly, async (req, res) => {
+  if (state.status === 'running' || state.status === 'paused') {
+    return res.status(409).json({ error: 'A regular audit is running — stop it first before starting Public Testing Mode.' });
+  }
   const {
     mode = 'p2p',
     planId,
@@ -1063,7 +1273,8 @@ app.get('/api/admin/plans', adminOnly, async (req, res) => {
     plans.sort((a, b) => b.subscribers - a.subscribers);
     res.json({ plans });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[api/admin/plans]', err);
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
@@ -1141,8 +1352,9 @@ app.post('/api/rescan', adminOnly, async (req, res) => {
     broadcast('log', { msg: `Rescan: ${allNodes.length} nodes on chain, ${testedAddrs.size} tested, ${remaining} remaining` });
     res.json({ total: allNodes.length, tested: testedAddrs.size, remaining });
   } catch (err) {
-    broadcast('log', { msg: `Rescan failed: ${err.message}` });
-    res.json({ error: err.message });
+    console.error('[api/rescan]', err);
+    broadcast('log', { msg: 'Rescan failed (see server logs)' });
+    res.json({ error: 'Internal error' });
   }
 });
 
