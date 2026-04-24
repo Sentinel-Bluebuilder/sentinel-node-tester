@@ -4,33 +4,31 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sentinel Network — Public Dashboard</title>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <title>Sentinel — Public Node Directory</title>
+  <meta name="description" content="Browse the health and speed of every node on the Sentinel decentralized privacy network. Updated continuously.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/sentinel.css">
+  <script>document.documentElement.dataset.theme = localStorage.getItem('theme') || 'dark';</script>
   <style>
     :root {
-      --bg-base: #080808;
-      --glass-bg: rgba(16, 16, 16, 0.85);
-      --glass-border: rgba(255, 255, 255, 0.07);
-      --text-primary: #f0f0f0;
-      --text-secondary: #666;
-      --text-dim: #444;
-      --accent-green: #00c853;
-      --accent-red: #ff1744;
-      --accent-orange: #ffa726;
-      --white: #fff;
+      /* Legacy aliases — map onto the Sentinel design tokens from sentinel.css */
+      --text-primary: var(--text);
+      --text-secondary: var(--text-dim);
+      --glass-border: var(--border);
+      --accent-green: var(--green);
+      --accent-red: var(--red);
+      --accent-orange: var(--yellow);
+      --white: var(--text);
     }
 
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-
     body {
-      background: var(--bg-base);
-      color: var(--text-primary);
-      font-family: 'Inter', sans-serif;
       min-height: 100vh;
       overflow-x: hidden;
     }
 
-    h1, h2, h3 { font-family: 'Outfit', sans-serif; }
+    h1, h2, h3 { font-family: var(--font-display); }
 
     .glass-panel {
       background: var(--glass-bg);
@@ -41,32 +39,125 @@
     /* ─── Scrollbars ─── */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
-    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--border-hover); }
 
-    /* ─── Header ─── */
+    /* ─── Header / top nav ─── */
     header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding: 16px 36px;
+      padding: 0 32px;
+      height: 60px;
       position: sticky;
       top: 0;
       z-index: 100;
-      background: rgba(8, 8, 8, 0.95);
-      border-bottom: 1px solid var(--glass-border);
+      background: var(--glass-bg);
+      border-bottom: 1px solid var(--border);
       backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
     }
 
-    .brand { display: flex; align-items: center; gap: 14px; }
+    /* ─── Brand ─── */
+    .brand { display: flex; align-items: center; gap: 12px; text-decoration: none; }
 
-    .brand-dot {
-      width: 10px; height: 10px;
-      border-radius: 50%;
-      background: var(--accent-green);
-      box-shadow: 0 0 8px var(--accent-green);
-      animation: pulse 2s infinite;
+    .brand-logo {
+      width: 30px;
+      height: 31px;
       flex-shrink: 0;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .brand-text { display: flex; flex-direction: column; gap: 1px; }
+
+    .brand h1 {
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      color: var(--text);
+      text-transform: uppercase;
+      line-height: 1.2;
+    }
+
+    .brand-sub {
+      font-size: 10px;
+      color: var(--text-dim);
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      line-height: 1;
+    }
+
+    /* ─── Top nav links ─── */
+    .top-nav {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .nav-link {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-dim);
+      text-decoration: none;
+      padding: 6px 12px;
+      border-radius: var(--radius-sm);
+      transition: color 150ms ease-out, background 150ms ease-out;
+      letter-spacing: 0.2px;
+      white-space: nowrap;
+      position: relative;
+    }
+
+    .nav-link:hover {
+      color: var(--text);
+      background: var(--bg-card-hover);
+    }
+
+    .nav-link.active {
+      color: var(--accent);
+    }
+
+    .nav-link.active::after {
+      content: '';
+      position: absolute;
+      bottom: -2px;
+      left: 12px;
+      right: 12px;
+      height: 2px;
+      background: var(--accent);
+      border-radius: 1px;
+    }
+
+    /* ─── Header right ─── */
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .header-ts {
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+
+    .header-ts span {
+      color: var(--green);
+      font-weight: 600;
+    }
+
+    .badge-public {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border: 1px solid rgba(30, 136, 229, 0.3);
+      border-radius: 20px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      color: var(--accent);
+      background: var(--accent-dim);
+      text-transform: uppercase;
     }
 
     @keyframes pulse {
@@ -75,44 +166,58 @@
       100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(0, 200, 83, 0); }
     }
 
-    .brand h1 {
-      font-size: 18px;
-      font-weight: 700;
-      letter-spacing: 2px;
-      color: var(--white);
-    }
-
-    .brand-sub { font-size: 11px; color: var(--text-secondary); margin-top: 1px; letter-spacing: 0.5px; }
-
-    .header-right {
+    /* ─── Batch picker bar ─── */
+    .batch-picker-bar {
       display: flex;
       align-items: center;
-      gap: 20px;
+      gap: 10px;
+      padding: 10px 18px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-input);
+      border-radius: var(--radius) var(--radius) 0 0;
+      flex-wrap: wrap;
     }
 
-    .badge-public {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 12px;
-      border: 1px solid rgba(68, 138, 255, 0.3);
-      border-radius: 20px;
-      font-size: 10px;
-      font-weight: 700;
-      letter-spacing: 1.5px;
-      color: #448aff;
-      background: rgba(68, 138, 255, 0.07);
-      text-transform: uppercase;
-    }
-
-    .header-ts {
+    .batch-picker-label {
       font-size: 11px;
-      color: var(--text-secondary);
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      white-space: nowrap;
+      flex-shrink: 0;
     }
 
-    .header-ts span {
-      color: var(--accent-green);
-      font-weight: 600;
+    .batch-select {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      font-family: var(--font-display);
+      font-size: 12px;
+      padding: 6px 10px;
+      cursor: pointer;
+      outline: none;
+      min-width: 180px;
+      transition: border-color 150ms;
+    }
+
+    .batch-select:focus { border-color: var(--accent); }
+    .batch-select option { background: var(--bg-card-solid); }
+
+    .batch-meta {
+      font-size: 11px;
+      color: var(--text-dim);
+      flex: 1;
+    }
+
+    .batch-meta .batch-live-dot {
+      display: inline-block;
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      margin-right: 5px;
+      vertical-align: middle;
+      animation: pulse 2s infinite;
     }
 
     /* ─── Summary Bar ─── */
@@ -126,7 +231,7 @@
 
     .summary-cell {
       padding: 14px 24px;
-      background: rgba(8, 8, 8, 0.9);
+      background: var(--glass-bg);
       text-align: center;
     }
 
@@ -138,10 +243,10 @@
     }
 
     .summary-value {
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display);
       font-size: 28px;
       font-weight: 700;
-      color: var(--white);
+      color: var(--text);
       margin-top: 4px;
     }
 
@@ -186,11 +291,11 @@
 
     .search-input {
       width: 100%;
-      background: rgba(255,255,255,0.04);
+      background: var(--bg-input);
       border: 1px solid var(--glass-border);
       border-radius: 7px;
       color: var(--text-primary);
-      font-family: 'Inter', sans-serif;
+      font-family: var(--font-display);
       font-size: 13px;
       padding: 8px 12px 8px 32px;
       outline: none;
@@ -201,11 +306,11 @@
     .search-input::placeholder { color: var(--text-dim); }
 
     .filter-select {
-      background: rgba(255,255,255,0.04);
+      background: var(--bg-input);
       border: 1px solid var(--glass-border);
       border-radius: 7px;
-      color: #aaa;
-      font-family: 'Inter', sans-serif;
+      color: var(--text-dim);
+      font-family: var(--font-display);
       font-size: 12px;
       padding: 8px 12px;
       cursor: pointer;
@@ -215,16 +320,16 @@
     }
 
     .filter-select:focus { border-color: rgba(0,200,83,0.3); }
-    .filter-select option { background: #1a1a1a; }
+    .filter-select option { background: var(--bg-card-solid); }
 
     .sort-btn {
-      background: rgba(255,255,255,0.04);
+      background: var(--bg-input);
       border: 1px solid var(--glass-border);
       border-radius: 7px;
       padding: 8px 14px;
       color: var(--text-secondary);
       font-size: 12px;
-      font-family: 'Inter', sans-serif;
+      font-family: var(--font-display);
       cursor: pointer;
       display: flex;
       align-items: center;
@@ -233,7 +338,7 @@
       white-space: nowrap;
     }
 
-    .sort-btn:hover { border-color: rgba(255,255,255,0.2); color: var(--text-primary); }
+    .sort-btn:hover { border-color: var(--border-hover); color: var(--text-primary); }
     .sort-btn.active { border-color: rgba(0,200,83,0.45); color: var(--accent-green); }
 
     .results-meta {
@@ -254,17 +359,17 @@
     }
 
     .panel-title {
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display);
       font-size: 12px;
       font-weight: 700;
       letter-spacing: 1.5px;
-      color: var(--white);
+      color: var(--text);
       text-transform: uppercase;
     }
 
     .table-wrap { overflow-x: auto; padding: 0 8px 8px; }
 
-    table { width: 100%; border-collapse: separate; border-spacing: 0 3px; }
+    table { width: 100%; border-collapse: separate; border-spacing: 0 3px; table-layout: fixed; }
 
     th {
       text-align: left;
@@ -272,7 +377,7 @@
       font-size: 10px;
       text-transform: uppercase;
       letter-spacing: 1px;
-      border-bottom: 1px solid rgba(255,255,255,0.04);
+      border-bottom: 1px solid var(--border);
       color: var(--text-secondary);
       position: sticky;
       top: 0;
@@ -286,18 +391,23 @@
     th.sorted { color: var(--accent-green); }
 
     td {
-      padding: 7px 8px;
+      padding: 10px 12px;
       font-size: 12px;
       white-space: nowrap;
       vertical-align: middle;
-      background: rgba(255,255,255,0.02);
+      background: var(--bg-input);
       cursor: pointer;
     }
 
+    .td-moniker { padding: 10px 14px; }
+
     tr td:first-child { border-top-left-radius: 6px; border-bottom-left-radius: 6px; }
     tr td:last-child  { border-top-right-radius: 6px; border-bottom-right-radius: 6px; }
-    tr:hover td { background: rgba(255,255,255,0.05); }
+    tr:hover td { background: var(--border); }
     tr.selected td { background: rgba(0,200,83,0.06); }
+
+    /* Row height stability — prevents jitter when data arrives */
+    #nodesBody tr { height: 44px; min-height: 44px; }
 
     .badge {
       display: inline-block;
@@ -305,25 +415,25 @@
       border-radius: 4px;
       font-size: 10px;
       font-weight: 700;
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display);
       letter-spacing: 0.5px;
     }
 
     .badge-pass { background: rgba(0,200,83,0.12);  color: var(--accent-green); border: 1px solid rgba(0,200,83,0.25); }
     .badge-slow { background: rgba(255,167,38,0.12); color: var(--accent-orange); border: 1px solid rgba(255,167,38,0.25); }
     .badge-fail { background: rgba(255,23,68,0.08);  color: var(--accent-red);    border: 1px solid rgba(255,23,68,0.2); }
-    .badge-svc  { background: rgba(255,255,255,0.06); color: #ccc; font-size: 10px; font-weight: 700; }
+    .badge-svc  { background: var(--border-hover); color: var(--text-dim); font-size: 10px; font-weight: 700; }
 
     .td-moniker {
       font-weight: 500;
-      color: var(--white);
+      color: var(--text);
       max-width: 180px;
       overflow: hidden;
       text-overflow: ellipsis;
     }
 
     .td-speed {
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display);
       font-weight: 700;
       text-align: right;
     }
@@ -375,13 +485,13 @@
     }
 
     .page-btn {
-      background: rgba(255,255,255,0.04);
+      background: var(--bg-input);
       border: 1px solid var(--glass-border);
       border-radius: 7px;
       padding: 7px 18px;
       color: var(--text-primary);
       font-size: 12px;
-      font-family: 'Inter', sans-serif;
+      font-family: var(--font-display);
       cursor: pointer;
       transition: all 0.2s;
     }
@@ -398,7 +508,7 @@
       right: 0;
       width: 440px;
       height: 100vh;
-      background: rgba(10, 10, 10, 0.97);
+      background: var(--bg-card-solid);
       border-left: 1px solid var(--glass-border);
       z-index: 8000;
       transform: translateX(100%);
@@ -413,7 +523,7 @@
     #overlay {
       position: fixed;
       inset: 0;
-      background: rgba(0,0,0,0.5);
+      background: rgba(0, 0, 0, 0.5); /* scrim overlay — intentional semi-transparent black, no token equivalent */
       z-index: 7900;
       opacity: 0;
       pointer-events: none;
@@ -432,10 +542,10 @@
     }
 
     .drawer-title {
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display);
       font-size: 14px;
       font-weight: 700;
-      color: var(--white);
+      color: var(--text);
     }
 
     .drawer-subtitle { font-size: 11px; color: var(--text-dim); margin-top: 3px; }
@@ -466,15 +576,15 @@
       display: flex;
       align-items: center;
       gap: 8px;
-      background: rgba(0,0,0,0.35);
-      border: 1px solid var(--glass-border);
+      background: var(--bg-input);
+      border: 1px solid var(--border);
       border-radius: 8px;
       padding: 9px 12px;
       margin-bottom: 14px;
     }
 
     .addr-row code {
-      font-family: 'Courier New', monospace;
+      font-family: var(--font-mono);
       font-size: 11px;
       color: var(--text-secondary);
       flex: 1;
@@ -507,7 +617,7 @@
     }
 
     .meta-cell {
-      background: rgba(255,255,255,0.03);
+      background: var(--bg-input);
       border: 1px solid var(--glass-border);
       border-radius: 7px;
       padding: 9px 10px;
@@ -521,10 +631,10 @@
     }
 
     .meta-value {
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display);
       font-size: 14px;
       font-weight: 600;
-      color: var(--white);
+      color: var(--text);
       margin-top: 3px;
     }
 
@@ -538,7 +648,7 @@
 
     /* chart */
     .chart-wrap {
-      background: rgba(255,255,255,0.03);
+      background: var(--bg-input);
       border: 1px solid var(--glass-border);
       border-radius: 8px;
       padding: 10px;
@@ -565,11 +675,34 @@
       font-weight: 500;
     }
 
-    .hist-table tbody tr { border-bottom: 1px solid rgba(255,255,255,0.02); }
+    .hist-table tbody tr { border-bottom: 1px solid var(--border); }
     .hist-table tbody td { padding: 5px 6px; }
 
     .hpass { color: var(--accent-green); font-weight: 600; }
     .hfail { color: var(--accent-red); font-weight: 600; }
+
+    /* ─── Theme toggle button ─── */
+    .theme-toggle-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text-dim);
+      cursor: pointer;
+      padding: 0;
+      transition: all 0.15s;
+      flex-shrink: 0;
+    }
+
+    .theme-toggle-btn:hover {
+      color: var(--accent-bright);
+      border-color: var(--accent);
+      background: var(--accent-dim);
+    }
 
     /* ─── Footer ─── */
     footer {
@@ -606,11 +739,11 @@
       border-radius: 20px;
       font-size: 11px;
       font-weight: 600;
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display);
       letter-spacing: 0.5px;
       cursor: pointer;
       border: 1px solid var(--glass-border);
-      background: rgba(255,255,255,0.03);
+      background: var(--bg-input);
       color: var(--text-secondary);
       transition: all 0.18s;
       min-height: 32px;
@@ -618,9 +751,9 @@
       user-select: none;
     }
 
-    .chip:hover { border-color: rgba(255,255,255,0.2); color: var(--text-primary); }
+    .chip:hover { border-color: var(--border-hover); color: var(--text-primary); }
 
-    .chip.active-all   { border-color: rgba(68,138,255,0.5); background: rgba(68,138,255,0.1); color: #448aff; }
+    .chip.active-all   { border-color: rgba(68,138,255,0.5); background: rgba(68,138,255,0.1); color: var(--accent); }
     .chip.active-wg    { border-color: rgba(0,200,83,0.5);  background: rgba(0,200,83,0.08); color: var(--accent-green); }
     .chip.active-v2    { border-color: rgba(255,167,38,0.5); background: rgba(255,167,38,0.08); color: var(--accent-orange); }
 
@@ -642,8 +775,8 @@
       gap: 5px;
       padding: 3px 10px 3px 12px;
       border-radius: 14px;
-      background: rgba(255,255,255,0.06);
-      border: 1px solid rgba(255,255,255,0.1);
+      background: var(--border-hover);
+      border: 1px solid var(--border-strong);
       font-size: 11px;
       color: var(--text-primary);
       cursor: pointer;
@@ -664,7 +797,7 @@
       border: none;
       cursor: pointer;
       padding: 2px 6px;
-      font-family: 'Inter', sans-serif;
+      font-family: var(--font-display);
       letter-spacing: 0.5px;
       margin-left: auto;
     }
@@ -686,9 +819,9 @@
       border-radius: 1px;
     }
 
-    .pass-tick.p1 { background: var(--accent-green); }
-    .pass-tick.p0 { background: var(--accent-red); }
-    .pass-tick.pn { background: rgba(255,255,255,0.1); }
+    .pass-tick.p1 { background: var(--accent-green); border-radius: 2px; }
+    .pass-tick.p0 { background: var(--accent-red); border-radius: 0; opacity: 0.85; }
+    .pass-tick.pn { background: var(--border-strong); }
 
     /* ─── Pass ratio text ─── */
     .pass-ratio {
@@ -714,11 +847,11 @@
       color: var(--text-secondary);
       font-size: 11px;
       cursor: pointer;
-      font-family: 'Inter', sans-serif;
+      font-family: var(--font-display);
       transition: all 0.18s;
     }
 
-    .win-btn:hover { border-color: rgba(255,255,255,0.2); color: var(--text-primary); }
+    .win-btn:hover { border-color: var(--border-hover); color: var(--text-primary); }
     .win-btn.active { border-color: rgba(0,200,83,0.4); color: var(--accent-green); background: rgba(0,200,83,0.06); }
 
     /* ─── History filter toggle ─── */
@@ -738,13 +871,13 @@
       color: var(--text-secondary);
       font-size: 11px;
       cursor: pointer;
-      font-family: 'Inter', sans-serif;
+      font-family: var(--font-display);
       transition: all 0.18s;
       min-height: 28px;
     }
 
     .hist-filter-btn.active { border-color: rgba(0,200,83,0.4); color: var(--accent-green); }
-    .hist-filter-btn:hover  { border-color: rgba(255,255,255,0.2); color: var(--text-primary); }
+    .hist-filter-btn:hover  { border-color: var(--border-hover); color: var(--text-primary); }
 
     /* ─── Error log section ─── */
     .error-section {
@@ -784,9 +917,9 @@
     }
 
     .error-code-txt {
-      font-family: 'Courier New', monospace;
+      font-family: var(--font-mono);
       font-size: 11px;
-      color: #ff8a80;
+      color: var(--red);
       font-weight: 600;
       flex-shrink: 0;
     }
@@ -845,12 +978,12 @@
     }
 
     .error-snippet {
-      background: rgba(0,0,0,0.3);
+      background: var(--bg-input);
       border-radius: 5px;
       padding: 8px 10px;
-      font-family: 'Courier New', monospace;
+      font-family: var(--font-mono);
       font-size: 10px;
-      color: #888;
+      color: var(--text-muted);
       white-space: pre-wrap;
       max-height: 120px;
       overflow-y: auto;
@@ -869,18 +1002,44 @@
       font-size: 10px;
       padding: 3px 9px;
       margin-top: 8px;
-      font-family: 'Inter', sans-serif;
+      font-family: var(--font-display);
       transition: all 0.18s;
     }
 
-    .error-copy-btn:hover { border-color: rgba(0,200,83,0.3); color: var(--accent-green); }
+    .error-copy-btn:hover { border-color: var(--green); color: var(--green); }
+
+    /* ─── Copy/download button row ─── */
+    .error-action-row { display: flex; gap: 6px; flex-wrap: wrap; }
+
+    /* ─── Copy toast ─── */
+    #copyToast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 9999;
+      padding: 9px 16px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      background: var(--bg-card-solid);
+      color: var(--text);
+      border: 1px solid var(--border);
+      box-shadow: 0 4px 16px var(--shadow);
+      opacity: 0;
+      transform: translateY(8px);
+      transition: opacity 0.18s, transform 0.18s;
+      pointer-events: none;
+    }
+    #copyToast.visible { opacity: 1; transform: translateY(0); }
+    #copyToast.ok  { border-color: var(--green); color: var(--green); }
+    #copyToast.err { border-color: var(--red);   color: var(--red); }
 
     /* ─── Pass bar in detail drawer ─── */
     .drawer-pass-bar-wrap {
       margin: 10px 0 14px;
       padding: 10px 12px;
-      background: rgba(0,0,0,0.25);
-      border: 1px solid var(--glass-border);
+      background: var(--bg-input);
+      border: 1px solid var(--border);
       border-radius: 8px;
     }
 
@@ -968,7 +1127,7 @@
       .table-wrap thead { display: none; }
 
       .table-wrap tr {
-        background: rgba(255,255,255,0.02);
+        background: var(--bg-input);
         border: 1px solid var(--glass-border);
         border-radius: 8px;
         margin-bottom: 6px;
@@ -980,7 +1139,7 @@
         transition: background 0.15s;
       }
 
-      .table-wrap tr:hover { background: rgba(255,255,255,0.04); }
+      .table-wrap tr:hover { background: var(--border); }
       .table-wrap tr.selected { background: rgba(0,200,83,0.06); border-color: rgba(0,200,83,0.2); }
 
       .table-wrap td {
@@ -993,12 +1152,12 @@
       /* hide number column on mobile cards */
       .table-wrap td:nth-child(1) { display: none; }
 
-      /* Transport + moniker row */
+      /* Protocol + moniker row */
       .table-wrap td:nth-child(2) { display: inline; }
       .table-wrap td:nth-child(3) {
         display: inline;
         font-size: 13px;
-        color: var(--white);
+        color: var(--text);
         font-weight: 500;
         max-width: 100%;
         white-space: nowrap;
@@ -1041,16 +1200,25 @@
       .summary-cell { padding: 10px 14px; }
       .detail-meta { grid-template-columns: 1fr; }
     }
+
+    /* ─── Toast / drawer coexistence ─── */
+    body.drawerOpen #copyToast { right: 460px; }
+
+    /* ─── Reduced motion ─── */
+    @media (prefers-reduced-motion: reduce) {
+      .brand-dot, .spinner, .run-dot { animation: none !important; }
+    }
   </style>
 </head>
 
-<body>
+<body class="boot-pending">
+<script>document.addEventListener('DOMContentLoaded', () => document.body.classList.remove('boot-pending'));</script>
 
   <!-- Overlay -->
   <div id="overlay"></div>
 
   <!-- Detail Drawer -->
-  <div id="detailDrawer" role="dialog" aria-label="Node detail">
+  <div id="detailDrawer" role="dialog" aria-modal="true" aria-labelledby="dTitle">
     <div class="drawer-header">
       <div>
         <div class="drawer-title" id="dTitle">—</div>
@@ -1062,7 +1230,7 @@
       <div class="addr-row">
         <code id="dAddr">—</code>
         <button class="copy-btn" id="copyAddrBtn">Copy</button>
-        <a id="dFullPageLink" href="#" style="margin-left:8px;color:#4a9eff;font-size:12px;text-decoration:none;">Full page ↗</a>
+        <a id="dFullPageLink" href="#" style="margin-left:8px;color:var(--accent);font-size:12px;text-decoration:none;">Full page ↗</a>
       </div>
       <div class="detail-meta" id="dMeta"></div>
 
@@ -1077,11 +1245,17 @@
 
       <!-- Errors section (shown only when errors exist) -->
       <div id="dErrorsSection" style="display:none">
-        <div class="section-title" style="color:var(--accent-red)">Errors</div>
+        <div class="section-title" style="color:var(--accent-red);display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <span>Errors</span>
+          <div class="error-action-row">
+            <button class="error-copy-btn" id="copyFailureLogsBtn" title="Copy failure logs as text">⎘ Copy Logs</button>
+            <button class="error-copy-btn" id="downloadFailureLogsBtn" title="Download failure log as .txt">⬇ Download Log</button>
+          </div>
+        </div>
         <div id="dErrorsList" class="error-section"></div>
       </div>
 
-      <div class="section-title">Speed History — Last 30 Tests</div>
+      <div class="section-title">Speed over time — Last 30 checks</div>
       <div class="chart-wrap">
         <svg id="dChart" viewBox="0 0 380 80" preserveAspectRatio="none" height="80"></svg>
       </div>
@@ -1095,7 +1269,7 @@
       <table class="hist-table">
         <thead>
           <tr>
-            <th>#</th><th>Result</th><th>Mbps</th><th>Stage</th><th>Error</th><th>Tested</th>
+            <th>#</th><th>Result</th><th>Speed</th><th>Stage</th><th>Error</th><th>When</th>
           </tr>
         </thead>
         <tbody id="dHistBody"></tbody>
@@ -1103,65 +1277,74 @@
     </div>
   </div>
 
-  <!-- Header -->
+  <!-- Header / persistent top nav -->
   <header>
-    <div class="brand">
-      <div class="brand-dot"></div>
-      <div>
-        <h1>SENTINEL NETWORK</h1>
-        <p class="brand-sub">Public Dashboard · dVPN Node Health</p>
+    <a class="brand" href="/">
+      <!-- SVG shield logo — Plan Manager pattern -->
+      <svg class="brand-logo" width="30" height="31" viewBox="0 0 30 31" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <defs>
+          <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#0156FC"/>
+            <stop offset="100%" stop-color="#2a7aff"/>
+          </linearGradient>
+        </defs>
+        <rect width="30" height="31" rx="6" fill="url(#shieldGrad)"/>
+        <path d="M15 5 L24 9 L24 16 C24 21 19.5 25 15 27 C10.5 25 6 21 6 16 L6 9 Z" fill="none" stroke="white" stroke-width="1.8" stroke-linejoin="round"/>
+        <path d="M11 16 L14 19 L19 13" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <div class="brand-text">
+        <h1>Sentinel</h1>
+        <p class="brand-sub">Public Node Health</p>
       </div>
-    </div>
+    </a>
+    <nav class="top-nav" aria-label="Site navigation">
+      <a class="nav-link active" href="/">Directory</a>
+      <a class="nav-link" href="/live">Live</a>
+      <a class="nav-link" href="/about">About</a>
+    </nav>
     <div class="header-right">
-      <div class="header-ts">Last run: <span id="lastRunTs">—</span></div>
-      <span class="badge-public">Public</span>
+      <div class="header-ts" id="headerTsWrap" style="display:none">Last check: <span id="lastRunTs">—</span></div>
+      <button id="btnTheme" class="theme-toggle-btn" onclick="toggleTheme()" title="Toggle light/dark theme" aria-label="Toggle theme" style="width:36px;height:36px;border-radius:8px;">
+        <svg id="themeIconDark" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+        <svg id="themeIconLight" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>
+      </button>
     </div>
   </header>
 
-  <!-- Run tabs + meta strip -->
-  <div id="runStrip" style="padding:10px 20px;background:#121826;border-bottom:1px solid #2a3548;display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:13px;">
-    <div style="display:flex;gap:4px;">
-      <button class="runtab" data-tab="current" style="background:#1a2332;color:#e8ecf5;border:1px solid #2a3548;border-radius:4px;padding:6px 14px;cursor:pointer;font-size:13px;">Current Run</button>
-      <button class="runtab" data-tab="last"    style="background:#1a2332;color:#e8ecf5;border:1px solid #2a3548;border-radius:4px;padding:6px 14px;cursor:pointer;font-size:13px;">Last Completed</button>
-      <button class="runtab active" data-tab="all" style="background:#4a9eff;color:#fff;border:1px solid #4a9eff;border-radius:4px;padding:6px 14px;cursor:pointer;font-size:13px;">All-Time</button>
-    </div>
-    <div id="runMetaStrip" style="color:#8a96ab;font-size:12px;flex:1;min-width:200px;"></div>
+  <!-- Identity block (One Big Idea) -->
+  <!-- Live-mode banner (shown only when admin enabled Public Testing Mode) -->
+  <a id="liveBanner" href="/live" style="display:none;max-width:720px;margin:16px auto 0;padding:12px 18px;border:1px solid var(--red);border-radius:var(--radius);background:var(--red-dim);color:var(--text);text-decoration:none;align-items:center;justify-content:space-between;gap:12px;">
+    <span style="display:inline-flex;align-items:center;gap:10px;font-weight:600;">
+      <span aria-hidden="true" style="width:10px;height:10px;border-radius:50%;background:var(--red);display:inline-block;animation:pulse 1.4s ease-in-out infinite;"></span>
+      Testing is live now
+    </span>
+    <span style="color:var(--text-dim);font-size:12px;">Watch the live view →</span>
+  </a>
+
+  <div class="identity" id="identityBlock" style="max-width:720px;margin:16px auto 0;padding:0 24px;text-align:center;">
+    <div style="font-size:15px;font-weight:500;color:var(--text);line-height:1.55;">The Sentinel network has <b id="idTotal">—</b> active privacy nodes across <b id="idCountries">—</b> countries. <b id="idPassing">—</b> passed their last connection test.</div>
+    <div style="font-size:12px;color:var(--text-dim);margin-top:8px;">Search any node below to see its live health, speed history, and recent connection errors.</div>
   </div>
 
-  <!-- Public Test strip -->
-  <div id="publicTestStrip" style="padding:10px 20px;background:#0f1a2e;border-bottom:1px solid #2a3548;display:flex;flex-wrap:wrap;gap:12px;align-items:center;font-size:13px;">
-    <div style="display:flex;align-items:center;gap:10px;">
-      <span id="ptDot" style="width:9px;height:9px;border-radius:50%;background:#555;display:inline-block;"></span>
-      <strong style="color:#e8ecf5;">Live Public Test</strong>
-      <span id="ptStatus" style="color:#8a96ab;">Idle</span>
-    </div>
-    <div id="ptMeta" style="color:#6b778c;font-size:12px;flex:1;min-width:180px;"></div>
-    <div id="ptControls" style="display:none;gap:6px;">
-      <select id="ptMode" style="background:#1a2332;color:#e8ecf5;border:1px solid #2a3548;border-radius:4px;padding:5px 8px;font-size:12px;">
-        <option value="p2p">P2P (tester pays gas)</option>
-        <option value="subscription">Subscription (fee-granted)</option>
-      </select>
-      <button id="ptStart" style="background:#00c853;color:#0a1020;border:none;border-radius:4px;padding:6px 14px;cursor:pointer;font-size:12px;font-weight:600;">Start</button>
-      <button id="ptStop"  style="background:#ff1744;color:#fff;border:none;border-radius:4px;padding:6px 14px;cursor:pointer;font-size:12px;font-weight:600;display:none;">Stop</button>
-    </div>
-  </div>
+  <!-- Explainer (ID-08) -->
+  <div class="explainer" style="max-width:640px;margin:12px auto 0;padding:0 24px;text-align:center;font-size:12px;font-style:italic;color:var(--text-dim);line-height:1.5;">Every node on the Sentinel decentralized VPN network — tested automatically for speed and reliability.</div>
 
   <!-- Summary Bar -->
   <div class="summary-bar">
     <div class="summary-cell">
-      <div class="summary-label">Total Nodes</div>
+      <div class="summary-label">Active Nodes</div>
       <div class="summary-value" id="sumTotal">—</div>
     </div>
     <div class="summary-cell">
-      <div class="summary-label">Passing %</div>
+      <div class="summary-label">Reliable Nodes</div>
       <div class="summary-value green" id="sumPass">—</div>
     </div>
     <div class="summary-cell">
-      <div class="summary-label">Median Speed</div>
+      <div class="summary-label">Typical Speed</div>
       <div class="summary-value" id="sumMedian">—</div>
     </div>
     <div class="summary-cell">
-      <div class="summary-label">Last Updated</div>
+      <div class="summary-label">Updated</div>
       <div class="summary-value sm" id="sumUpdated">—</div>
     </div>
   </div>
@@ -1210,6 +1393,14 @@
 
     <!-- Table -->
     <div class="glass-panel table-container">
+      <!-- Batch picker bar -->
+      <div class="batch-picker-bar" id="batchPickerBar">
+        <span class="batch-picker-label">Viewing:</span>
+        <select class="batch-select" id="batchSelect" aria-label="Select batch">
+          <option value="current">&#9679; Current Batch</option>
+        </select>
+        <span class="batch-meta" id="batchMeta"></span>
+      </div>
       <div class="panel-header">
         <div class="panel-title">Node Results</div>
         <div style="font-size:11px;color:var(--text-secondary)" id="lastUpdatedLabel"></div>
@@ -1218,22 +1409,20 @@
         <table id="nodesTable">
           <thead>
             <tr>
-              <th>#</th>
-              <th>Transport</th>
-              <th>Moniker / Address</th>
-              <th>Country</th>
-              <th>Region</th>
-              <th style="text-align:right">Latest Speed</th>
-              <th style="text-align:center">Handshake</th>
-              <th>Last Tested</th>
-              <th>Pass History</th>
-              <th>Trend</th>
-              <th>Tested by</th>
+              <th style="width:40px">#</th>
+              <th style="width:50px">Protocol</th>
+              <th style="width:180px">Moniker / Address</th>
+              <th style="width:160px">Country</th>
+              <th style="width:100px;text-align:right">Latest Speed</th>
+              <th style="width:80px;text-align:center">Connection test</th>
+              <th style="width:90px">Last Tested</th>
+              <th style="width:110px">Recent uptime</th>
+              <th style="width:70px">Speed over time</th>
             </tr>
           </thead>
           <tbody id="nodesBody">
             <tr>
-              <td colspan="11">
+              <td colspan="10">
                 <div class="loading-state"><span class="spinner"></span>Loading nodes…</div>
               </td>
             </tr>
@@ -1253,14 +1442,14 @@
 
   <!-- Footer -->
   <footer>
-    <p>Sentinel dVPN Network Audit — <a href="/admin/login">Admin? Log in at /admin/login</a></p>
+    <p>Sentinel Network · Public Node Health · <a href="/">Directory</a> · <a href="/live">Live</a> · <a href="/about">About</a> · <a href="/admin">Admin</a></p>
   </footer>
 
   <script>
     'use strict';
 
     // ─── Constants ───
-    const PAGE_SIZE   = 50;
+    const PAGE_SIZE   = 10000;
     const DEBOUNCE_MS = 250;
     const REFRESH_MS  = 30000;
 
@@ -1352,7 +1541,8 @@
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     }
 
     // ─── Build pass bar HTML ───
@@ -1386,16 +1576,19 @@
       if (p.has('country')) countryFilter = p.get('country');
       if (p.has('service')) typeFilter    = p.get('service');
       if (p.has('sort'))    sortKey       = p.get('sort');
-      if (p.has('win'))     passWindow    = parseInt(p.get('win'), 10) || 25;
+      if (p.has('window'))  passWindow    = parseInt(p.get('window'), 10) || 25;
+      if (p.has('page'))    currentOffset = (parseInt(p.get('page'), 10) - 1 || 0) * PAGE_SIZE;
     }
 
     function stateToUrl() {
       const p = new URLSearchParams();
-      if (searchQuery)        p.set('q',       searchQuery);
-      if (countryFilter)      p.set('country', countryFilter);
-      if (typeFilter)         p.set('service', typeFilter);
-      if (sortKey !== 'mbps_desc') p.set('sort', sortKey);
-      if (passWindow !== 25)  p.set('win',     passWindow);
+      if (searchQuery)             p.set('q',       searchQuery);
+      if (countryFilter)           p.set('country', countryFilter);
+      if (typeFilter)              p.set('service', typeFilter);
+      if (sortKey !== 'mbps_desc') p.set('sort',    sortKey);
+      if (passWindow !== 25)       p.set('window',  passWindow);
+      const curPage = Math.floor(currentOffset / PAGE_SIZE) + 1;
+      if (curPage > 1)             p.set('page',    curPage);
       const qs = p.toString();
       history.replaceState(null, '', qs ? '?' + qs : window.location.pathname);
     }
@@ -1491,7 +1684,7 @@
     // ─── Sparkline SVG (last 10 results) ───
     function buildSparkline(history) {
       if (!history || history.length < 2) {
-        return '<svg width="60" height="20"><line x1="0" y1="10" x2="60" y2="10" stroke="#333" stroke-width="1"/></svg>';
+        return '<svg width="60" height="20"><line x1="0" y1="10" x2="60" y2="10" style="stroke:var(--border)" stroke-width="1"/></svg>';
       }
       const pts  = history.slice(-10);
       const vals = pts.map(h => h.mbps ?? h.actualMbps ?? h.download_mbps ?? 0);
@@ -1504,9 +1697,9 @@
         return `${x},${y}`;
       });
       const last = vals[vals.length - 1];
-      const clr  = last >= 20 ? '#00c853' : last >= 5 ? '#ffa726' : last > 0 ? '#ff1744' : '#444';
+      const clrVar = last >= 20 ? 'var(--green)' : last >= 5 ? 'var(--yellow)' : last > 0 ? 'var(--red)' : 'var(--border)';
       return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="display:block">
-        <polyline points="${coords.join(' ')}" fill="none" stroke="${clr}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+        <polyline points="${coords.join(' ')}" fill="none" style="stroke:${clrVar}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
       </svg>`;
     }
 
@@ -1515,7 +1708,7 @@
       const svgEl = document.getElementById('dChart');
       const pts   = (history || []).slice(-30);
       if (pts.length < 2) {
-        svgEl.innerHTML = '<text x="50%" y="50%" text-anchor="middle" fill="#444" font-size="11">No data</text>';
+        svgEl.innerHTML = '<text x="50%" y="50%" text-anchor="middle" style="fill:var(--text-muted)" font-size="11">No data</text>';
         return;
       }
       const W = 380, H = 80;
@@ -1532,8 +1725,8 @@
       for (let i = 0; i <= 4; i++) {
         const v = (maxV / 4) * i;
         const y = yS(v).toFixed(1);
-        grid += `<line x1="${PL}" y1="${y}" x2="${W - PR}" y2="${y}" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>`;
-        grid += `<text x="${PL - 3}" y="${+y + 3}" text-anchor="end" fill="#444" font-size="9">${v >= 1 ? v.toFixed(0) : v.toFixed(1)}</text>`;
+        grid += `<line x1="${PL}" y1="${y}" x2="${W - PR}" y2="${y}" style="stroke:var(--border)" stroke-width="1"/>`;
+        grid += `<text x="${PL - 3}" y="${+y + 3}" text-anchor="end" style="fill:var(--text-muted)" font-size="9">${v >= 1 ? v.toFixed(0) : v.toFixed(1)}</text>`;
       }
 
       const coords  = pts.map((_, i) => `${xS(i).toFixed(1)},${yS(vals[i]).toFixed(1)}`);
@@ -1546,19 +1739,19 @@
       let dots = '';
       pts.forEach((p, i) => {
         const passed = p.passed ?? p.pass ?? (vals[i] > 0);
-        dots += `<circle cx="${xS(i).toFixed(1)}" cy="${yS(vals[i]).toFixed(1)}" r="2.5" fill="${passed ? '#00c853' : '#ff1744'}"/>`;
+        dots += `<circle cx="${xS(i).toFixed(1)}" cy="${yS(vals[i]).toFixed(1)}" r="2.5" style="fill:${passed ? 'var(--green)' : 'var(--red)'}"/>`;
       });
 
       svgEl.innerHTML = `
         <defs>
           <linearGradient id="ag" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="#00c853" stop-opacity="0.15"/>
-            <stop offset="100%" stop-color="#00c853" stop-opacity="0"/>
+            <stop offset="0%" stop-color="var(--green)" stop-opacity="0.15"/>
+            <stop offset="100%" stop-color="var(--green)" stop-opacity="0"/>
           </linearGradient>
         </defs>
         ${grid}
         <polygon points="${fillPts.join(' ')}" fill="url(#ag)"/>
-        <polyline points="${coords.join(' ')}" fill="none" stroke="#00c853" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+        <polyline points="${coords.join(' ')}" fill="none" style="stroke:var(--green)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
         ${dots}
       `;
     }
@@ -1569,12 +1762,29 @@
         const res = await fetch('/api/public/stats');
         if (!res.ok) return;
         const d = await res.json();
-        document.getElementById('lastRunTs').textContent  = fmtRelative(d.last_run_at) || '—';
+        const tsEl = document.getElementById('lastRunTs');
+        const tsWrap = document.getElementById('headerTsWrap');
+        if (tsEl && d.last_run_at) {
+          tsEl.textContent = fmtRelative(d.last_run_at);
+          if (tsWrap) tsWrap.style.display = '';
+        }
         document.getElementById('sumTotal').textContent   = d.total_nodes  != null ? d.total_nodes : '—';
         document.getElementById('sumPass').textContent    = d.pass_pct     != null ? d.pass_pct.toFixed(1) + '%' : '—';
         document.getElementById('sumMedian').textContent  = d.median_mbps  != null ? fmtMbps(d.median_mbps) : '—';
         document.getElementById('sumUpdated').textContent = fmtRelative(d.updated_at) || '—';
       } catch (_) { /* not yet available */ }
+    }
+
+    // ─── Live-mode banner: show only when admin has Public Testing running ───
+    async function refreshLiveBanner() {
+      try {
+        const res = await fetch('/api/public/test/status');
+        if (!res.ok) return;
+        const d = await res.json();
+        const el = document.getElementById('liveBanner');
+        if (!el) return;
+        el.style.display = d.running ? 'flex' : 'none';
+      } catch (_) { /* ignore */ }
     }
 
     // ─── Populate country filter ───
@@ -1635,7 +1845,7 @@
     function setTableLoading(show) {
       if (show) {
         document.getElementById('nodesBody').innerHTML =
-          `<tr><td colspan="9"><div class="loading-state"><span class="spinner"></span>Loading nodes…</div></td></tr>`;
+          `<tr><td colspan="10"><div class="loading-state"><span class="spinner"></span>Loading nodes…</div></td></tr>`;
         document.getElementById('paginationWrap').style.display = 'none';
       }
     }
@@ -1643,7 +1853,7 @@
     function setTableMessage(msg, isError) {
       const col = isError ? 'color:var(--accent-red)' : '';
       document.getElementById('nodesBody').innerHTML =
-        `<tr><td colspan="9"><div class="loading-state" style="${col}">${escHtml(msg)}</div></td></tr>`;
+        `<tr><td colspan="10"><div class="loading-state" style="${col}">${escHtml(msg)}</div></td></tr>`;
       document.getElementById('paginationWrap').style.display = 'none';
     }
 
@@ -1707,11 +1917,11 @@
         const proto  = `<span class="badge badge-svc">${isWg ? 'WG' : 'V2'}</span>`;
         const fl     = flag(n.country);
         const cc     = countryCode(n.country);
-        const ctry   = fl ? `${fl} ${cc}` : escHtml(n.country || '—');
+        const ctry   = fl ? `${fl} ${escHtml(cc)}` : escHtml(n.country || '—');
         const moniker = escHtml(n.moniker || (n.address ? n.address.slice(0, 10) + '…' : '—'));
         const sc      = speedClass(n.latest_mbps);
         const speedHtml = n.latest_mbps != null
-          ? `<span class="${sc}">${n.latest_mbps.toFixed(2)}</span> <span style="color:#555;font-size:10px">Mbps</span>`
+          ? `<span class="${sc}">${n.latest_mbps.toFixed(2)}</span> <span style="color:var(--text-muted);font-size:10px">Mbps</span>`
           : '<span class="speed-none">—</span>';
         const hsDot   = n.handshake_ok == null ? 'hs-skip' : n.handshake_ok ? 'hs-ok' : 'hs-fail';
         const spark   = buildSparkline(n.history);
@@ -1729,23 +1939,22 @@
 
         const tr = document.createElement('tr');
         tr.dataset.addr = n.address;
+        tr.title = 'Click to see history and errors';
+        tr.style.height = '44px';
         if (n.address === selectedAddr) tr.classList.add('selected');
-        const region = continentLabel(n.continent);
-        const testedBy = n.sdk
-          ? `${sdkLabel(n.sdk)}${n.tester_os ? ' · ' + osLabel(n.tester_os) : ''}`
-          : '—';
+        const city = n.city ? ` · ${escHtml(n.city)}` : '';
+        const countryFull = `${ctry}${city}`;
         tr.innerHTML = `
-          <td style="color:var(--text-dim);font-size:11px;padding-left:10px">${idx}</td>
-          <td>${proto}</td>
-          <td class="td-moniker" title="${escHtml(n.address)}">${moniker}</td>
-          <td style="color:var(--text-secondary)">${ctry}</td>
-          <td style="color:var(--text-dim);font-size:11px">${region}</td>
-          <td class="td-speed" style="text-align:right">${speedHtml}</td>
-          <td style="text-align:center"><span class="hs-dot ${hsDot}"></span></td>
-          <td style="color:var(--text-dim);font-size:11px">${fmtRelative(n.last_tested_at)}</td>
-          <td>${passBarHtml}</td>
-          <td>${spark}</td>
-          <td style="color:var(--text-dim);font-size:11px">${testedBy}</td>
+          <td style="color:var(--text-dim);font-size:11px;padding-left:10px;width:40px">${idx}</td>
+          <td style="width:50px">${proto}</td>
+          <td class="td-moniker" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(n.address)}">${moniker}</td>
+          <td style="color:var(--text-dim);font-size:12px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml((n.country||'') + (n.city ? ' · '+n.city : ''))}">${countryFull}</td>
+          <td class="td-speed" style="text-align:right;width:100px">${speedHtml}</td>
+          <td style="text-align:center;width:80px"><span class="hs-dot ${hsDot}"></span></td>
+          <td style="color:var(--text-dim);font-size:11px;width:90px">${fmtRelative(n.last_tested_at)}</td>
+          <td style="width:110px">${passBarHtml}</td>
+          <td style="width:70px">${spark}</td>
+          <td style="color:var(--text-muted);font-size:12px;padding-right:12px;text-align:right;user-select:none">›</td>
         `;
         tr.addEventListener('click', () => openDetail(n));
         frag.appendChild(tr);
@@ -1820,14 +2029,6 @@
         <div class="meta-cell">
           <div class="meta-label">Region</div>
           <div class="meta-value" style="font-size:12px;font-weight:400">${continentLabel(node.continent)}</div>
-        </div>
-        <div class="meta-cell">
-          <div class="meta-label">Tested SDK</div>
-          <div class="meta-value" style="font-size:12px;font-weight:400">${sdkLabel(node.sdk)}</div>
-        </div>
-        <div class="meta-cell">
-          <div class="meta-label">Tester Device</div>
-          <div class="meta-value" style="font-size:12px;font-weight:400">${osLabel(node.tester_os) || '—'}</div>
         </div>
       `;
 
@@ -1907,10 +2108,10 @@
         tr.style.background = passed ? '' : 'rgba(255,23,68,0.03)';
         tr.innerHTML = `
           <td style="color:var(--text-dim)">${i + 1}</td>
-          <td class="${passed ? 'hpass' : 'hfail'}">${passed ? 'PASS' : 'FAIL'}</td>
-          <td class="${speedClass(mbps)}" style="font-family:'Outfit',sans-serif;font-weight:700">${fmtMbps(mbps)}</td>
+          <td class="${passed ? 'hpass' : 'hfail'}"><span aria-hidden="true" style="display:inline-block;width:10px">${passed ? '●' : '▲'}</span> ${passed ? 'PASS' : 'FAIL'}</td>
+          <td class="${speedClass(mbps)}" style="font-family:var(--font-display);font-weight:700">${fmtMbps(mbps)}</td>
           <td style="color:var(--text-dim);font-size:10px">${stage ? escHtml(stage) : '—'}</td>
-          <td style="color:#ff8a80;font-size:10px;max-width:140px;overflow:hidden;text-overflow:ellipsis" title="${escHtml(errMsg)}">${errMsg ? escHtml(errMsg.slice(0, 50)) : '—'}</td>
+          <td style="color:var(--red);font-size:10px;max-width:140px;overflow:hidden;text-overflow:ellipsis" title="${escHtml(errMsg)}">${errMsg ? escHtml(errMsg.slice(0, 50)) : '—'}</td>
           <td style="color:var(--text-dim)">${fmtRelative(ts)}</td>
         `;
         frag.appendChild(tr);
@@ -2012,16 +2213,53 @@
       });
     }
 
+    let _drawerFocusTrap = null;
+    let _preDrawerFocus = null;
+
     function openDrawer() {
-      document.getElementById('detailDrawer').classList.add('open');
+      const drawer = document.getElementById('detailDrawer');
+      drawer.classList.add('open');
       document.getElementById('overlay').classList.add('visible');
+      document.body.classList.add('drawerOpen');
+      _preDrawerFocus = document.activeElement;
+      // Focus close button
+      requestAnimationFrame(() => {
+        const closeBtn = document.getElementById('drawerClose');
+        if (closeBtn) closeBtn.focus();
+        // Focus trap
+        const focusable = () => Array.from(drawer.querySelectorAll(
+          'a[href],button:not([disabled]),input,select,textarea,[tabindex]:not([tabindex="-1"])'
+        ));
+        _drawerFocusTrap = (e) => {
+          if (e.key !== 'Tab') return;
+          const els = focusable();
+          if (!els.length) return;
+          const first = els[0], last = els[els.length - 1];
+          if (e.shiftKey) {
+            if (document.activeElement === first) { e.preventDefault(); last.focus(); }
+          } else {
+            if (document.activeElement === last) { e.preventDefault(); first.focus(); }
+          }
+        };
+        drawer.addEventListener('keydown', _drawerFocusTrap);
+      });
     }
 
     function closeDrawer() {
-      document.getElementById('detailDrawer').classList.remove('open');
+      const drawer = document.getElementById('detailDrawer');
+      drawer.classList.remove('open');
       document.getElementById('overlay').classList.remove('visible');
+      document.body.classList.remove('drawerOpen');
       selectedAddr = null;
       document.querySelectorAll('#nodesBody tr.selected').forEach(tr => tr.classList.remove('selected'));
+      if (_drawerFocusTrap) {
+        drawer.removeEventListener('keydown', _drawerFocusTrap);
+        _drawerFocusTrap = null;
+      }
+      if (_preDrawerFocus && typeof _preDrawerFocus.focus === 'function') {
+        _preDrawerFocus.focus();
+        _preDrawerFocus = null;
+      }
     }
 
     // ─── Copy address ───
@@ -2149,10 +2387,312 @@
       }
     }
 
+    // ─── Theme toggle ───
+    function toggleTheme() {
+      const cur = document.documentElement.dataset.theme || 'dark';
+      const next = cur === 'dark' ? 'light' : 'dark';
+      document.documentElement.dataset.theme = next;
+      localStorage.setItem('theme', next);
+      updateThemeIcon();
+    }
+    function updateThemeIcon() {
+      const cur = document.documentElement.dataset.theme || 'dark';
+      const dark = document.getElementById('themeIconDark');
+      const light = document.getElementById('themeIconLight');
+      if (!dark || !light) return;
+      if (cur === 'dark') { dark.style.display = ''; light.style.display = 'none'; }
+      else { dark.style.display = 'none'; light.style.display = ''; }
+    }
+    document.addEventListener('DOMContentLoaded', updateThemeIcon);
+
+    // ─── Copy helpers ───────────────────────────────────────────────────────
+    async function copyText(text) {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        try { await navigator.clipboard.writeText(text); return true; } catch (_) {}
+      }
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+      } catch (_) { return false; }
+    }
+
+    let _toastTimer = null;
+    function showToast(msg, ok) {
+      const t = document.getElementById('copyToast');
+      if (!t) return;
+      clearTimeout(_toastTimer);
+      t.textContent = msg;
+      t.className = 'visible ' + (ok ? 'ok' : 'err');
+      _toastTimer = setTimeout(() => { t.className = ''; }, 2000);
+    }
+
+    function _buildFailureText(errors, nodeAddr, moniker) {
+      if (!errors || errors.length === 0) return '';
+      const dates = errors.map(e => e.captured_at || e.tested_at).filter(Boolean).sort();
+      const dateRange = dates.length
+        ? (dates[0] === dates[dates.length - 1]
+            ? new Date(dates[0]).toISOString()
+            : new Date(dates[0]).toISOString() + ' — ' + new Date(dates[dates.length - 1]).toISOString())
+        : 'unknown';
+      const header = [
+        `# Failure report — ${moniker || nodeAddr}`,
+        `# ${nodeAddr}`,
+        `# captured ${dateRange}`,
+        '',
+      ].join('\n');
+      const body = errors.map(e => {
+        const n   = e.iteration != null ? `[iteration ${e.iteration}]` : '[iteration ?]';
+        const stg = e.stage || '?';
+        const ec  = e.error_code || e.error || '?';
+        const msg = e.error_message || e.error || '';
+        const snip = (e.log_snippet || '').trim();
+        return [
+          `${n} ${stg} ${ec}`,
+          msg,
+          '---',
+          snip,
+          '===',
+        ].join('\n');
+      }).join('\n');
+      return header + body;
+    }
+
+    // ─── Copy Failure Logs (drawer only) ───────────────────────────────────
+    document.addEventListener('DOMContentLoaded', () => {
+      const copyLogsBtn = document.getElementById('copyFailureLogsBtn');
+      const dlBtn       = document.getElementById('downloadFailureLogsBtn');
+
+      if (copyLogsBtn) {
+        copyLogsBtn.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          const nodeAddr = document.getElementById('dAddr').textContent;
+          const moniker  = document.getElementById('dTitle').textContent;
+          const errors   = _drawerErrors || [];
+          const text     = _buildFailureText(errors, nodeAddr, moniker);
+          const ok       = await copyText(text);
+          if (ok) {
+            showToast(`Copied ${errors.length} failure${errors.length !== 1 ? 's' : ''}`, true);
+          } else {
+            showToast('Copy failed — use Download', false);
+          }
+        });
+      }
+
+      if (dlBtn) {
+        dlBtn.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          const nodeAddr = document.getElementById('dAddr').textContent;
+          const moniker  = document.getElementById('dTitle').textContent;
+          const errors   = _drawerErrors || [];
+          const text     = _buildFailureText(errors, nodeAddr, moniker);
+          const safe     = (moniker || nodeAddr).replace(/[^a-z0-9_-]/gi, '_').slice(0, 60);
+          const blob     = new Blob([text], { type: 'text/plain' });
+          const url      = URL.createObjectURL(blob);
+          const a        = document.createElement('a');
+          a.href         = url;
+          a.download     = `${safe}-failures.txt`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        });
+      }
+    });
+
     // ─── Stats refresh ───
     function startStatsRefresh() {
       loadStats();
-      statsTimer = setInterval(loadStats, REFRESH_MS);
+      refreshLiveBanner();
+      statsTimer = setInterval(() => { loadStats(); refreshLiveBanner(); }, REFRESH_MS);
+    }
+
+    // ─── Batch picker ────────────────────────────────────────────────────────
+    let _viewingBatchId = 'current'; // 'current' | numeric id string
+    let _batchList      = [];
+
+    async function loadBatchList() {
+      try {
+        const res = await fetch('/api/public/batches?limit=20');
+        if (!res.ok) return;
+        const data = await res.json();
+        _batchList = data.batches || [];
+        renderBatchSelect();
+      } catch (_) { /* ignore — endpoint may not exist yet */ }
+    }
+
+    function renderBatchSelect() {
+      const sel = document.getElementById('batchSelect');
+      if (!sel) return;
+      // Preserve current selection
+      const prev = _viewingBatchId;
+      // Rebuild options after the always-present "Current" option
+      while (sel.options.length > 1) sel.remove(1);
+      _batchList.forEach(b => {
+        const opt = document.createElement('option');
+        opt.value = String(b.id);
+        const started = b.started_at ? fmtRelative(b.started_at) : `#${b.id}`;
+        const size    = b.snapshot_size != null ? ` · ${b.snapshot_size} nodes` : '';
+        const pct     = (b.passed != null && b.snapshot_size > 0)
+          ? ` · ${((b.passed / b.snapshot_size) * 100).toFixed(0)}% pass`
+          : '';
+        opt.textContent = `Batch #${b.id} — ${started}${size}${pct}`;
+        sel.appendChild(opt);
+      });
+      // Restore selection
+      sel.value = String(prev);
+      if (!sel.value) sel.value = 'current';
+      updateBatchMeta();
+    }
+
+    function updateBatchMeta() {
+      const meta = document.getElementById('batchMeta');
+      if (!meta) return;
+      if (_viewingBatchId === 'current') {
+        meta.innerHTML = '<span class="batch-live-dot"></span>Live — updates as checks complete';
+      } else {
+        const b = _batchList.find(x => String(x.id) === String(_viewingBatchId));
+        if (b) {
+          const started  = b.started_at  ? new Date(b.started_at).toLocaleString()  : '?';
+          const finished = b.finished_at ? new Date(b.finished_at).toLocaleString() : 'in progress';
+          meta.textContent = `Started ${started} · finished ${finished}`;
+        } else {
+          meta.textContent = `Batch #${_viewingBatchId}`;
+        }
+      }
+    }
+
+    async function loadBatchSnapshot(batchId) {
+      setTableLoading(true);
+      try {
+        const res = await fetch(`/api/public/batch/${encodeURIComponent(batchId)}?limit=500`);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        const raw = data.results || [];
+        allNodes = raw.map(n => normalizeNode({
+          node_addr:      n.node_address || n.address || '',
+          moniker:        n.moniker || '',
+          country:        n.country || '',
+          city:           n.city || '',
+          service_type:   n.type ?? n.service_type ?? 1,
+          latest_mbps:    n.actual_mbps ?? null,
+          handshake_ok:   n.actual_mbps > 0 ? true : (n.error ? false : null),
+          last_tested_at: n.tested_at || null,
+        }));
+        populateCountries(allNodes);
+        filterAndSort();
+        renderPage();
+        updateFilterChips();
+        document.getElementById('lastUpdatedLabel').textContent = 'Snapshot from batch #' + batchId;
+      } catch (err) {
+        setTableMessage('Failed to load batch: ' + escHtml(err.message), true);
+      }
+    }
+
+    document.getElementById('batchSelect').addEventListener('change', function() {
+      _viewingBatchId = this.value;
+      updateBatchMeta();
+      if (_viewingBatchId === 'current') {
+        loadNodes();
+      } else {
+        // Disconnect SSE live updates for past batches
+        loadBatchSnapshot(_viewingBatchId);
+      }
+    });
+
+    // ─── SSE subscription for live batch updates ──────────────────────────
+    let _sse         = null;
+    let _sseRetry    = 1000;
+    const SSE_MAX_RETRY = 30000;
+
+    function connectSSE() {
+      if (_sse) { try { _sse.close(); } catch (_) {} }
+      try {
+        _sse = new EventSource('/api/public/events');
+        _sse.addEventListener('batch:start', (ev) => {
+          try {
+            const d = JSON.parse(ev.data);
+            // A new batch started — show live banner, update batch list
+            const lb = document.getElementById('liveBanner');
+            if (lb) lb.style.display = 'flex';
+            loadBatchList();
+            if (_viewingBatchId === 'current') {
+              allNodes = [];
+              filteredNodes = [];
+              renderPage();
+              document.getElementById('lastUpdatedLabel').textContent = 'New batch in progress…';
+              const meta = document.getElementById('batchMeta');
+              if (meta) meta.innerHTML = '<span class="batch-live-dot"></span>New batch started…';
+            }
+          } catch (_) {}
+        });
+
+        _sse.addEventListener('batch:node:result', (ev) => {
+          if (_viewingBatchId !== 'current') return;
+          try {
+            const d = JSON.parse(ev.data);
+            if (!d || !d.node_address) return;
+            const norm = normalizeNode({
+              node_addr:      d.node_address,
+              moniker:        d.moniker || '',
+              country:        d.country || '',
+              city:           d.city    || '',
+              service_type:   d.type ?? d.service_type ?? 1,
+              latest_mbps:    d.actual_mbps ?? null,
+              handshake_ok:   d.actual_mbps > 0 ? true : (d.error ? false : null),
+              last_tested_at: d.tested_at || new Date().toISOString(),
+            });
+            const idx = allNodes.findIndex(n => n.address === norm.address);
+            if (idx >= 0) {
+              allNodes[idx] = norm;
+            } else {
+              allNodes.push(norm);
+            }
+            filterAndSort();
+            renderPage();
+          } catch (_) {}
+        });
+
+        _sse.addEventListener('batch:end', (ev) => {
+          try {
+            const d = JSON.parse(ev.data || '{}');
+            const dur = d.duration_ms ? Math.round(d.duration_ms / 1000) : null;
+            const next = d.next_in_ms  ? Math.round(d.next_in_ms  / 1000) : null;
+            const msg  = next != null
+              ? `Batch complete. Next check in ${next}s`
+              : 'Batch complete.';
+            showToast(msg, true);
+            loadBatchList();
+          } catch (_) {}
+        });
+
+        _sse.addEventListener('batch:gap', (ev) => {
+          try {
+            const d = JSON.parse(ev.data || '{}');
+            const next = d.next_in_ms ? Math.round(d.next_in_ms / 1000) : null;
+            if (next != null) {
+              const meta = document.getElementById('batchMeta');
+              if (meta && _viewingBatchId === 'current') {
+                meta.innerHTML = `<span class="batch-live-dot"></span>Next batch in ${next}s`;
+              }
+            }
+          } catch (_) {}
+        });
+
+        _sse.onopen  = () => { _sseRetry = 1000; };
+        _sse.onerror = () => {
+          try { _sse.close(); } catch (_) {}
+          _sse = null;
+          setTimeout(connectSSE, _sseRetry);
+          _sseRetry = Math.min(_sseRetry * 2, SSE_MAX_RETRY);
+        };
+      } catch (_) { /* SSE not supported or blocked */ }
     }
 
     // ─── Init: restore URL params, then load ───
@@ -2165,115 +2705,14 @@
       b.classList.toggle('active', parseInt(b.dataset.win, 10) === passWindow);
     });
     startStatsRefresh();
+    loadBatchList();
+    connectSSE();
 
-    // ─── Runs strip: fetch current + last run metadata, wire tab buttons ───
-    async function loadRunStrip() {
-      const meta = document.getElementById('runMetaStrip');
-      try {
-        const [curR, lastR] = await Promise.all([
-          fetch('/api/public/runs/current').then(r => r.ok ? r.json() : null).catch(() => null),
-          fetch('/api/public/runs/last').then(r => r.ok ? r.json() : null).catch(() => null),
-        ]);
-        currentRunId = curR?.id ?? null;
-        lastRunId    = lastR?.id ?? null;
-        const parts = [];
-        if (curR) {
-          const started = new Date(curR.started_at).toLocaleTimeString();
-          parts.push(`Run #${curR.id} in progress · ${curR.pass_count_so_far}/${curR.node_count_so_far} tested · started ${started}`);
-        } else if (lastR) {
-          const finished = new Date(lastR.finished_at).toLocaleString();
-          parts.push(`Last run #${lastR.id}: ${lastR.pass_count || 0}/${lastR.node_count || 0} passed · finished ${finished}`);
-        }
-        meta.textContent = parts.join(' · ');
-        // Disable tabs that have no data
-        document.querySelector('.runtab[data-tab="current"]').disabled = currentRunId == null;
-        document.querySelector('.runtab[data-tab="last"]').disabled    = lastRunId    == null;
-      } catch (err) {
-        meta.textContent = '';
-      }
-    }
-
-    document.querySelectorAll('.runtab').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const tab = btn.dataset.tab;
-        if ((tab === 'current' && currentRunId == null) || (tab === 'last' && lastRunId == null)) return;
-        tabMode = tab;
-        document.querySelectorAll('.runtab').forEach(b => {
-          const on = b.dataset.tab === tab;
-          b.classList.toggle('active', on);
-          b.style.background = on ? '#4a9eff' : '#1a2332';
-          b.style.color      = on ? '#fff'    : '#e8ecf5';
-          b.style.border     = '1px solid ' + (on ? '#4a9eff' : '#2a3548');
-        });
-        currentOffset = 0;
-        loadNodes();
-      });
-    });
-
-    loadRunStrip();
-    setInterval(loadRunStrip, 15000);
     loadNodes();
-
-    // ─── Public Test strip ───
-    function fmtUptime(ms) {
-      if (!ms) return '';
-      const s = Math.floor(ms / 1000);
-      if (s < 60) return `${s}s`;
-      const m = Math.floor(s / 60);
-      if (m < 60) return `${m}m ${s % 60}s`;
-      const h = Math.floor(m / 60);
-      return `${h}h ${m % 60}m`;
-    }
-    async function loadPublicTest() {
-      try {
-        const r = await fetch('/api/public/test/status', { credentials: 'same-origin' });
-        if (!r.ok) return;
-        const s = await r.json();
-        const dot = document.getElementById('ptDot');
-        const status = document.getElementById('ptStatus');
-        const meta = document.getElementById('ptMeta');
-        const controls = document.getElementById('ptControls');
-        const startBtn = document.getElementById('ptStart');
-        const stopBtn  = document.getElementById('ptStop');
-        if (s.running) {
-          dot.style.background = '#00c853';
-          dot.style.boxShadow = '0 0 8px #00c853';
-          status.textContent = `Running · iteration ${s.iteration || 0} · ${s.mode || 'p2p'} mode`;
-          meta.textContent = s.startedAt ? `Uptime ${fmtUptime(s.uptime)} · started ${new Date(s.startedAt).toLocaleTimeString()}` : '';
-          startBtn.style.display = 'none';
-          stopBtn.style.display = '';
-        } else {
-          dot.style.background = '#555';
-          dot.style.boxShadow = 'none';
-          status.textContent = 'Idle';
-          meta.textContent = s.lastError ? `Last error: ${s.lastError}` : '';
-          startBtn.style.display = '';
-          stopBtn.style.display  = 'none';
-        }
-        controls.style.display = s.allowPublicStart ? 'flex' : 'none';
-      } catch {}
-    }
-    document.getElementById('ptStart').addEventListener('click', async () => {
-      const mode = document.getElementById('ptMode').value;
-      const r = await fetch('/api/public/test/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ mode }),
-      });
-      if (!r.ok) {
-        const e = await r.json().catch(() => ({ error: 'Start failed' }));
-        alert(e.error || 'Start failed');
-      }
-      loadPublicTest();
-    });
-    document.getElementById('ptStop').addEventListener('click', async () => {
-      await fetch('/api/public/test/stop', { method: 'POST', credentials: 'same-origin' });
-      loadPublicTest();
-    });
-    loadPublicTest();
-    setInterval(loadPublicTest, 5000);
   </script>
+
+  <!-- Copy toast — single reused node -->
+  <div id="copyToast" role="status" aria-live="polite"></div>
 
 </body>
 </html>
