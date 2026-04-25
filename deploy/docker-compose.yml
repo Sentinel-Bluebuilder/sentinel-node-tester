@@ -1,0 +1,11 @@
+services:
+  node-tester:
+    build:
+      context: ..
+    ports:
+      - "3001:3001"
+    env_file:
+      - ../.env
+    restart: unless-stopped
+    volumes:
+      - ../data:/app/data

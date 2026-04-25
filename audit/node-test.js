@@ -192,12 +192,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
     clearPaidNodes();
   }
 
-  // Economy mode: skip nodes that need individual payment
-  if (!sessionId && state.economyMode) {
-    throw new Error('Economy mode — no batch session available');
-  }
-
-  // Balance check — return PAUSE signal instead of failing
+// Balance check — return PAUSE signal instead of failing
   const remainingBalance = Math.max(0, state.balanceUdvpn - state.spentUdvpn);
   const isInPlan = (node.planIds || []).length > 0;
   if (!sessionId && !isInPlan && remainingBalance < thisCostUdvpn + 10_000) {

@@ -5,7 +5,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Sentinel Network Audit</title>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/sentinel.css">
   <style>
     :root {
       --bg-base: #080808;
@@ -24,12 +24,12 @@
     body {
       background: var(--bg-base);
       color: var(--text-primary);
-      font-family: 'Inter', sans-serif;
+      font-family: var(--font-display);
       min-height: 100vh;
       overflow-x: hidden;
     }
 
-    h1, h2, h3, .stat-value { font-family: 'Outfit', sans-serif; }
+    h1, h2, h3, .stat-value { font-family: var(--font-display); }
 
     .glass-panel {
       background: var(--glass-bg);
@@ -115,7 +115,7 @@
     }
 
     .header-stat-value {
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display);
       font-size: 15px;
       font-weight: 600;
       color: var(--white);
@@ -183,7 +183,7 @@
       justify-content: center;
       border-radius: 6px;
       border: none;
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display);
       font-weight: 600;
       font-size: 13px;
       cursor: pointer;
@@ -302,7 +302,7 @@
     }
 
     .progress-title {
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display);
       font-size: 13px;
       font-weight: 600;
       color: var(--text-secondary);
@@ -311,7 +311,7 @@
     }
 
     .progress-pct {
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display);
       font-size: 22px;
       font-weight: 700;
       color: var(--white);
@@ -320,7 +320,7 @@
 
     .eta-block { text-align: right; }
     .eta-label { font-size: 10px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 1px; }
-    .eta-value { font-family: 'Outfit', sans-serif; font-size: 22px; font-weight: 600; color: var(--white); }
+    .eta-value { font-family: var(--font-display); font-size: 22px; font-weight: 600; color: var(--white); }
 
     .progress-track {
       width: 100%; height: 4px;
@@ -380,7 +380,7 @@
       padding: 2px 9px;
       border-radius: 20px;
       font-size: 11px;
-      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-family: var(--font-mono);
       font-weight: 600;
     }
 
@@ -409,7 +409,7 @@
     }
 
     .panel-title {
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display);
       font-size: 13px;
       font-weight: 600;
       letter-spacing: 1px;
@@ -452,7 +452,7 @@
       border-radius: 4px;
       font-size: 10px;
       font-weight: 700;
-      font-family: 'Outfit', sans-serif;
+      font-family: var(--font-display);
       letter-spacing: 0.5px;
     }
 
@@ -474,7 +474,7 @@
       display: flex;
       flex-direction: column;
       gap: 4px;
-      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      font-family: var(--font-mono);
       font-size: 11px;
     }
 
@@ -514,9 +514,9 @@
       <div class="pulse-dot" id="headerDot"></div>
       <div>
         <h1>SENTINEL AUDIT</h1>
-        <span id="sdkVersionsLabel" title="Click to verify SDKs match GitHub" style="font-size:10px;color:var(--text-secondary);letter-spacing:1.5px;font-family:'Outfit',sans-serif;font-weight:400;cursor:pointer">Loading SDK versions…</span>
+        <span id="sdkVersionsLabel" title="Click to verify SDKs match GitHub" style="font-size:10px;color:var(--text-secondary);letter-spacing:1.5px;font-family:var(--font-display);font-weight:400;cursor:pointer">Loading SDK versions…</span>
         <p style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-          <select id="runSelect" onchange="loadRun(this.value)" style="background:#111;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:5px;padding:3px 8px;font-size:11px;font-family:'Outfit',sans-serif;font-weight:600;cursor:pointer;letter-spacing:1px">
+          <select id="runSelect" onchange="loadRun(this.value)" style="background:#111;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:5px;padding:3px 8px;font-size:11px;font-family:var(--font-display);font-weight:600;cursor:pointer;letter-spacing:1px">
             <option value="">Loading...</option>
           </select>
           <button onclick="saveRun()" style="background:transparent;border:1px solid rgba(0,200,83,0.3);color:#00c853;font-size:10px;padding:3px 8px;border-radius:4px;cursor:pointer;letter-spacing:1px;font-weight:600">SAVE</button>
@@ -528,7 +528,7 @@
             <span id="sdkCs" onclick="setSDK('csharp')" style="padding:3px 10px;color:#555;font-weight:600">BLUE C#</span>
             <span id="sdkTkd" onclick="setSDK('tkd')" style="padding:3px 10px;color:#555;font-weight:600">TKD JS</span>
           </span>
-          <select id="dnsSelect" onchange="setDNS(this.value)" style="background:#111;color:#aaa;border:1px solid rgba(255,255,255,0.12);border-radius:5px;padding:3px 8px;font-size:10px;font-family:Outfit,sans-serif;letter-spacing:1px;cursor:pointer">
+          <select id="dnsSelect" onchange="setDNS(this.value)" style="background:#111;color:#aaa;border:1px solid rgba(255,255,255,0.12);border-radius:5px;padding:3px 8px;font-size:10px;font-family:var(--font-display);letter-spacing:1px;cursor:pointer">
             <option value="hns">DNS: HNS (default)</option>
             <option value="google">DNS: Google</option>
             <option value="cloudflare">DNS: Cloudflare</option>
@@ -1163,7 +1163,7 @@
         const port = r.diag.v2rayPort || '';
         if (p) {
           const tlsBadge = s === 'tls' ? '<span style="color:#66bb6a"> TLS</span>' : '';
-          transportHtml = `<span style="font-size:11px;font-family:'SF Mono',monospace;color:#ce93d8">${p}/${t}${tlsBadge}</span>`;
+          transportHtml = `<span style="font-size:11px;font-family:var(--font-mono);color:#ce93d8">${p}/${t}${tlsBadge}</span>`;
           if (port) transportHtml += `<span style="font-size:10px;color:#666"> :${port}</span>`;
         }
       }
@@ -1206,7 +1206,7 @@
       tr.innerHTML = `
         <td>${sdkBadge} ${proto}</td>
         <td>${transportHtml}</td>
-        <td style="font-family:'SF Mono',monospace;font-size:11px;color:var(--text-secondary)">${addr}</td>
+        <td style="font-family:var(--font-mono);font-size:11px;color:var(--text-secondary)">${addr}</td>
         <td>${countryCol}</td>
         <td style="color:#aaa">${cityCol}</td>
         <td style="text-align:center">${peersHtml}</td>
@@ -1474,10 +1474,10 @@
       overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
 
       const popup = document.createElement('div');
-      popup.style.cssText = 'background:#111;border:1px solid rgba(255,255,255,0.12);border-radius:16px;padding:32px 36px;max-width:640px;width:90%;max-height:85vh;overflow-y:auto;color:#f0f0f0;font-family:Inter,sans-serif;line-height:1.7';
+      popup.style.cssText = 'background:#111;border:1px solid rgba(255,255,255,0.12);border-radius:16px;padding:32px 36px;max-width:640px;width:90%;max-height:85vh;overflow-y:auto;color:#f0f0f0;font-family:var(--font-display);line-height:1.7';
       popup.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
-          <h2 style="font-family:Outfit,sans-serif;font-size:20px;font-weight:700;letter-spacing:1px;margin:0">Dashboard Guide</h2>
+          <h2 style="font-family:var(--font-display);font-size:20px;font-weight:700;letter-spacing:1px;margin:0">Dashboard Guide</h2>
           <span onclick="document.getElementById('infoOverlay').remove()" style="cursor:pointer;color:#666;font-size:22px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:50%;transition:all 0.2s" onmouseover="this.style.color='#fff';this.style.background='rgba(255,255,255,0.1)'" onmouseout="this.style.color='#666';this.style.background='transparent'">&times;</span>
         </div>
 
@@ -1564,10 +1564,10 @@
       overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
 
       const popup = document.createElement('div');
-      popup.style.cssText = 'background:#111;border:1px solid rgba(255,255,255,0.12);border-radius:16px;padding:32px 36px;max-width:780px;width:92%;max-height:85vh;overflow-y:auto;color:#f0f0f0;font-family:Inter,sans-serif;line-height:1.6';
+      popup.style.cssText = 'background:#111;border:1px solid rgba(255,255,255,0.12);border-radius:16px;padding:32px 36px;max-width:780px;width:92%;max-height:85vh;overflow-y:auto;color:#f0f0f0;font-family:var(--font-display);line-height:1.6';
       popup.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-          <h2 style="font-family:Outfit,sans-serif;font-size:20px;font-weight:700;letter-spacing:1px;margin:0">Test Sub. Plan</h2>
+          <h2 style="font-family:var(--font-display);font-size:20px;font-weight:700;letter-spacing:1px;margin:0">Test Sub. Plan</h2>
           <span onclick="document.getElementById('subPlanOverlay').remove()" style="cursor:pointer;color:#666;font-size:22px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:50%;transition:all 0.2s" onmouseover="this.style.color='#fff';this.style.background='rgba(255,255,255,0.1)'" onmouseout="this.style.color='#666';this.style.background='transparent'">&times;</span>
         </div>
         <div style="font-size:12px;color:#888;margin-bottom:20px">
@@ -1617,7 +1617,7 @@
                 </div>
                 ${reason ? `<div style="font-size:10px;color:#ff6b6b;margin-top:6px">⚠ ${reason}</div>` : ''}
               </div>
-              <button ${disabled ? 'disabled' : ''} onclick="runSubPlanTest('${p.planId}','${p.subscriptionId}','${p.ownerSentAddr || ''}')" style="${btnStyle};border:none;padding:10px 18px;border-radius:10px;font-family:Outfit,sans-serif;font-weight:700;letter-spacing:0.5px;font-size:12px;white-space:nowrap">TEST THIS PLAN</button>
+              <button ${disabled ? 'disabled' : ''} onclick="runSubPlanTest('${p.planId}','${p.subscriptionId}','${p.ownerSentAddr || ''}')" style="${btnStyle};border:none;padding:10px 18px;border-radius:10px;font-family:var(--font-display);font-weight:700;letter-spacing:0.5px;font-size:12px;white-space:nowrap">TEST THIS PLAN</button>
             </div>
           `;
         }).join('');

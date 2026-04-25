@@ -1,138 +1,149 @@
-# Sentinel Node Tester
-
 [![npm version](https://img.shields.io/npm/v/sentinel-node-tester.svg)](https://www.npmjs.com/package/sentinel-node-tester)
 [![Tests](https://github.com/Sentinel-Autonomybuilder/sentinel-node-tester/actions/workflows/test.yml/badge.svg)](https://github.com/Sentinel-Autonomybuilder/sentinel-node-tester/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org/)
+
+Stress-test every node on the Sentinel dVPN chain. Admin-gated testing, public-read results.
 
 ---
 
-## What It Is
+## What it does
 
-A network audit dashboard for the [Sentinel dVPN](https://sentinel.co) blockchain. It discovers every active dVPN node on the chain, opens real VPN sessions, and reports actual throughput, protocol compliance, and pass/fail status for each node.
-
-Built on the [Blue JS SDK](https://github.com/Sentinel-Autonomybuilder/blue-js-sdk) — the same protocol stack that powers consumer VPN applications.
+Sentinel Node Tester discovers every active dVPN node on the Sentinel blockchain, opens real VPN sessions, measures actual throughput and protocol compliance, and records pass/fail results in a local SQLite database. A built-in Express dashboard lets an operator run audits and publish results. Public visitors can search and filter results — but only the operator can start or stop tests.
 
 ---
 
-## Prerequisites
+## Core flow
 
-- **[Node.js](https://nodejs.org/) >=18**
-- **Git**
-- **[WireGuard for Windows](https://www.wireguard.com/install/)** _(optional)_ — required only for WireGuard-protocol nodes. V2Ray nodes (~70% of the network) work without it.
-- **Admin / root** _(optional)_ — needed only to actually tunnel traffic through the VPN. Node scan, discovery, and listing all work without elevated privileges.
-- **~5 P2P tokens** _(optional)_ — only needed for **Test ALL** mode where the tester pays for sessions. **Sub. Plan** mode is free for the tester because the plan operator covers gas via an on-chain fee grant.
+Admin logs in at `/admin`, clicks the **Public Testing** toggle, and selects a test mode (P2P or subscription). The continuous audit loop starts, cycling through every online node; public visitors see a real-time progress banner on `/` and a live iteration feed at `/live` with only filter and search controls. The operator stops the loop from the same toggle. No public user can trigger any test.
 
 ---
 
-## Quick Start
+## Routes
+
+| Route | Who | Description |
+|-------|-----|-------------|
+| `/` | Public | Node directory — search, filter, sort, detail drawer. |
+| `/live` | Public | Real-time audit progress + results feed via SSE. |
+| `/node/:addr` | Public | Single-node result detail page. |
+| `/admin` (configurable) | Admin | Full control panel — start/stop audits, public-test toggle, logs. |
+| `/api/public/*` | Public | Read-only JSON API: nodes, stats, countries, run summaries, SSE events. |
+| `/api/admin/public-test/*` | Admin | Start/stop/status for the continuous loop. Admin session required. |
+
+---
+
+## Quick start (local dev)
 
 ```bash
+# 1. Clone
 git clone https://github.com/Sentinel-Autonomybuilder/sentinel-node-tester.git
 cd sentinel-node-tester
+
+# 2. Install dependencies
 npm install
+
+# 3. Create .env
+cp .env.example .env
+# Open .env and set MNEMONIC to your 12-word Cosmos phrase
+
+# 4. Start
 npm start
 ```
 
-Open **http://localhost:3001** in your browser.
-
-The `sentinel-audit` binary also accepts subcommands for scripting and AI agent use. Run `sentinel-audit serve` to start the dashboard (equivalent to `npm start`), or use any other subcommand directly:
-
-```bash
-sentinel-audit serve            # Start dashboard (same as npm start)
-sentinel-audit nodes --pretty   # List all active dVPN nodes as JSON
-sentinel-audit balance          # Check wallet balance
-sentinel-audit test <sentnode1...>  # Test a single node end-to-end
-```
-
-See [docs/CLI.md](docs/CLI.md) for the full subcommand reference.
+Open **http://localhost:3001** in your browser. No `ADMIN_TOKEN` needed for local dev — the admin surface defaults to unauthenticated (safe on localhost only).
 
 ---
 
-## CLI for AI agents
+## CLI for scripting and AI agents
 
-The `sentinel-audit` CLI emits JSON on stdout for every command, making it straightforward to drive from scripts or autonomous agents. An agent can run `sentinel-audit list --json` to enumerate all subcommands, then `sentinel-audit functions --json` to enumerate every exported SDK function, then issue targeted queries or tests without writing any application code.
+The `sentinel-audit` binary emits JSON on stdout for every command.
 
-| Command | Description |
-|---------|-------------|
-| `sentinel-audit list` | Enumerate all available subcommands |
-| `sentinel-audit nodes` | Fetch all active dVPN nodes from the chain |
-| `sentinel-audit balance` | Show wallet P2P token balance |
-| `sentinel-audit test <node>` | Test a single node end-to-end (paid) |
-| `sentinel-audit audit` | Full network audit across all nodes (paid) |
-| `sentinel-audit serve` | Start the web dashboard |
+```bash
+sentinel-audit serve              # Start dashboard (same as npm start)
+sentinel-audit nodes --pretty     # List all active dVPN nodes as JSON
+sentinel-audit balance            # Check wallet P2P balance
+sentinel-audit test <sentnode1...>  # Test a single node end-to-end
+sentinel-audit audit              # Full network audit across all nodes
+sentinel-audit list               # Enumerate all subcommands
+sentinel-audit functions --json   # Enumerate every exported SDK function
+```
 
 Full reference: [docs/CLI.md](docs/CLI.md)
 
 ---
 
-## Configuration
-
-Copy the example env file and add your mnemonic:
-
-```bash
-cp .env.example .env
-```
-
-Open `.env` and set the one required variable:
-
-```
-MNEMONIC=your twelve word mnemonic phrase goes here
-```
-
-This is the 12-word Cosmos mnemonic for the Sentinel wallet that signs session transactions. You can generate a fresh wallet from any Sentinel-compatible wallet app (e.g. [Keplr](https://www.keplr.app/), [Leap](https://www.leapwallet.io/)), or import an existing Cosmos mnemonic — the address prefix will be `sent1...`.
-
-- **Sub. Plan mode:** no balance needed — the plan operator pays gas for you via an on-chain fee grant.
-- **Test ALL mode:** send a small amount of P2P (~5 P2P) to the derived `sent1...` address to cover session and gas costs.
-
-**Never commit your `.env` file.** It is already listed in `.gitignore`.
-
----
-
-## Two Test Modes
+## Two test modes
 
 ### Test ALL (P2P)
 
-Scans every active node on the Sentinel chain and opens a paid session on each. The tester's wallet pays gas and bandwidth costs directly. Good for a full network audit.
+Scans every active node on the Sentinel chain and opens a paid session on each. The tester wallet pays gas and bandwidth costs directly from its P2P balance. Suitable for full network audits.
 
 ### Test Sub. Plan
 
-Lists all active plan subscriptions held by your wallet. Pick a plan, and the tester scans only that plan's nodes. Each session transaction is broadcast via `broadcastWithFeeGrant` — the plan operator's pre-configured on-chain allowance covers all gas, so the tester pays nothing.
-
-This is the same flow used by commercial Sentinel apps (Android, iOS) where end users hold no P2P tokens.
+Lists all active plan subscriptions held by the tester wallet. Pick a plan; only that plan's nodes are scanned. Each session transaction is broadcast via `broadcastWithFeeGrant` using the plan operator's on-chain fee grant allowance — the tester pays zero gas. This mirrors the flow used by commercial Sentinel apps where end users hold no P2P tokens.
 
 ---
 
-## Running as Admin (Optional)
+## Public deployment
 
-WireGuard tunnel creation requires elevated privileges. Without admin, WireGuard node tests skip the tunnel phase but still record handshake and protocol results.
-
-**Windows:** Double-click `run-admin.vbs` in the project root. It triggers UAC elevation and launches the server automatically.
-
-**macOS / Linux:**
+Set `PUBLIC_MODE=true` in your `.env`. This **requires** `ADMIN_TOKEN` to be set — the server will refuse to start without it. Generate a token:
 
 ```bash
-sudo npm start
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
+
+Put the result in `ADMIN_TOKEN` in your `.env`. This token becomes the password for the `/admin` login page.
+
+Optionally change the admin path to something unguessable:
+
+```bash
+ADMIN_PATH=/my-secret-ops-panel
+```
+
+Put the application behind a reverse proxy (nginx, Caddy) that terminates HTTPS. The admin surface should not be reachable over plain HTTP in production.
+
+See [docs/OPERATOR-RUNBOOK.md](docs/OPERATOR-RUNBOOK.md) for the full deployment checklist.
 
 ---
 
-## Troubleshooting
+## Environment variables
 
-**"V2Ray binary not available"**
-The `postinstall` script could not fetch the V2Ray binary for your platform. WireGuard-only nodes will still work. Re-run `npm install` or download the binary manually into `platforms/`.
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `MNEMONIC` | Yes | — | 12-word Cosmos mnemonic. Signs session and gas transactions. Never commit to git. |
+| `PORT` | No | `3001` | HTTP port the server listens on. |
+| `PUBLIC_MODE` | No | `false` | Set `true` to enable public-facing mode. Enforces `ADMIN_TOKEN`. |
+| `ADMIN_TOKEN` | If PUBLIC_MODE | — | Admin login password. Required when `PUBLIC_MODE=true`. |
+| `ADMIN_PATH` | No | `/admin` | URL prefix for the admin panel. Change to an unguessable path in production. |
+| `ALLOW_PUBLIC_TEST` | No | `false` | Set `true` to allow public visitors to trigger tests (not recommended). |
+| `LCD_ENDPOINTS` | No | Built-in list | Comma-separated override for Sentinel LCD endpoints. |
+| `DNS_SERVERS` | No | HNS preset | Comma-separated DNS IPs to use inside tunnels. Presets: `hns`, `google`, `cloudflare`, `quad9`, `opendns`. |
+| `NODE_DELAY_MS` | No | `5000` | Milliseconds to wait between node tests. Keep >= 5000 to avoid chain rate limits. |
+| `MAX_NODES` | No | `0` (all) | Cap on nodes tested per run. `0` means no limit. |
+| `TEST_MB` | No | `10` | Megabytes transferred per speed test. |
+| `GIGABYTES_PER_NODE` | No | `1` | Gigabytes allocated when opening a session. |
+| `INSECURE_COOKIE` | No | `false` | Set `true` to allow admin session cookies over HTTP (local dev only). |
 
-**"No subscriptions found" in Sub. Plan mode**
-Your wallet has no active plan subscriptions on-chain. Switch to **Test ALL** mode, or subscribe to a plan first from a Sentinel app.
+---
 
-**Port 3001 already in use**
-Set `PORT=3002` (or any free port) in your `.env` file, then restart.
+## Architecture
 
-**`npm install` prints audit warnings**
-You will see a handful of low/high-severity warnings from `@cosmjs/*` transitive dependencies. These come from upstream CosmJS and affect every Cosmos project; they are tracked by the CosmJS team and do not impact Node Tester. Safe to ignore.
+Single Express process on port 3001. Two audit paths: `audit/pipeline.js` is the single-pass engine called by the admin "New Test" and "Retest Failed" buttons; `audit/continuous.js` wraps pipeline in a recursive loop with configurable inter-pass delay, emitting `loop:*` and `iteration:*` SSE events consumed by the public `/live` page. All results persist to `audit.db` (SQLite via `better-sqlite3`); raw per-run JSON lands in `runs/`. The public SSE stream (`/api/public/events`) is allow-listed to `public-test:*` events only — wallet addresses, plan IDs, and fee-grant internals are never sent to public consumers.
+
+---
+
+## Testing this tool
+
+```bash
+# Unit + smoke suite
+npm test
+
+# Public-mode smoke test (start server first, then)
+node tools/smoke-public-mode.mjs
+```
 
 ---
 
 ## License
 
-MIT
+MIT. Part of the [Sentinel dVPN](https://sentinel.co) ecosystem.

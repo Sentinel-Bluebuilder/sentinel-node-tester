@@ -1,0 +1,20 @@
+[Unit]
+Description=Sentinel Node Tester
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/node /opt/sentinel-node-tester/server.js
+WorkingDirectory=/opt/sentinel-node-tester
+EnvironmentFile=/opt/sentinel-node-tester/.env
+Restart=always
+RestartSec=5
+User=sentinel
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# data/ holds audit.db + WAL; results/ holds .loop-config.json + run artifacts; logs/ holds stdout captures.
+ReadWritePaths=/opt/sentinel-node-tester/data /opt/sentinel-node-tester/results /opt/sentinel-node-tester/logs
+
+[Install]
+WantedBy=multi-user.target

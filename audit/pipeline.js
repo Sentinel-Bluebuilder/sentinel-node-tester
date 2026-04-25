@@ -263,7 +263,6 @@ export function createState() {
     errorMessage: null,
     stopRequested: false,
     lowBalanceWarning: false,
-    economyMode: false,
     pauseReason: null,
   };
 }
@@ -319,7 +318,7 @@ function buildFailResult(node, status, state, errMsg, diag = {}) {
   return {
     timestamp: new Date().toISOString(),
     address: node.address,
-    type: state.currentType || status?.type || prevResult?.type || 'UNKNOWN',
+    type: state.currentType || status?.type || prevResult?.type || null,
     moniker: status?.moniker || prevResult?.moniker || '',
     country: status?.location?.country || prevResult?.country || '',
     countryCode: status?.location?.country_code || prevResult?.countryCode || '',
@@ -350,7 +349,7 @@ function buildFailResult(node, status, state, errMsg, diag = {}) {
 }
 
 // ─── Main Audit ─────────────────────────────────────────────────────────────
-export async function runAudit(resume, state, broadcast) {
+export async function runAudit(resume, state, broadcast, preloadedNodes = null, opts = {}) {
   state.status = 'running';
   state.startedAt = new Date().toISOString();
   state.errorMessage = null;
@@ -358,6 +357,92 @@ export async function runAudit(resume, state, broadcast) {
   state.retestMode = false;
   state.retestPassed = null;
   state.retestFailed = null;
+
+  state.dryRun = !!opts.dryRun;
+
+  // ─── TEST RUN fast path ───────────────────────────────────────────────────
+  // When dryRun is set: skip chain ops, skip payments, emit a fake result per
+  // node with errorCode 'TEST_RUN_SKIP'. Still writes to audit.db (mode='dry').
+  if (opts.dryRun) {
+    broadcast('log', { msg: '🧪 TEST RUN mode — skipping chain ops and payments.' });
+
+    results.length = 0;
+    state.testedNodes = 0;
+    state.failedNodes = 0;
+    state.passed15 = 0;
+    state.passed10 = 0;
+    state.passedBaseline = 0;
+    state.nodeSpeedHistory = [];
+    state.baselineHistory = [];
+    saveResults();
+
+    // Resolve node list (or use preloaded snapshot)
+    let dryNodes;
+    if (Array.isArray(preloadedNodes) && preloadedNodes.length > 0) {
+      dryNodes = preloadedNodes;
+    } else {
+      broadcast('log', { msg: '🔍 Fetching node list for TEST RUN...' });
+      try {
+        dryNodes = await Promise.race([
+          getAllNodes(broadcast),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Node list fetch timeout (60s)')), 60_000)),
+        ]);
+      } catch (err) {
+        broadcast('log', { msg: `⚠ Node list fetch failed: ${err.message}` });
+        dryNodes = [];
+      }
+    }
+
+    const nodesToDry = MAX_NODES > 0 ? dryNodes.slice(0, MAX_NODES) : dryNodes;
+    state.totalNodes = nodesToDry.length;
+    broadcast('log', { msg: `TEST RUN: simulating ${nodesToDry.length} nodes...` });
+    broadcast('state', { state });
+
+    for (let i = 0; i < nodesToDry.length; i++) {
+      if (state.stopRequested) break;
+      const node = nodesToDry[i];
+      const addr = node.address || node.addr || '';
+      state.currentNode = addr;
+      broadcast('state', { state });
+
+      await new Promise(r => setTimeout(r, 5 + Math.random() * 15));
+
+      const result = {
+        timestamp:           new Date().toISOString(),
+        address:             addr,
+        type:                node.type || null,
+        moniker:             node.moniker || '',
+        country:             node.location?.country || node.country || '',
+        countryCode:         node.location?.country_code || node.countryCode || '',
+        city:                node.location?.city || node.city || '',
+        reportedDownloadMbps: 0,
+        actualMbps:          null,
+        skipped:             true,
+        error:               'TEST_RUN_SKIP',
+        errorCode:           'TEST_RUN_SKIP',
+        peers:               node.peers ?? null,
+        maxPeers:            node.qos?.max_peers ?? null,
+        sdk:                 state.activeSDK || 'js',
+        os:                  process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux',
+      };
+
+      state.failedNodes++;
+      upsertResult(result);
+      saveResults();
+      broadcast('result', { result, state });
+
+      const nodeNum = i + 1;
+      broadcast('log', { msg: `[${nodeNum}/${nodesToDry.length}] TEST_RUN_SKIP ${addr.slice(0, 20)}…` });
+    }
+
+    state.status = 'idle';
+    state.currentNode = null;
+    broadcast('state', { state });
+    broadcast('log', { msg: `🧪 TEST RUN complete (${nodesToDry.length} nodes simulated).` });
+    return;
+  }
+  // ─── End TEST RUN fast path ───────────────────────────────────────────────
+
   clearPoisonedSessions();
   clearPaidNodes();
   clearAllCredentials(); // Wipe stale sessions from previous runs — force fresh payment
@@ -381,6 +466,8 @@ export async function runAudit(resume, state, broadcast) {
   };
 
   broadcast('log', { msg: `📝 Log file: results/audit-${logTs}.log` });
+
+  // ─── Wallet / client setup ────────────────────────
   broadcast('log', { msg: '🔑 Setting up wallet...' });
   const { wallet, account, privkey } = await cachedWalletSetup(MNEMONIC);
   state.walletAddress = account.address;
@@ -453,11 +540,17 @@ export async function runAudit(resume, state, broadcast) {
   }
 
   // ── Phase 1: Fetch node list ───────────────────────────────────────────
-  broadcast('log', { msg: '🔍 Fetching node list...' });
-  const allNodes = await Promise.race([
-    getAllNodes(broadcast),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('Node list fetch timeout (60s)')), 60_000)),
-  ]);
+  let allNodes;
+  if (Array.isArray(preloadedNodes) && preloadedNodes.length > 0) {
+    broadcast('log', { msg: `🔒 Using frozen snapshot (${preloadedNodes.length} nodes).` });
+    allNodes = preloadedNodes;
+  } else {
+    broadcast('log', { msg: '🔍 Fetching node list...' });
+    allNodes = await Promise.race([
+      getAllNodes(broadcast),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Node list fetch timeout (60s)')), 60_000)),
+    ]);
+  }
   const nodesToTest = MAX_NODES > 0 ? allNodes.slice(0, MAX_NODES) : allNodes;
   broadcast('log', { msg: `Fetched ${nodesToTest.length} nodes total.` });
   broadcast('state', { state });
@@ -472,7 +565,7 @@ export async function runAudit(resume, state, broadcast) {
     broadcast('log', { msg: `⚠ Plan membership skipped: ${_sanitizeSnippet(planErr.message)}` });
   }
 
-  // ── Phase 2: Parallel online scan ──────────────────────────────────────
+  // ── Phase 2: Parallel online scan ──
   broadcast('log', { msg: `\n🔍 Phase 2: Scanning ${nodesToTest.length} nodes in parallel (30 concurrent)...` });
   const onlineNodes = await scanNodesParallel(nodesToTest, 30, broadcast, state);
   broadcast('log', { msg: `Scan complete: ${onlineNodes.length}/${nodesToTest.length} online.` });
@@ -482,19 +575,6 @@ export async function runAudit(resume, state, broadcast) {
     if (status.type === 'v2ray' && !v2rayAvailable) return false;
     return (node.gigabyte_prices || []).some(p => p.denom === DENOM);
   });
-
-  // Economy mode cap
-  if (state.economyMode) {
-    const balanceUdvpn = state.balanceUdvpn - state.spentUdvpn;
-    const avgPriceUdvpn = 40_000_000;
-    const gasPerNode = 200_000;
-    const maxAffordable = Math.floor(balanceUdvpn / (avgPriceUdvpn + gasPerNode));
-    if (maxAffordable < viableNodes.length) {
-      const before = viableNodes.length;
-      viableNodes.length = maxAffordable;
-      broadcast('log', { msg: `♻ Economy mode: capped to ${maxAffordable}/${before} nodes` });
-    }
-  }
 
   // Resume mode: filter already-tested
   if (resume) {
@@ -550,58 +630,60 @@ export async function runAudit(resume, state, broadcast) {
     if (!canProceed) { broadcast('log', { msg: '⏹ Aborting — VPN interference not cleared.' }); break; }
 
     let batchSessionMap;
-    try {
-      broadcast('log', { msg: `\n💳 Batch ${b + 1}/${batches.length} (${batch.length} nodes) — paying...` });
-      batchSessionMap = await submitBatchPayment(client, account, DENOM, GIGS, batch, state, broadcast);
-    } catch (payErr) {
-      // Insufficient funds from chain — pause instead of failing
-      if (/insufficient funds|insufficient balance/i.test(payErr.message)) {
-        broadcast('log', { msg: `💰 Batch payment failed: insufficient P2P. Pausing...` });
-        state.status = 'paused_balance';
-        state.pauseReason = `Insufficient P2P for batch payment`;
-        broadcast('state', { state });
-        let restored = false;
-        while (!state.stopRequested) {
-          await sleep(5 * 60_000);
-          if (state.stopRequested) break;
+    {
+      try {
+        broadcast('log', { msg: `\n💳 Batch ${b + 1}/${batches.length} (${batch.length} nodes) — paying...` });
+        batchSessionMap = await submitBatchPayment(client, account, DENOM, GIGS, batch, state, broadcast);
+      } catch (payErr) {
+        // Insufficient funds from chain — pause instead of failing
+        if (/insufficient funds|insufficient balance/i.test(payErr.message)) {
+          broadcast('log', { msg: `💰 Batch payment failed: insufficient P2P. Pausing...` });
+          state.status = 'paused_balance';
+          state.pauseReason = `Insufficient P2P for batch payment`;
+          broadcast('state', { state });
+          let restored = false;
+          while (!state.stopRequested) {
+            await sleep(5 * 60_000);
+            if (state.stopRequested) break;
+            try {
+              const freshBal = await client.getBalance(account.address, DENOM);
+              const realBal = parseInt(freshBal?.amount || '0', 10);
+              state.balanceUdvpn = realBal;
+              state.spentUdvpn = 0;
+              state.balance = `${(realBal / 1_000_000).toFixed(4)} P2P`;
+              broadcast('log', { msg: `💰 Balance check: ${state.balance}` });
+              if (realBal > 1_000_000) {
+                broadcast('log', { msg: `💰 Balance restored! Retrying batch...` });
+                state.status = 'running';
+                state.pauseReason = null;
+                broadcast('state', { state });
+                restored = true;
+                break;
+              }
+            } catch { }
+          }
+          if (!restored) break;
+          // Retry the batch payment
           try {
-            const freshBal = await client.getBalance(account.address, DENOM);
-            const realBal = parseInt(freshBal?.amount || '0', 10);
-            state.balanceUdvpn = realBal;
-            state.spentUdvpn = 0;
-            state.balance = `${(realBal / 1_000_000).toFixed(4)} P2P`;
-            broadcast('log', { msg: `💰 Balance check: ${state.balance}` });
-            if (realBal > 1_000_000) {
-              broadcast('log', { msg: `💰 Balance restored! Retrying batch...` });
-              state.status = 'running';
-              state.pauseReason = null;
-              broadcast('state', { state });
-              restored = true;
-              break;
-            }
-          } catch { }
-        }
-        if (!restored) break;
-        // Retry the batch payment
-        try {
-          batchSessionMap = await submitBatchPayment(client, account, DENOM, GIGS, batch, state, broadcast);
-        } catch (retryErr) {
-          broadcast('log', { msg: `  Batch retry also failed: ${_sanitizeSnippet(retryErr.message)}` });
+            batchSessionMap = await submitBatchPayment(client, account, DENOM, GIGS, batch, state, broadcast);
+          } catch (retryErr) {
+            broadcast('log', { msg: `  Batch retry also failed: ${_sanitizeSnippet(retryErr.message)}` });
+            batchSessionMap = new Map();
+          }
+        } else {
+          broadcast('log', { msg: `  Batch payment FAILED: ${_sanitizeSnippet(payErr.message)}` });
+          broadcast('log', { msg: `  Falling back to individual payments per node...` });
           batchSessionMap = new Map();
         }
-      } else {
-        broadcast('log', { msg: `  Batch payment FAILED: ${_sanitizeSnippet(payErr.message)}` });
-        broadcast('log', { msg: `  Falling back to individual payments per node...` });
-        batchSessionMap = new Map();
       }
-    }
 
-    const reusedAddrs = batchSessionMap._reusedAddrs || new Set();
-    const newSessionAddrs = [...batchSessionMap.keys()].filter(a => !reusedAddrs.has(a));
-    if (newSessionAddrs.length > 0) {
-      broadcast('log', { msg: `  Polling chain for ${newSessionAddrs.length} new sessions...` });
-      await waitForBatchSessions(newSessionAddrs, account.address, 20_000);
-      broadcast('log', { msg: `  Sessions confirmed ✓` });
+      const reusedAddrs = batchSessionMap._reusedAddrs || new Set();
+      const newSessionAddrs = [...batchSessionMap.keys()].filter(a => !reusedAddrs.has(a));
+      if (newSessionAddrs.length > 0) {
+        broadcast('log', { msg: `  Polling chain for ${newSessionAddrs.length} new sessions...` });
+        await waitForBatchSessions(newSessionAddrs, account.address, 20_000);
+        broadcast('log', { msg: `  Sessions confirmed ✓` });
+      }
     }
 
     // Test each node with zero-skip retry
@@ -632,13 +714,14 @@ export async function runAudit(resume, state, broadcast) {
         }
       };
 
-      const { result, retried, error } = await testWithRetry(
+      let result, retried, error;
+      ({ result, retried, error } = await testWithRetry(
         () => testNode(client, account, privkey, node,
           { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps, nodeStatus: status },
           sessionId, _capturingBroadcast, state
         ),
         _capturingBroadcast, state, node.address,
-      );
+      ));
 
       // Build snippet: last 40 lines, trimmed to 4 KB from the tail
       const _rawSnippet = _nodeLogLines.join('\n');
@@ -883,6 +966,7 @@ export async function runAudit(resume, state, broadcast) {
 
   const finalCache = getCacheStats();
   state.status = 'done';
+  state.dryRun = false;
   state.completedAt = new Date().toISOString();
   state.currentNode = null;
   broadcast('state', { state });
@@ -893,6 +977,7 @@ export async function runAudit(resume, state, broadcast) {
 
 // ─── Retest Previously-Failed Nodes ─────────────────────────────────────────
 export async function runRetestSkips(skipAddrs, state, broadcast) {
+  state.dryRun = false;
   state.status = 'running';
   state.startedAt = new Date().toISOString();
   state.errorMessage = null;

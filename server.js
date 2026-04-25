@@ -9,19 +9,23 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { EventEmitter } from 'events';
 import { existsSync } from 'fs';
-import { adminOnly, attachAdminFlag, safeEq } from './core/auth.js';
+import { adminOnly, attachAdminFlag, safeEq, setAdminSessionValidator } from './core/auth.js';
 import { rateLimit, sseLimit } from './core/rate-limit.js';
 
 import { MNEMONIC, DENOM, GAS_PRICE, PORT, LCD_ENDPOINTS, PROJECT_ROOT, DNS_PRESETS, ACTIVE_DNS, setActiveDns } from './core/constants.js';
 import { cachedWalletSetup, createFreshClient } from './core/wallet.js';
 import { ensureLcd, getActiveLcd, cleanupRpc, getAllNodes } from './core/chain.js';
+import { nodeStatusV3 } from './protocol/v3protocol.js';
 import { createState, runAudit, runRetestSkips, runPlanTest, runSubPlanTest, getResults, saveResults, setActiveRunDir, setActiveDbRunId, pipelineEmitter, setPipelinePublicMode } from './audit/pipeline.js';
 import {
   insertRun, updateRunOnFinish,
+  insertResult, insertErrorLog,
   searchNodes, getNodeDetail, getNodeErrors, getCountryList,
   getActiveRun, getLastCompletedRun, getBandwidthHistory,
   searchErrors, getNetworkStats,
-  listBatches, getBatchResults,
+  listBatches, getBatchResults, getActiveBatch, getLastBatch,
+  insertBatch, updateBatchOnFinish, insertBatchResult,
+  getDb,
 } from './core/db.js';
 import * as continuous from './audit/continuous.js';
 import { getInstalledVersions, verifyAllSdks, verifySdk } from './core/sdk-verify.js';
@@ -47,7 +51,46 @@ process.env.PATH = path.join(__dirname, 'bin') + path.delimiter + (process.env.P
 const PUBLIC_MODE = process.env.PUBLIC_MODE === 'true';
 const ADMIN_PATH = process.env.ADMIN_PATH || '/admin';
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
-const COOKIE_SECRET = ADMIN_TOKEN || 'sentinel-local-dev-secret';
+// M-05: use ephemeral per-process secret when ADMIN_TOKEN is absent; forbids
+// forged signed cookies even in single-user/dev mode.
+import crypto from 'node:crypto';
+const COOKIE_SECRET = ADMIN_TOKEN || crypto.randomBytes(32).toString('hex');
+
+// ─── Admin session store (H-02) ─────────────────────────────────────────────
+// Map<sessionId, expiryMs>. Session ID is stored in the signed cookie instead
+// of the raw ADMIN_TOKEN so cookie theft cannot recover the backend token.
+// In-memory only: admin logouts drop entries; process restart invalidates all sessions.
+const ADMIN_SESSIONS = new Map();
+const ADMIN_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+export function createAdminSession() {
+  const id = crypto.randomBytes(32).toString('hex');
+  ADMIN_SESSIONS.set(id, Date.now() + ADMIN_SESSION_TTL_MS);
+  return id;
+}
+
+export function isValidAdminSession(id) {
+  if (!id || typeof id !== 'string') return false;
+  const exp = ADMIN_SESSIONS.get(id);
+  if (!exp) return false;
+  if (exp < Date.now()) { ADMIN_SESSIONS.delete(id); return false; }
+  return true;
+}
+
+export function revokeAdminSession(id) {
+  if (id) ADMIN_SESSIONS.delete(id);
+}
+
+// Periodic cleanup of expired sessions — 1-hour interval
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, exp] of ADMIN_SESSIONS) {
+    if (exp < now) ADMIN_SESSIONS.delete(id);
+  }
+}, 60 * 60 * 1000).unref();
+
+// Inject the validator into the auth middleware. Must run before any admin request.
+setAdminSessionValidator(isValidAdminSession);
 
 if (PUBLIC_MODE && !ADMIN_TOKEN) {
   console.error('');
@@ -138,7 +181,10 @@ function broadcast(type, data = {}) {
     if (logBuffer.length > LOG_BUFFER_MAX) logBuffer.shift();
   }
   if (type === 'state' || type === 'result') saveStateSnapshot();
-  emitter.emit('update', { type, ...data });
+  // NOTE: spread `data` FIRST so a payload field named `type` (e.g. the node's
+  // service-type like 'wireguard') cannot clobber the SSE event type. The
+  // event type is the dispatch key — clients switch on d.type — so it must win.
+  emitter.emit('update', { ...data, type });
 }
 
 // ─── Continuous Loop SSE forwarding ─────────────────────────────────────────
@@ -163,6 +209,7 @@ function broadcast(type, data = {}) {
 
 // ─── State ──────────────────────────────────────────────────────────────────
 const state = createState();
+state.broadcastLive = false;
 
 // Persist SDK choice to disk so it survives restarts
 const SDK_PREF_FILE = path.join(__dirname, 'results', '.sdk-preference');
@@ -344,19 +391,24 @@ app.use(express.static(__dirname, { index: false }));
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
+  // M-01: clickjacking defence covers admin routes (public CSP has frame-ancestors).
+  res.setHeader('X-Frame-Options', 'DENY');
   next();
 });
 
 // ─── CSP helper (public HTML responses only) ─────────────────────────────────
 const PUBLIC_CSP = [
   "default-src 'self'",
-  "img-src 'self' data:",
-  // Google Fonts stylesheet is served from fonts.googleapis.com; the font
-  // files themselves come from fonts.gstatic.com.
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  // flagcdn.com serves ISO 3166 country flag PNGs. Needed because Windows
+  // Chrome/Edge don't render regional-indicator emoji as flag glyphs — they
+  // fall back to letter tiles ("US", "DE") which users reported as "distorted".
+  "img-src 'self' data: https://flagcdn.com",
+  // sentinel.css @imports Noto Sans Mono from jsDelivr (Plan Manager canon).
+  // Europa Bold is self-hosted from /fonts/, so no external font-src needed.
+  "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
   "script-src 'self' 'unsafe-inline'",
   "connect-src 'self'",
-  "font-src 'self' data: https://fonts.gstatic.com",
+  "font-src 'self' data: https://cdn.jsdelivr.net",
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self'",
@@ -372,43 +424,6 @@ const rlPublicRead = rateLimit({ windowMs: 60_000, max: 120, bucket: 'public-rea
 // "public-sse": max 5 concurrent SSE connections per IP.
 const rlPublicSse = sseLimit({ maxPerIp: 5, bucket: 'public-sse' });
 
-// ─── Server-side Mode (public | dev) ─────────────────────────────────────────
-// Admin sets the mode via POST /admin/mode. The value is stored as a signed
-// cookie. Routes that require a specific mode use requireMode(). This separates
-// "dev" (local audit + sub-plan tests) from "public" (automated batch sweeps).
-//
-// Cookie: `server_mode` (signed, HttpOnly, SameSite=strict)
-// Values: 'public' | 'dev'  — anything else → MODE_NOT_SET
-
-const VALID_MODES = new Set(['public', 'dev']);
-
-/**
- * Returns the active server mode from the signed cookie, or null if unset/invalid.
- *
- * @param {import('express').Request} req
- * @returns {'public'|'dev'|null}
- */
-function getServerMode(req) {
-  const raw = req.signedCookies?.server_mode;
-  return VALID_MODES.has(raw) ? raw : null;
-}
-
-/**
- * Express middleware: require the server to be in a specific mode.
- * Returns 403 with { error: 'MODE_NOT_SET' } if no mode cookie is set.
- * Returns 403 with { error: 'WRONG_MODE', required: mode } if mode mismatch.
- *
- * @param {'public'|'dev'} mode
- * @returns {import('express').RequestHandler}
- */
-function requireMode(mode) {
-  return (req, res, next) => {
-    const current = getServerMode(req);
-    if (!current) return res.status(403).json({ error: 'MODE_NOT_SET' });
-    if (current !== mode) return res.status(403).json({ error: 'WRONG_MODE', required: mode });
-    next();
-  };
-}
 
 // ─── Public routes: no auth, read-only ──────────────────────────────────────
 
@@ -435,6 +450,12 @@ app.get('/node/:addr', attachAdminFlag, (req, res) => {
 app.get('/live', attachAdminFlag, (req, res) => {
   setPublicCsp(res);
   res.sendFile(path.join(__dirname, 'live.html'));
+});
+
+// Public about page — static, no action buttons
+app.get('/about', attachAdminFlag, (req, res) => {
+  setPublicCsp(res);
+  res.sendFile(path.join(__dirname, 'about.html'));
 });
 
 // ─── Public API: read-only, no wallet or chain writes ────────────────────────
@@ -538,13 +559,25 @@ app.get('/api/public/countries', attachAdminFlag, rlPublicRead, (req, res) => {
 });
 
 /**
- * GET /api/public/runs/current — current in-progress run, or 404.
+ * GET /api/public/runs/current — current in-progress batch (+ per-node
+ * results so far) so /live can hydrate on refresh without waiting for SSE.
+ * Returns 404 when nothing is mid-flight.
  */
 app.get('/api/public/runs/current', attachAdminFlag, rlPublicRead, (req, res) => {
   try {
-    const run = getActiveRun();
-    if (!run) return res.status(404).json({ error: 'No active run' });
-    res.json(run);
+    const data = state.broadcastLive ? getActiveBatch() : getLastBatch();
+    if (!data) return res.status(404).json({ error: 'No active run' });
+    const { batch, nodes } = data;
+    res.json({
+      id: batch.id,
+      started_at: batch.started_at,
+      finished_at: batch.finished_at,
+      snapshot_size: batch.snapshot_size,
+      passed: batch.passed,
+      failed: batch.failed,
+      mode: batch.mode,
+      nodes,
+    });
   } catch (err) {
     console.error('[api/public/runs/current]', err);
     res.status(500).json({ error: 'Internal error' });
@@ -556,6 +589,23 @@ app.get('/api/public/runs/current', attachAdminFlag, rlPublicRead, (req, res) =>
  */
 app.get('/api/public/runs/last', attachAdminFlag, rlPublicRead, (req, res) => {
   try {
+    // Prefer the last completed batch (has nodes) so /live can hydrate fully
+    // on refresh without waiting for SSE. Fall back to legacy run row only
+    // when no batch has ever been recorded.
+    const last = getLastBatch();
+    if (last) {
+      const { batch, nodes } = last;
+      return res.json({
+        id: batch.id,
+        started_at: batch.started_at,
+        finished_at: batch.finished_at,
+        snapshot_size: batch.snapshot_size,
+        passed: batch.passed,
+        failed: batch.failed,
+        mode: batch.mode,
+        nodes,
+      });
+    }
     const run = getLastCompletedRun();
     if (!run) return res.status(404).json({ error: 'No completed runs' });
     res.json(run);
@@ -603,8 +653,7 @@ app.get('/api/public/stats', attachAdminFlag, rlPublicRead, (req, res) => {
       passingPct,
       medianMbps,
       lastRunAt,
-      status: state.status,
-      activeRunNumber: state.activeRunNumber,
+      status: continuous.status().running ? 'running' : 'idle',
     });
   } catch (err) {
     console.error('[api/public/stats]', err);
@@ -643,7 +692,8 @@ app.get('/api/public/batch/:id', attachAdminFlag, rlPublicRead, (req, res) => {
     const offset = Math.max(parseInt(req.query.offset || '0',   10) || 0,   0);
     const { batch, results } = getBatchResults(batchId, { limit, offset });
     if (!batch) return res.status(404).json({ error: 'Batch not found' });
-    res.json({ batch, results, total: results.length });
+    const { snapshot_addresses: _addrs, ...batchPublic } = batch;
+    res.json({ batch: batchPublic, results, total: results.length });
   } catch (err) {
     console.error('[api/public/batch]', err);
     res.status(500).json({ error: 'Internal error' });
@@ -658,9 +708,6 @@ app.get(ADMIN_PATH + '/login', (req, res) => {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Sentinel Audit — Admin Login</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/sentinel.css">
   <style>
     body { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
@@ -689,23 +736,23 @@ app.get(ADMIN_PATH + '/login', (req, res) => {
 app.post(ADMIN_PATH + '/login', rateLimit({ windowMs: 60_000, max: 10, bucket: 'login' }), (req, res) => {
   const { token } = req.body || {};
   if (token && ADMIN_TOKEN && safeEq(token, ADMIN_TOKEN)) {
-    res.cookie('admin_token', token, {
+    // H-02: store opaque session ID in the cookie, not the raw ADMIN_TOKEN.
+    // Cookie theft (XSS, stolen jar) no longer recovers the backend token.
+    const sessionId = createAdminSession();
+    res.cookie('admin_session', sessionId, {
       signed: true,
       httpOnly: true,
       sameSite: 'strict',
-      // secure: true always, except when INSECURE_COOKIE=true (dev without TLS).
-      // In production behind TLS, never set this escape hatch.
       secure: process.env.INSECURE_COOKIE !== 'true',
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      maxAge: ADMIN_SESSION_TTL_MS,
     });
+    // Clear any legacy admin_token cookie from earlier deploys
+    res.clearCookie('admin_token');
     return res.redirect(ADMIN_PATH);
   }
   res.status(401).send(`<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Login failed</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/sentinel.css">
 <style>body{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}.fail{max-width:380px;width:100%;text-align:center}.fail a{color:var(--accent);text-decoration:none;font-weight:600}.fail a:hover{color:var(--accent-bright)}</style>
 </head><body class="boot-pending">
@@ -720,46 +767,11 @@ app.post(ADMIN_PATH + '/logout', (req, res) => {
   if (req.headers['x-admin-request'] !== '1') {
     return res.status(403).json({ error: 'Forbidden', hint: 'Include X-Admin-Request: 1 header' });
   }
-  res.clearCookie('admin_token');
-  res.clearCookie('server_mode');
+  const sid = req.signedCookies?.admin_session;
+  if (sid) revokeAdminSession(sid);
+  res.clearCookie('admin_session');
+  res.clearCookie('admin_token'); // legacy
   res.redirect(PUBLIC_MODE ? '/' : ADMIN_PATH + '/login');
-});
-
-// ─── Mode management ─────────────────────────────────────────────────────────
-
-const _modeCookieOpts = {
-  signed:   true,
-  httpOnly: true,
-  sameSite: 'strict',
-  secure:   process.env.INSECURE_COOKIE !== 'true',
-  maxAge:   30 * 24 * 60 * 60 * 1000, // 30 days
-};
-
-/**
- * POST /admin/mode
- * Body: { mode: 'public' | 'dev' }
- * Sets the server_mode signed cookie. Admin-only.
- */
-app.post('/admin/mode', adminOnly, (req, res) => {
-  const { mode } = req.body || {};
-  if (!VALID_MODES.has(mode)) {
-    return res.status(400).json({
-      error: 'INVALID_MODE',
-      message: `mode must be "public" or "dev"`,
-      received: mode ?? null,
-    });
-  }
-  res.cookie('server_mode', mode, _modeCookieOpts);
-  res.json({ ok: true, mode });
-});
-
-/**
- * GET /admin/mode
- * Returns the current server mode. Admin-only.
- */
-app.get('/admin/mode', adminOnly, (req, res) => {
-  const mode = getServerMode(req);
-  res.json({ mode: mode ?? null });
 });
 
 // ─── Admin dashboard ──────────────────────────────────────────────────────────
@@ -851,7 +863,6 @@ const PUBLIC_EVENT_WHITELIST = new Set([
   'batch:node:result',
   'batch:end',
   'batch:gap',
-  'result',
 ]);
 function sanitizeForPublic(evt) {
   const safe = { type: evt.type };
@@ -877,15 +888,25 @@ function sanitizeForPublic(evt) {
   if (evt.startedAt != null)    safe.startedAt    = evt.startedAt;
   if (evt.gapMs != null)        safe.gapMs        = evt.gapMs;
   if (evt.nextBatchAt != null)  safe.nextBatchAt  = evt.nextBatchAt;
-  // batch:node:result public-safe fields
+  // batch:node:result public-safe fields.
+  // The payload's `type` field (service type: 'wireguard' / 'v2ray' / 1 / 2)
+  // would collide with the SSE dispatch `type`, so forward it as `serviceType`.
   if (evt.address != null)    safe.address    = evt.address;
-  if (evt.type != null)       safe.type       = evt.type; // already set above as evt.type but redundant is fine
+  if (evt.serviceType != null) safe.serviceType = evt.serviceType;
+  if (evt.countryCode != null) safe.countryCode = evt.countryCode;
   if (evt.city != null)       safe.city       = evt.city;
   if (evt.actualMbps != null) safe.actualMbps = evt.actualMbps;
   if (evt.peers != null)      safe.peers      = evt.peers;
   if (evt.maxPeers != null)   safe.maxPeers   = evt.maxPeers;
   if (evt.errorCode != null)  safe.errorCode  = evt.errorCode;
   if (evt.testedAt != null)   safe.testedAt   = evt.testedAt;
+  // Dry-run flag + free-form log message
+  if (evt.dryRun === true)    safe.dryRun     = true;
+  if (evt.msg != null)        safe.msg        = String(evt.msg).slice(0, 400);
+  if (evt.baselineMbps != null) safe.baselineMbps = evt.baselineMbps;
+  if (evt.skipped === true)   safe.skipped    = true;
+  if (evt.inPlan === true)    safe.inPlan     = true;
+  if (evt.next_in_ms != null) safe.next_in_ms = evt.next_in_ms;
   return safe;
 }
 
@@ -910,8 +931,8 @@ continuous.on('loop:started', () => {
   const s = continuous.status();
   setPipelinePublicMode(s.running && (s.mode === 'p2p' || s.mode === 'subscription'));
 });
-continuous.on('loop:stopped', () => setPipelinePublicMode(false));
-continuous.on('loop:error',   () => setPipelinePublicMode(false));
+continuous.on('loop:stopped', () => { setPipelinePublicMode(false); });
+continuous.on('loop:error',   () => { setPipelinePublicMode(false); });
 
 const SSE_PING_MS = 20_000; // 20-second heartbeat keeps proxies from dropping the connection
 
@@ -922,8 +943,30 @@ app.get('/api/public/events', attachAdminFlag, rlPublicSse, (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
   const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
-  send({ type: 'init', status: continuous.status() });
+  // H-01: strip operator-internal fields (planId, minDelayMs, subscriptionId, etc.) from public init
+  const s = continuous.status();
+  // Attach the currently-running batch id (if any) so /live can pick up mid-batch on reconnect.
+  let activeBatchId = null;
+  let activeSnapshotSize = null;
+  let activeBatchMode = null;
+  try {
+    const ab = getActiveBatch();
+    if (ab) {
+      activeBatchId = ab.batch.id;
+      activeSnapshotSize = ab.batch.snapshot_size;
+      activeBatchMode = ab.batch.mode;
+    }
+  } catch (_) {}
+  send({
+    type: 'init',
+    status: { running: s.running, iteration: s.iteration, mode: s.mode, startedAt: s.startedAt, uptime: s.uptime },
+    batchId: activeBatchId,
+    snapshotSize: activeSnapshotSize,
+    batchMode: activeBatchMode,
+    dryRun: activeBatchMode === 'dry',
+  });
   const handler = (data) => {
+    if (!state.broadcastLive) return;
     if (!PUBLIC_EVENT_WHITELIST.has(data.type)) return;
     send(sanitizeForPublic(data));
   };
@@ -1013,6 +1056,16 @@ app.post('/api/public/test/stop', attachAdminFlag, (req, res) => {
   res.json(result);
 });
 
+// ─── Broadcast Live toggle ───────────────────────────────────────────────────
+app.post('/api/broadcast', adminOnly, (req, res) => {
+  state.broadcastLive = !state.broadcastLive;
+  res.json({ broadcastLive: state.broadcastLive });
+});
+
+app.get('/api/broadcast', (req, res) => {
+  res.json({ broadcastLive: state.broadcastLive });
+});
+
 const rlAdminSse = sseLimit({ maxPerIp: 10, bucket: 'admin-sse' });
 app.get('/api/events', adminOnly, rlAdminSse, (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -1022,8 +1075,13 @@ app.get('/api/events', adminOnly, rlAdminSse, (req, res) => {
   res.flushHeaders();
   const results = getResults();
   const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
-  send({ type: 'init', state, results, logs: logBuffer.slice() });
-  const handler = (data) => send(data);
+  const { walletAddress, balance, balanceUdvpn, spentUdvpn, ...stateForSse } = state;
+  send({ type: 'init', state: stateForSse, results, logs: logBuffer.slice() });
+  const ADMIN_BLOCK = /^(public-test:|loop:|iteration:|batch:)/;
+  const handler = (data) => {
+    if (data && typeof data.type === 'string' && ADMIN_BLOCK.test(data.type)) return;
+    send(data);
+  };
   emitter.on('update', handler);
   // 20s heartbeat comment-line — keeps the TCP connection alive through proxies
   const pingInterval = setInterval(() => { try { res.write(':\n\n'); } catch (_) {} }, SSE_PING_MS);
@@ -1087,7 +1145,7 @@ function startFreshRun(label, { mode = 'p2p', plan_id = null } = {}) {
   idx2.activeRun = newNum;
   saveRunsIndex(idx2);
 
-  // ─── SQLite: open a new run record ────────────────────────────────────────
+  // ─── SQLite: open a new run record ───────────────────────────────────────
   try {
     const dbRunId = insertRun({
       started_at:     Date.now(),
@@ -1106,18 +1164,32 @@ function startFreshRun(label, { mode = 'p2p', plan_id = null } = {}) {
   return { newNum, newRunDir };
 }
 
-// Start NEW test (saves current, clears, starts fresh)
-app.post('/api/start', adminOnly, requireMode('dev'), async (req, res) => {
-  if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
-  if (continuous.status().running) return res.status(409).json({ error: 'Public Testing Mode is live — stop it first before starting a regular audit.' });
-  if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
+// Start NEW test (saves current, clears, starts fresh).
+app.post('/api/start', adminOnly, async (req, res) => {
+  const dryRun = !!(req.body?.dryRun || req.query.dryRun);
 
-  const { newNum } = startFreshRun(`Test #${getNextRunNumber()}`);
+  if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
+  if (continuous.status().running) {
+    if (!req.body?.takeover) {
+      return res.status(409).json({ error: 'PUBLIC_RUN_ACTIVE', message: 'A public run is active. Pause it and start an audit?' });
+    }
+    const pr = continuous.pause();
+    if (!pr.ok) return res.status(500).json({ error: 'pause failed: ' + pr.error });
+    for (let i = 0; i < 100; i++) {
+      if (!continuous.status().running) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+  }
+  if (!dryRun && !MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
+
+  const runMode = dryRun ? 'dry' : 'p2p';
+  const { newNum } = startFreshRun(`Test #${getNextRunNumber()}`, { mode: runMode });
 
   const SDK_LABELS = { js: 'Blue JS', csharp: 'Blue C#', tkd: 'TKD JS' };
-  broadcast('log', { msg: `🚀 Starting Test #${newNum} (${SDK_LABELS[state.activeSDK] || state.activeSDK} SDK, ${process.platform === 'win32' ? 'Windows' : process.platform})` });
-  res.json({ ok: true, testNumber: newNum });
-  runAudit(false, state, broadcast).then(() => {
+  const label = `${SDK_LABELS[state.activeSDK] || state.activeSDK} SDK, ${process.platform === 'win32' ? 'Windows' : process.platform}`;
+  broadcast('log', { msg: `🚀 Starting Test #${newNum} (${label})${dryRun ? ' [TEST RUN]' : ''}` });
+  res.json({ ok: true, testNumber: newNum, dryRun });
+  runAudit(false, state, broadcast, null, { dryRun }).then(() => {
     saveCurrentRun(`Test #${newNum}`);
     broadcast('log', { msg: `💾 Test #${newNum} complete and saved` });
   }).catch(err => {
@@ -1127,10 +1199,20 @@ app.post('/api/start', adminOnly, requireMode('dev'), async (req, res) => {
   });
 });
 
-// Resume CURRENT test from where it left off (skips already-tested nodes)
-app.post('/api/resume', adminOnly, requireMode('dev'), async (req, res) => {
+// Resume CURRENT test from where it left off (skips already-tested nodes).
+app.post('/api/resume', adminOnly, async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
-  if (continuous.status().running) return res.status(409).json({ error: 'Public Testing Mode is live — stop it first before resuming a regular audit.' });
+  if (continuous.status().running) {
+    if (!req.body?.takeover) {
+      return res.status(409).json({ error: 'PUBLIC_RUN_ACTIVE', message: 'A public run is active. Pause it and start an audit?' });
+    }
+    const pr = continuous.pause();
+    if (!pr.ok) return res.status(500).json({ error: 'pause failed: ' + pr.error });
+    for (let i = 0; i < 100; i++) {
+      if (!continuous.status().running) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+  }
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const results = getResults();
   if (results.length === 0) return res.json({ error: 'No results to resume from. Use Start to begin a new test.' });
@@ -1143,7 +1225,6 @@ app.post('/api/resume', adminOnly, requireMode('dev'), async (req, res) => {
   broadcast('log', { msg: `▶ Resuming Test #${state.activeRunNumber} from node ${results.length + 1} (${results.length} already tested, SDK: ${state.activeSDK.toUpperCase()})` });
   res.json({ ok: true, testNumber: state.activeRunNumber, resumeFrom: results.length });
   runAudit(true, state, broadcast).then(() => {
-    // Update saved run with final results
     saveCurrentRun(`Test #${state.activeRunNumber}`);
     broadcast('log', { msg: `💾 Test #${state.activeRunNumber} saved` });
   }).catch(err => {
@@ -1153,16 +1234,17 @@ app.post('/api/resume', adminOnly, requireMode('dev'), async (req, res) => {
   });
 });
 
-app.post('/api/stop', adminOnly, (req, res) => { state.stopRequested = true; res.json({ ok: true }); });
-
-app.post('/api/economy', adminOnly, (req, res) => {
-  state.economyMode = !state.economyMode;
-  broadcast('state', { state });
-  broadcast('log', { msg: `${state.economyMode ? '♻ Economy mode ON — caps nodes to what balance can afford' : '💳 Economy mode OFF — tests all nodes'}` });
-  res.json({ ok: true, economyMode: state.economyMode });
+app.post('/api/stop', adminOnly, (req, res) => {
+  state.stopRequested = true;
+  res.json({ ok: true });
 });
 
-app.post('/api/retest-skips', adminOnly, requireMode('dev'), async (req, res) => {
+// DEPRECATED 2026-04-25: Economy mode removed. Endpoint kept as 410 Gone for any old client.
+app.post('/api/economy', adminOnly, (req, res) => {
+  res.status(410).json({ error: 'ECONOMY_MODE_DEPRECATED' });
+});
+
+app.post('/api/retest-skips', adminOnly, async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const results = getResults();
@@ -1177,7 +1259,7 @@ app.post('/api/retest-skips', adminOnly, requireMode('dev'), async (req, res) =>
   });
 });
 
-app.post('/api/retest-fails', adminOnly, requireMode('dev'), async (req, res) => {
+app.post('/api/retest-fails', adminOnly, async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const results = getResults();
@@ -1199,7 +1281,7 @@ app.post('/api/retest-fails', adminOnly, requireMode('dev'), async (req, res) =>
 });
 
 // DEPRECATED: Plan testing is WIP — hidden from dashboard, endpoint still functional for API callers
-app.post('/api/test-plan', adminOnly, requireMode('dev'), async (req, res) => {
+app.post('/api/test-plan', adminOnly, async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const { planId } = req.body;
@@ -1213,7 +1295,7 @@ app.post('/api/test-plan', adminOnly, requireMode('dev'), async (req, res) => {
   });
 });
 
-app.get('/api/plans', adminOnly, requireMode('dev'), async (req, res) => {
+app.get('/api/plans', adminOnly, async (req, res) => {
   try {
     const { discoverPlans } = await import('./core/chain.js');
     const plans = await discoverPlans(null, { maxId: 100 });
@@ -1225,7 +1307,7 @@ app.get('/api/plans', adminOnly, requireMode('dev'), async (req, res) => {
   }
 });
 
-app.get('/api/subscriptions', adminOnly, requireMode('dev'), async (req, res) => {
+app.get('/api/subscriptions', adminOnly, async (req, res) => {
   try {
     const { querySubscriptions } = await import('./core/chain.js');
     const subs = await querySubscriptions(state.walletAddress);
@@ -1237,7 +1319,7 @@ app.get('/api/subscriptions', adminOnly, requireMode('dev'), async (req, res) =>
 });
 
 // Sub. Plan mode: enriched subs with plan owner + fee-grant status + node count
-app.get('/api/sub-plans', adminOnly, requireMode('dev'), async (req, res) => {
+app.get('/api/sub-plans', adminOnly, async (req, res) => {
   try {
     const addr = req.query.address || state.walletAddress;
     if (!addr) return res.json({ plans: [], walletAddress: null });
@@ -1251,7 +1333,7 @@ app.get('/api/sub-plans', adminOnly, requireMode('dev'), async (req, res) => {
 });
 
 // Sub. Plan mode: run fee-granted plan test — starts as a fresh run with clean counters.
-app.post('/api/test-sub-plan', adminOnly, requireMode('dev'), async (req, res) => {
+app.post('/api/test-sub-plan', adminOnly, async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const { planId, subscriptionId, granter } = req.body || {};
@@ -1293,16 +1375,33 @@ app.post('/api/clear', adminOnly, (req, res) => {
  * POST /api/admin/public-test/start
  * Body: { mode, planId?, subscriptionId?, subscriptionGranter?, minDelayMs? }
  */
-app.post('/api/admin/public-test/start', adminOnly, requireMode('public'), async (req, res) => {
-  if (state.status === 'running' || state.status === 'paused') {
-    return res.status(409).json({ error: 'A regular audit is running — stop it first before starting Public Testing Mode.' });
+app.post('/api/admin/public-test/start', adminOnly, async (req, res) => {
+  // Explicit 409 if public loop is already running — no double-start takeover.
+  if (continuous.status().running) {
+    return res.status(409).json({ error: 'PUBLIC_RUN_ACTIVE', message: 'A public run is already active.' });
   }
+
+  // If dev engine is active, require explicit takeover confirmation.
+  if (state.status === 'running' || state.status === 'paused') {
+    if (!req.body?.takeover) {
+      return res.status(409).json({ error: 'DEV_RUN_ACTIVE', message: 'A dev audit is active. Send takeover:true to stop it first.' });
+    }
+    // Takeover: signal dev pipeline to stop and wait up to 5 s.
+    state.stopRequested = true;
+    for (let i = 0; i < 50; i++) {
+      if (state.status !== 'running') break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+  }
+
   const {
     mode = 'p2p',
     planId,
     subscriptionId,
     subscriptionGranter,
     minDelayMs,
+    dryRun,
+    dryRunLoop,
   } = req.body || {};
 
   const result = await continuous.start({
@@ -1311,6 +1410,8 @@ app.post('/api/admin/public-test/start', adminOnly, requireMode('public'), async
     subscriptionId: subscriptionId ? String(subscriptionId) : undefined,
     subscriptionGranter: subscriptionGranter ? String(subscriptionGranter) : undefined,
     minDelayMs: minDelayMs != null ? Number(minDelayMs) : undefined,
+    dryRun: !!dryRun,
+    dryRunLoop: !!dryRunLoop,
   });
 
   if (!result.ok) {
@@ -1323,7 +1424,7 @@ app.post('/api/admin/public-test/start', adminOnly, requireMode('public'), async
  * POST /api/admin/public-test/stop
  * Requests the loop to stop. Returns immediately; loop finishes current pass then stops.
  */
-app.post('/api/admin/public-test/stop', adminOnly, requireMode('public'), (req, res) => {
+app.post('/api/admin/public-test/stop', adminOnly, (req, res) => {
   const result = continuous.stop();
   res.json(result);
 });
@@ -1413,6 +1514,45 @@ app.get('/api/failure-analysis', adminOnly, (req, res) => {
   }
 
   res.json(analysis);
+});
+
+// ─── Chain node list (admin-only, dry-run simulator) ────────────────────────
+app.get('/api/chain/nodes', adminOnly, async (req, res) => {
+  try {
+    await ensureLcd();
+    const all = await getAllNodes(null);
+    res.json({ total: all.length, results: all });
+  } catch (err) {
+    console.error('[api/chain/nodes]', err);
+    res.status(500).json({ error: 'chain fetch failed' });
+  }
+});
+
+// ─── Live node status (admin-only) ───────────────────────────────────────────
+// Proxies nodeStatusV3 against the node's own remoteUrl so the dry-run UI can
+// display real moniker + location without waiting for a full audit pass.
+app.get('/api/chain/node-status', adminOnly, async (req, res) => {
+  const remoteUrl = String(req.query.remoteUrl || '').trim();
+  if (!remoteUrl || !/^https?:\/\//i.test(remoteUrl)) {
+    return res.status(400).json({ error: 'remoteUrl query param required' });
+  }
+  try {
+    const s = await nodeStatusV3(remoteUrl);
+    res.json({
+      address: s.address || '',
+      moniker: s.moniker || '',
+      type: s.type || '',
+      peers: s.peers ?? null,
+      maxPeers: s.qos?.max_peers ?? null,
+      city: s.location?.city || '',
+      country: s.location?.country || '',
+      countryCode: s.location?.country_code || '',
+      downloadBps: s.bandwidth?.download ?? null,
+      uploadBps: s.bandwidth?.upload ?? null,
+    });
+  } catch (err) {
+    res.status(502).json({ error: err?.message || 'node status failed' });
+  }
 });
 
 // ─── Rescan: re-fetch node list from chain to verify current total ───────────
@@ -1521,21 +1661,26 @@ app.post('/api/runs/load/:num', adminOnly, (req, res) => {
 });
 
 // ─── SDK Toggle ─────────────────────────────────────────────────────────────
-app.post('/api/sdk', adminOnly, requireMode('dev'), (req, res) => {
+// SDK + DNS are admin-only settings (not test actions), so they stay available
+// in both dev and public modes — public mode only restricts test-run endpoints.
+app.post('/api/sdk', adminOnly, (req, res) => {
   const { sdk } = req.body;
   const SDK_LABELS = { js: 'Blue JS', csharp: 'Blue C#', tkd: 'TKD JS (Official)' };
   if (SDK_LABELS[sdk]) {
+    const changed = state.activeSDK !== sdk;
     state.activeSDK = sdk;
     try { _wfs(SDK_PREF_FILE, sdk, 'utf8'); } catch {}
-    broadcast('state', { state });
-    broadcast('log', { msg: `SDK switched to ${SDK_LABELS[sdk]}` });
+    if (changed) {
+      broadcast('state', { state });
+      broadcast('log', { msg: `SDK switched to ${SDK_LABELS[sdk]}` });
+    }
     res.json({ ok: true, sdk });
   } else {
     res.status(400).json({ error: 'Invalid SDK. Use "js", "csharp", or "tkd"' });
   }
 });
 
-app.get('/api/sdk', adminOnly, requireMode('dev'), (req, res) => {
+app.get('/api/sdk', adminOnly, (req, res) => {
   res.json({ sdk: state.activeSDK });
 });
 
@@ -1602,11 +1747,11 @@ app.get('/api/cross-sdk', adminOnly, (req, res) => {
 });
 
 // ─── DNS Configuration ──────────────────────────────────────────────────────
-app.get('/api/dns', adminOnly, requireMode('dev'), (req, res) => {
+app.get('/api/dns', adminOnly, (req, res) => {
   res.json({ servers: ACTIVE_DNS, presets: Object.keys(DNS_PRESETS) });
 });
 
-app.post('/api/dns', adminOnly, requireMode('dev'), (req, res) => {
+app.post('/api/dns', adminOnly, (req, res) => {
   const { preset, servers } = req.body || {};
   if (preset && DNS_PRESETS[preset]) {
     setActiveDns([...DNS_PRESETS[preset]]);
@@ -1708,6 +1853,63 @@ app.listen(PORT, async () => {
     console.log('│    2. Add your Sentinel wallet mnemonic                      │');
     console.log('│    3. Restart the server                                     │');
     console.log('└──────────────────────────────────────────────────────────────┘');
+  }
+
+  // Close any orphaned batch / run rows from a previous boot so a /live or
+  // admin refresh doesn't hydrate from a phantom run that never got its
+  // batch:end / loop:stopped event.
+  try {
+    const { getDb } = await import('./core/db.js');
+    const db = getDb();
+    const orphans = db.prepare(
+      `SELECT id FROM batches WHERE finished_at IS NULL`,
+    ).all();
+    for (const o of orphans) {
+      const { results } = getBatchResults(o.id, { limit: 100000 });
+      let passed = 0, failed = 0;
+      for (const r of results) {
+        if (r.actual_mbps != null && r.actual_mbps > 0 && !r.error) passed++;
+        else failed++;
+      }
+      updateBatchOnFinish(o.id, { finished_at: Date.now(), passed, failed });
+    }
+    if (orphans.length > 0) {
+      console.log(`✓  Closed ${orphans.length} orphaned batch(es) from previous boot.`);
+    }
+    const orphanRuns = db.prepare(
+      `SELECT id FROM runs WHERE finished_at IS NULL`,
+    ).all();
+    for (const r of orphanRuns) {
+      const stat = db.prepare(
+        `SELECT COUNT(*) AS n, SUM(CASE WHEN actual_mbps > 0 AND error_message IS NULL THEN 1 ELSE 0 END) AS p FROM results WHERE run_id = ?`,
+      ).get(r.id);
+      updateRunOnFinish(r.id, {
+        finished_at: Date.now(),
+        node_count: stat?.n || 0,
+        pass_count: stat?.p || 0,
+      });
+    }
+    if (orphanRuns.length > 0) {
+      console.log(`✓  Closed ${orphanRuns.length} orphaned run(s) in results table.`);
+    }
+  } catch (err) {
+    console.error('Orphan-batch cleanup error:', err.message);
+  }
+
+  // ─── Auto-resume continuous loop from last-persisted config ───────────────
+  // If the loop was running when the server was stopped/killed, pick it up
+  // again on boot so a perpetual public test survives restarts.
+  if (MNEMONIC) {
+    try {
+      const r = await continuous.resumeFromPersisted();
+      if (r.resumed) {
+        console.log(`✓  Auto-resumed continuous loop in mode "${r.mode}" from persisted config.`);
+      } else if (r.reason && r.reason !== 'no-config-or-stopped') {
+        console.warn(`⚠  Auto-resume attempted but failed: ${r.reason}`);
+      }
+    } catch (err) {
+      console.error('Auto-resume error:', err.message);
+    }
   }
 
   if (MNEMONIC) {

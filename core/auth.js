@@ -8,12 +8,21 @@ import { timingSafeEqual } from 'node:crypto';
 
 // Constant-time string compare. Returns false on any length mismatch
 // without leaking length via early-exit timing.
-function safeEq(a, b) {
+export function safeEq(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
   const ab = Buffer.from(a);
   const bb = Buffer.from(b);
   if (ab.length !== bb.length) return false;
   return timingSafeEqual(ab, bb);
+}
+
+// H-02: server injects its session validator so browser cookies carry an
+// opaque session ID rather than the raw ADMIN_TOKEN. If the server never
+// calls setAdminSessionValidator, browser login is disabled (Bearer header
+// continues to work for API callers).
+let _adminSessionValidator = () => false;
+export function setAdminSessionValidator(fn) {
+  if (typeof fn === 'function') _adminSessionValidator = fn;
 }
 
 // ─── adminOnly ───────────────────────────────────────────────────────────────
@@ -32,19 +41,28 @@ export function adminOnly(req, res, next) {
     return next();
   }
 
-  // Extract from Bearer header
+  // Extract from Bearer header (API callers)
   const authHeader = req.headers['authorization'] || '';
   const bearerToken = authHeader.startsWith('Bearer ')
     ? authHeader.slice(7).trim()
     : null;
 
-  // Extract from signed cookie (set by POST /admin/login)
-  const cookieToken = req.signedCookies?.admin_token || null;
+  // Browser path: signed cookie carries an opaque session ID (not ADMIN_TOKEN).
+  const sessionId = req.signedCookies?.admin_session || null;
 
-  const presented = bearerToken || cookieToken;
+  const bearerOk = bearerToken && safeEq(bearerToken, token);
+  const sessionOk = sessionId && _adminSessionValidator(sessionId);
 
-  if (safeEq(presented, token)) {
+  if (bearerOk || sessionOk) {
     req.admin = true;
+    // CSRF double-submit check: non-GET state-changing requests must include
+    // the X-Admin-Request: 1 header. Cross-site forms and fetch() without
+    // explicit headers cannot set this custom header — browsers block it.
+    if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
+      if (req.headers['x-admin-request'] !== '1') {
+        return res.status(403).json({ error: 'Forbidden', hint: 'Include X-Admin-Request: 1 header in all state-changing requests' });
+      }
+    }
     return next();
   }
 
@@ -65,9 +83,11 @@ export function attachAdminFlag(req, res, next) {
   const bearerToken = authHeader.startsWith('Bearer ')
     ? authHeader.slice(7).trim()
     : null;
-  const cookieToken = req.signedCookies?.admin_token || null;
-  const presented = bearerToken || cookieToken;
+  const sessionId = req.signedCookies?.admin_session || null;
 
-  req.admin = safeEq(presented, token);
+  const bearerOk = bearerToken && safeEq(bearerToken, token);
+  const sessionOk = sessionId && _adminSessionValidator(sessionId);
+
+  req.admin = Boolean(bearerOk || sessionOk);
   next();
 }
