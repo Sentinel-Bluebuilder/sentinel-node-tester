@@ -732,10 +732,34 @@
         const notice = document.getElementById('broadcastOffNotice');
         if (_broadcastLive) {
           if (notice) notice.style.display = 'none';
-          if (!wasLive) connectSSE();
+          showPaused(false);
+          if (!wasLive) {
+            connectSSE();
+            seedLogsFromRest();
+          }
         } else {
-          if (notice) notice.style.display = '';
+          // Broadcast off: show the full pause overlay, not just the inline notice.
+          // Public visitors must see "Testing Has Been Paused" — last-completed
+          // run snapshot still loads behind the overlay for context.
+          if (notice) notice.style.display = 'none';
+          showPaused(true);
           if (_sse) { try { _sse.close(); } catch (_) {} _sse = null; }
+        }
+      } catch {}
+    }
+
+    // Pull the persisted log backlog over REST. Used when SSE was already
+    // open before broadcast flipped on, or as a defensive seed on visibility
+    // changes — the SSE init only fires on the initial connection.
+    async function seedLogsFromRest() {
+      try {
+        const r = await fetch('/api/public/logs', { cache: 'no-store' });
+        if (!r.ok) return;
+        const j = await r.json();
+        if (!j || !Array.isArray(j.logs) || !j.logs.length) return;
+        const body = document.getElementById('logBody');
+        if (body && body.children.length === 0) {
+          for (const line of j.logs) appendLog(line);
         }
       } catch {}
     }
@@ -1435,6 +1459,15 @@
             if (d.snapshotSize) _cb.snapshotSize = d.snapshotSize;
             cbRender();
           }
+          // Seed the log panel with the persisted backlog so a page refresh
+          // mid-audit doesn't blank the activity log.
+          if (Array.isArray(d.logs) && d.logs.length) {
+            for (const line of d.logs) appendLog(line);
+          }
+          break;
+        }
+        case 'log': {
+          if (d.msg) appendLog(d.msg);
           break;
         }
         default: break;
