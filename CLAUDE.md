@@ -86,7 +86,8 @@ TEST RUN is an optional skip-only demo — it is NOT a separate mode and it does
 - DONE 2026-04-23: Build `/live` page + route (Option B).
 - DONE 2026-04-25: Collapsed dual-mode (dev/bundled/public) → single mode + `broadcastLive` toggle. Removed mode cookie, `requireMode` middleware, `_currentMode`, `_applyModeUI`, `selectMode`, `switchMode`, mode overlay, public-test endpoints. Added `POST /GET /api/broadcast`.
 - DONE 2026-04-25: Consolidated `audit-dry.db` into `audit.db`. TEST RUN is now `?dryRun=1` on `/api/start`, writes `mode='dry'` rows to the single DB.
-- PENDING: Add theme toggle to `public.html` (#22).
+- DONE 2026-04-25: TEST RUN parity — runs the real pipeline end-to-end, short-circuits per-node after price discovery with `errorCode='TEST_RUN_SKIP'`. Stripped all `public-test:*` SSE prefixes, `_pipelinePublicMode`, three `/api/admin/public-test/*` endpoints, `DRY_RUN_SKIP`, `dry-run:log`, `#dryRunLoop`. Broadcast Live toggle moved to top action cluster.
+- DONE: Theme toggle on `public.html` (#22) — `#btnTheme` + `toggleTheme()` already wired.
 
 ## Don't
 - Don't add public-facing buttons. Ever.
