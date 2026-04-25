@@ -215,6 +215,7 @@ export function createState() {
     totalNodes: 0,
     testedNodes: 0,
     failedNodes: 0,
+    skippedNodes: 0,
     retryCount: 0,
     passed15: 0,
     passed10: 0,
@@ -242,7 +243,8 @@ export function createState() {
 /** Recompute state counters from current results */
 function recomputeCounters(state) {
   state.testedNodes = results.filter(r => r.actualMbps != null).length;
-  state.failedNodes = results.filter(r => r.actualMbps == null).length;
+  state.failedNodes = results.filter(r => r.actualMbps == null && !r.skipped && r.errorCode !== 'TEST_RUN_SKIP').length;
+  state.skippedNodes = results.filter(r => r.skipped || r.errorCode === 'TEST_RUN_SKIP').length;
   state.passed15 = results.filter(r => r.baselineAtTest >= 30 && r.actualMbps >= 15).length;
   state.passed10 = results.filter(r => r.actualMbps >= 10).length;
   state.passedBaseline = results.filter(r => {
