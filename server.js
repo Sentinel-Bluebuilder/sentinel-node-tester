@@ -859,6 +859,9 @@ const PUBLIC_EVENT_WHITELIST = new Set([
   'batch:node:result',
   'batch:end',
   'batch:gap',
+  // Live operator log lines — needed so /live shows real-time activity.
+  // sanitizeForPublic already truncates evt.msg to 400 chars.
+  'log',
 ]);
 function sanitizeForPublic(evt) {
   const safe = { type: evt.type };
@@ -923,6 +926,10 @@ app.get('/api/public/events', attachAdminFlag, rlPublicSse, (req, res) => {
     batchId: activeBatchId,
     snapshotSize: activeSnapshotSize,
     batchMode: activeBatchMode,
+    // Persisted log backlog so /live shows full history on refresh, not a blank panel.
+    // logBuffer is populated from results/audit-*.log on server boot and updated live.
+    logs: state.broadcastLive ? logBuffer.slice() : [],
+    broadcastLive: !!state.broadcastLive,
   });
   const handler = (data) => {
     if (!state.broadcastLive) return;
@@ -936,6 +943,17 @@ app.get('/api/public/events', attachAdminFlag, rlPublicSse, (req, res) => {
     emitter.off('update', handler);
     clearInterval(pingInterval);
   });
+});
+
+/**
+ * GET /api/public/logs
+ * Returns the rolling log buffer so /live can paint the full backlog on
+ * page refresh — not just events received since the SSE socket opened.
+ * Empty when broadcastLive is off (public must not see live activity then).
+ */
+app.get('/api/public/logs', attachAdminFlag, rlPublicRead, (req, res) => {
+  if (!state.broadcastLive) return res.json({ logs: [], broadcastLive: false });
+  res.json({ logs: logBuffer.slice(), broadcastLive: true });
 });
 
 /**
