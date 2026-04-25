@@ -444,16 +444,6 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   broadcast('log', { msg: `Fetched ${nodesToTest.length} nodes total.` });
   broadcast('state', { state });
 
-  broadcast('log', { msg: '📋 Checking subscription plan membership...' });
-  try {
-    await Promise.race([
-      fetchPlanMembership(nodesToTest, broadcast),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Plan fetch timeout (30s)')), 30_000)),
-    ]);
-  } catch (planErr) {
-    broadcast('log', { msg: `⚠ Plan membership skipped: ${_sanitizeSnippet(planErr.message)}` });
-  }
-
   // ── Phase 2: Parallel online scan ──
   broadcast('log', { msg: `\n🔍 Phase 2: Scanning ${nodesToTest.length} nodes in parallel (30 concurrent)...` });
   const onlineNodes = await scanNodesParallel(nodesToTest, 30, broadcast, state);
