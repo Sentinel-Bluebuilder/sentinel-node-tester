@@ -2824,29 +2824,24 @@
 
     // ─── Public SSE dispatcher ─────────────────────────────────────
     // The server emits `data: <json>` only (no `event:` field). Every
-    // event type — batch:*, public-test:*, dry-run:* — arrives via
+    // event type — batch:*, loop:*, iteration:* — arrives via
     // EventSource.onmessage. Dispatch here on d.type.
     function handlePublicEvent(d) {
       switch (d.type) {
-        case 'public-test:loop:started':
+        case 'loop:started':
           pubLogStatus('running'); pubLog('Loop started', 'log-ok'); break;
-        case 'public-test:loop:stopping':
+        case 'loop:stopping':
           pubLogStatus('stopping'); pubLog('Loop stopping…'); break;
-        case 'public-test:loop:stopped':
+        case 'loop:stopped':
           pubLogStatus('idle'); pubLog('Loop stopped'); break;
-        case 'public-test:loop:error':
+        case 'loop:error':
           pubLog('Loop error: ' + (d.error || 'unknown'), 'log-err'); break;
-        case 'public-test:iteration:start':
+        case 'iteration:start':
           pubLog(`Iteration ${d.iteration || '?'} start`); break;
-        case 'public-test:iteration:end': {
+        case 'iteration:end': {
           const passed = d.passed != null ? d.passed : '?';
           const failed = d.failed != null ? d.failed : '?';
           pubLog(`Iteration ${d.iteration || '?'} end — passed ${passed}, failed ${failed}`, 'log-ok');
-          break;
-        }
-        case 'public-test:error': {
-          const who = d.moniker || d.node_addr || 'node';
-          pubLog(`✗ ${who} failed: ${d.error || 'unknown'}`, 'log-err');
           break;
         }
         case 'batch:start': {
@@ -2873,7 +2868,7 @@
           const tested  = d.tested_at || d.testedAt || new Date().toISOString();
           const who     = moniker || addr || 'node';
 
-          if (d.skipped || err === 'DRY_RUN_SKIP') {
+          if (d.skipped || err === 'TEST_RUN_SKIP') {
             pubLog(`⏭ ${who} — SKIPPED`, 'log-ok');
           } else if (mbps != null && mbps > 0) {
             pubLog(`✓ ${who} — ${Number(mbps).toFixed(1)} Mbps`, 'log-ok');
@@ -2893,10 +2888,10 @@
               city:           d.city    || '',
               service_type:   d.serviceType ?? d.service_type ?? 1,
               latest_mbps:    mbps,
-              handshake_ok:   (d.skipped || err === 'DRY_RUN_SKIP') ? null
+              handshake_ok:   (d.skipped || err === 'TEST_RUN_SKIP') ? null
                               : (mbps > 0 ? true : (err ? false : null)),
               last_tested_at: tested,
-              dry_run:        isDry || undefined,
+              dry_run:        err === 'TEST_RUN_SKIP' || undefined,
             });
             const idx = allNodes.findIndex(n => n.address === norm.address);
             if (idx >= 0) allNodes[idx] = norm; else allNodes.push(norm);
@@ -2905,9 +2900,6 @@
           } catch (_) {}
           break;
         }
-        case 'dry-run:log':
-          if (d.msg) pubLog(d.msg);
-          break;
         case 'batch:end': {
           const next = d.next_in_ms ? Math.round(d.next_in_ms / 1000) : null;
           const msg  = next != null ? `Batch complete. Next check in ${next}s` : 'Batch complete.';

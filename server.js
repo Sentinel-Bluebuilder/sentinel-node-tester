@@ -16,7 +16,7 @@ import { MNEMONIC, DENOM, GAS_PRICE, PORT, LCD_ENDPOINTS, PROJECT_ROOT, DNS_PRES
 import { cachedWalletSetup, createFreshClient } from './core/wallet.js';
 import { ensureLcd, getActiveLcd, cleanupRpc, getAllNodes } from './core/chain.js';
 import { nodeStatusV3 } from './protocol/v3protocol.js';
-import { createState, runAudit, runRetestSkips, runPlanTest, runSubPlanTest, getResults, saveResults, setActiveRunDir, setActiveDbRunId, pipelineEmitter, setPipelinePublicMode } from './audit/pipeline.js';
+import { createState, runAudit, runRetestSkips, runPlanTest, runSubPlanTest, getResults, saveResults, setActiveRunDir, setActiveDbRunId } from './audit/pipeline.js';
 import {
   insertRun, updateRunOnFinish,
   insertResult, insertErrorLog,
@@ -188,19 +188,16 @@ function broadcast(type, data = {}) {
 }
 
 // ─── Continuous Loop SSE forwarding ─────────────────────────────────────────
-// Forward loop events from the continuous runner as 'public-test:*' SSE events.
-// Batch-model events (batch:start, batch:node:result, batch:end, batch:gap)
-// are forwarded directly — no prefix — so clients can subscribe by event type.
+// Forward loop and batch events from the continuous runner into the broadcast bus.
 {
   const LOOP_EVENTS = [
     'loop:started', 'loop:stopping', 'loop:stopped', 'loop:error',
     'iteration:start', 'iteration:end',
   ];
   for (const evt of LOOP_EVENTS) {
-    continuous.on(evt, (data) => broadcast(`public-test:${evt}`, data || {}));
+    continuous.on(evt, (data) => broadcast(evt, data || {}));
   }
 
-  // Batch events — forwarded with their own type names (no prefix)
   const BATCH_EVENTS = ['batch:start', 'batch:node:result', 'batch:end', 'batch:gap'];
   for (const evt of BATCH_EVENTS) {
     continuous.on(evt, (data) => broadcast(evt, data || {}));
@@ -849,15 +846,13 @@ app.get('/api/results', adminOnly, (req, res) => {
 
 // ─── Public SSE stream ──────────────────────────────────────────────────────
 // Broadcasts the same events but strips any operator-only fields.
-// public-test:error is added here; it is forwarded from pipelineEmitter below.
 const PUBLIC_EVENT_WHITELIST = new Set([
-  'public-test:loop:started',
-  'public-test:loop:stopping',
-  'public-test:loop:stopped',
-  'public-test:loop:error',
-  'public-test:iteration:start',
-  'public-test:iteration:end',
-  'public-test:error',
+  'loop:started',
+  'loop:stopping',
+  'loop:stopped',
+  'loop:error',
+  'iteration:start',
+  'iteration:end',
   // Batch-model events (each full node-sweep is one batch)
   'batch:start',
   'batch:node:result',
@@ -872,16 +867,6 @@ function sanitizeForPublic(evt) {
   if (evt.failed != null)      safe.failed      = evt.failed;
   if (evt.durationMs != null)  safe.durationMs  = evt.durationMs;
   if (evt.error != null)       safe.error       = String(evt.error).slice(0, 200);
-  // public-test:error fields (node failure details)
-  if (evt.node_addr != null)   safe.node_addr   = evt.node_addr;
-  if (evt.moniker != null)     safe.moniker     = evt.moniker;
-  if (evt.country != null)     safe.country     = evt.country;
-  if (evt.stage != null)       safe.stage       = evt.stage;
-  if (evt.error_code != null)  safe.error_code  = evt.error_code;
-  if (evt.error_message != null) safe.error_message = String(evt.error_message).slice(0, 200);
-  if (evt.log_snippet != null) safe.log_snippet = String(evt.log_snippet).slice(0, 400);
-  if (evt.captured_at != null) safe.captured_at = evt.captured_at;
-  if (evt.run_id != null)      safe.run_id      = evt.run_id;
   // batch:* event fields — only public-safe node-level data
   if (evt.batchId != null)      safe.batchId      = evt.batchId;
   if (evt.snapshotSize != null) safe.snapshotSize = evt.snapshotSize;
@@ -900,8 +885,6 @@ function sanitizeForPublic(evt) {
   if (evt.maxPeers != null)   safe.maxPeers   = evt.maxPeers;
   if (evt.errorCode != null)  safe.errorCode  = evt.errorCode;
   if (evt.testedAt != null)   safe.testedAt   = evt.testedAt;
-  // Dry-run flag + free-form log message
-  if (evt.dryRun === true)    safe.dryRun     = true;
   if (evt.msg != null)        safe.msg        = String(evt.msg).slice(0, 400);
   if (evt.baselineMbps != null) safe.baselineMbps = evt.baselineMbps;
   if (evt.skipped === true)   safe.skipped    = true;
@@ -909,30 +892,6 @@ function sanitizeForPublic(evt) {
   if (evt.next_in_ms != null) safe.next_in_ms = evt.next_in_ms;
   return safe;
 }
-
-// ─── Forward pipelineEmitter public-test:error into the main broadcast bus ──
-// The event arrives on pipelineEmitter (pipeline.js module-level emitter) and
-// is forwarded as an 'update' event so the existing SSE fan-out picks it up.
-// The iteration field is filled here from continuous.status() since pipeline
-// has no access to the loop counter.
-pipelineEmitter.on('public-test:error', (data) => {
-  const s = continuous.status();
-  emitter.emit('update', {
-    type: 'public-test:error',
-    ...data,
-    iteration: s.iteration,
-  });
-});
-
-// ─── Sync pipeline public-mode flag with continuous loop state ───────────────
-// When the continuous loop starts or stops, tell pipeline.js whether to emit
-// public-test:error events. Avoids leaking admin-session failures.
-continuous.on('loop:started', () => {
-  const s = continuous.status();
-  setPipelinePublicMode(s.running && (s.mode === 'p2p' || s.mode === 'subscription'));
-});
-continuous.on('loop:stopped', () => { setPipelinePublicMode(false); });
-continuous.on('loop:error',   () => { setPipelinePublicMode(false); });
 
 const SSE_PING_MS = 20_000; // 20-second heartbeat keeps proxies from dropping the connection
 
@@ -963,7 +922,6 @@ app.get('/api/public/events', attachAdminFlag, rlPublicSse, (req, res) => {
     batchId: activeBatchId,
     snapshotSize: activeSnapshotSize,
     batchMode: activeBatchMode,
-    dryRun: activeBatchMode === 'dry',
   });
   const handler = (data) => {
     if (!state.broadcastLive) return;
@@ -981,7 +939,7 @@ app.get('/api/public/events', attachAdminFlag, rlPublicSse, (req, res) => {
 
 /**
  * GET /api/public/test/status
- * Read-only view of the public-test loop. No wallet / plan IDs.
+ * Read-only loop status snapshot. No wallet / plan IDs.
  */
 app.get('/api/public/test/status', attachAdminFlag, rlPublicRead, (req, res) => {
   const s = continuous.status();
@@ -1077,7 +1035,7 @@ app.get('/api/events', adminOnly, rlAdminSse, (req, res) => {
   const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
   const { walletAddress, balance, balanceUdvpn, spentUdvpn, ...stateForSse } = state;
   send({ type: 'init', state: stateForSse, results, logs: logBuffer.slice() });
-  const ADMIN_BLOCK = /^(public-test:|loop:|iteration:|batch:)/;
+  const ADMIN_BLOCK = /^(loop:|iteration:|batch:)/;
   const handler = (data) => {
     if (data && typeof data.type === 'string' && ADMIN_BLOCK.test(data.type)) return;
     send(data);
@@ -1368,75 +1326,6 @@ app.post('/api/clear', adminOnly, (req, res) => {
   res.json({ ok: true });
 });
 
-// ─── Admin: Continuous Loop Control ─────────────────────────────────────────
-// All routes gated by adminOnly (Bearer token or signed cookie).
-
-/**
- * POST /api/admin/public-test/start
- * Body: { mode, planId?, subscriptionId?, subscriptionGranter?, minDelayMs? }
- */
-app.post('/api/admin/public-test/start', adminOnly, async (req, res) => {
-  // Explicit 409 if public loop is already running — no double-start takeover.
-  if (continuous.status().running) {
-    return res.status(409).json({ error: 'PUBLIC_RUN_ACTIVE', message: 'A public run is already active.' });
-  }
-
-  // If dev engine is active, require explicit takeover confirmation.
-  if (state.status === 'running' || state.status === 'paused') {
-    if (!req.body?.takeover) {
-      return res.status(409).json({ error: 'DEV_RUN_ACTIVE', message: 'A dev audit is active. Send takeover:true to stop it first.' });
-    }
-    // Takeover: signal dev pipeline to stop and wait up to 5 s.
-    state.stopRequested = true;
-    for (let i = 0; i < 50; i++) {
-      if (state.status !== 'running') break;
-      await new Promise(r => setTimeout(r, 100));
-    }
-  }
-
-  const {
-    mode = 'p2p',
-    planId,
-    subscriptionId,
-    subscriptionGranter,
-    minDelayMs,
-    dryRun,
-    dryRunLoop,
-  } = req.body || {};
-
-  const result = await continuous.start({
-    mode,
-    planId: planId ? String(planId) : undefined,
-    subscriptionId: subscriptionId ? String(subscriptionId) : undefined,
-    subscriptionGranter: subscriptionGranter ? String(subscriptionGranter) : undefined,
-    minDelayMs: minDelayMs != null ? Number(minDelayMs) : undefined,
-    dryRun: !!dryRun,
-    dryRunLoop: !!dryRunLoop,
-  });
-
-  if (!result.ok) {
-    return res.status(400).json({ error: result.error });
-  }
-  res.json(result);
-});
-
-/**
- * POST /api/admin/public-test/stop
- * Requests the loop to stop. Returns immediately; loop finishes current pass then stops.
- */
-app.post('/api/admin/public-test/stop', adminOnly, (req, res) => {
-  const result = continuous.stop();
-  res.json(result);
-});
-
-/**
- * GET /api/admin/public-test/status
- * Returns current loop status snapshot.
- */
-app.get('/api/admin/public-test/status', adminOnly, (req, res) => {
-  res.json(continuous.status());
-});
-
 /**
  * GET /api/admin/plans
  * Lists available Sentinel plans (delegates to discoverPlans in chain.js).
@@ -1516,7 +1405,7 @@ app.get('/api/failure-analysis', adminOnly, (req, res) => {
   res.json(analysis);
 });
 
-// ─── Chain node list (admin-only, dry-run simulator) ────────────────────────
+// ─── Chain node list (admin-only) ───────────────────────────────────────────
 app.get('/api/chain/nodes', adminOnly, async (req, res) => {
   try {
     await ensureLcd();
@@ -1529,8 +1418,7 @@ app.get('/api/chain/nodes', adminOnly, async (req, res) => {
 });
 
 // ─── Live node status (admin-only) ───────────────────────────────────────────
-// Proxies nodeStatusV3 against the node's own remoteUrl so the dry-run UI can
-// display real moniker + location without waiting for a full audit pass.
+// Proxies nodeStatusV3 against the node's own remoteUrl for the admin UI.
 app.get('/api/chain/node-status', adminOnly, async (req, res) => {
   const remoteUrl = String(req.query.remoteUrl || '').trim();
   if (!remoteUrl || !/^https?:\/\//i.test(remoteUrl)) {
@@ -1661,8 +1549,6 @@ app.post('/api/runs/load/:num', adminOnly, (req, res) => {
 });
 
 // ─── SDK Toggle ─────────────────────────────────────────────────────────────
-// SDK + DNS are admin-only settings (not test actions), so they stay available
-// in both dev and public modes — public mode only restricts test-run endpoints.
 app.post('/api/sdk', adminOnly, (req, res) => {
   const { sdk } = req.body;
   const SDK_LABELS = { js: 'Blue JS', csharp: 'Blue C#', tkd: 'TKD JS (Official)' };

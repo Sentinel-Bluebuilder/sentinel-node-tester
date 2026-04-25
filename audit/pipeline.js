@@ -6,7 +6,6 @@
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, renameSync } from 'fs';
 import path from 'path';
-import { EventEmitter } from 'events';
 
 import {
   MNEMONIC, DENOM, GIGS, TEST_MB, MAX_NODES, NODE_DELAY,
@@ -103,18 +102,6 @@ async function waitForInternet(broadcast, state) {
   return false;
 }
 
-// ─── Pipeline Event Emitter ──────────────────────────────────────────────────
-// Allows server.js to subscribe to pipeline events (e.g. public-test:error)
-// without a circular dependency (pipeline → continuous is forbidden).
-export const pipelineEmitter = new EventEmitter();
-pipelineEmitter.setMaxListeners(20);
-
-// Public-mode flag — set by server.js via setPipelinePublicMode() when the
-// continuous loop starts/stops in public mode. upsertResult checks this flag
-// before emitting public-test:error to avoid leaking admin-session failures.
-let _pipelinePublicMode = false;
-export function setPipelinePublicMode(on) { _pipelinePublicMode = !!on; }
-
 // ─── Results & State (shared across pipeline functions) ─────────────────────
 mkdirSync(RESULTS_DIR, { recursive: true });
 
@@ -207,21 +194,6 @@ function upsertResult(result, logSnippet = null) {
             error_message: err.slice(0, 2048),
             log_snippet:   _sanitizeSnippet(logSnippet),
           });
-          // ─── Public SSE: emit only when loop is running in public mode ───
-          if (_pipelinePublicMode) {
-            pipelineEmitter.emit('public-test:error', {
-              node_addr:     result.address || '',
-              moniker:       result.moniker  || '',
-              country:       result.country  || '',
-              stage,
-              error_code:    result.errorCode || null,
-              error_message: err.slice(0, 200),
-              log_snippet:   _sanitizeSnippet(logSnippet) || null,
-              captured_at:   result.timestamp || new Date().toISOString(),
-              run_id:        _activeDbRunId,
-              iteration:     null, // iteration context not available here; filled by server.js
-            });
-          }
         } catch (elErr) {
           console.error(`[db] insertErrorLog failed: ${elErr.message}`);
         }
@@ -359,89 +331,6 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   state.retestFailed = null;
 
   state.dryRun = !!opts.dryRun;
-
-  // ─── TEST RUN fast path ───────────────────────────────────────────────────
-  // When dryRun is set: skip chain ops, skip payments, emit a fake result per
-  // node with errorCode 'TEST_RUN_SKIP'. Still writes to audit.db (mode='dry').
-  if (opts.dryRun) {
-    broadcast('log', { msg: '🧪 TEST RUN mode — skipping chain ops and payments.' });
-
-    results.length = 0;
-    state.testedNodes = 0;
-    state.failedNodes = 0;
-    state.passed15 = 0;
-    state.passed10 = 0;
-    state.passedBaseline = 0;
-    state.nodeSpeedHistory = [];
-    state.baselineHistory = [];
-    saveResults();
-
-    // Resolve node list (or use preloaded snapshot)
-    let dryNodes;
-    if (Array.isArray(preloadedNodes) && preloadedNodes.length > 0) {
-      dryNodes = preloadedNodes;
-    } else {
-      broadcast('log', { msg: '🔍 Fetching node list for TEST RUN...' });
-      try {
-        dryNodes = await Promise.race([
-          getAllNodes(broadcast),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Node list fetch timeout (60s)')), 60_000)),
-        ]);
-      } catch (err) {
-        broadcast('log', { msg: `⚠ Node list fetch failed: ${err.message}` });
-        dryNodes = [];
-      }
-    }
-
-    const nodesToDry = MAX_NODES > 0 ? dryNodes.slice(0, MAX_NODES) : dryNodes;
-    state.totalNodes = nodesToDry.length;
-    broadcast('log', { msg: `TEST RUN: simulating ${nodesToDry.length} nodes...` });
-    broadcast('state', { state });
-
-    for (let i = 0; i < nodesToDry.length; i++) {
-      if (state.stopRequested) break;
-      const node = nodesToDry[i];
-      const addr = node.address || node.addr || '';
-      state.currentNode = addr;
-      broadcast('state', { state });
-
-      await new Promise(r => setTimeout(r, 5 + Math.random() * 15));
-
-      const result = {
-        timestamp:           new Date().toISOString(),
-        address:             addr,
-        type:                node.type || null,
-        moniker:             node.moniker || '',
-        country:             node.location?.country || node.country || '',
-        countryCode:         node.location?.country_code || node.countryCode || '',
-        city:                node.location?.city || node.city || '',
-        reportedDownloadMbps: 0,
-        actualMbps:          null,
-        skipped:             true,
-        error:               'TEST_RUN_SKIP',
-        errorCode:           'TEST_RUN_SKIP',
-        peers:               node.peers ?? null,
-        maxPeers:            node.qos?.max_peers ?? null,
-        sdk:                 state.activeSDK || 'js',
-        os:                  process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux',
-      };
-
-      state.failedNodes++;
-      upsertResult(result);
-      saveResults();
-      broadcast('result', { result, state });
-
-      const nodeNum = i + 1;
-      broadcast('log', { msg: `[${nodeNum}/${nodesToDry.length}] TEST_RUN_SKIP ${addr.slice(0, 20)}…` });
-    }
-
-    state.status = 'idle';
-    state.currentNode = null;
-    broadcast('state', { state });
-    broadcast('log', { msg: `🧪 TEST RUN complete (${nodesToDry.length} nodes simulated).` });
-    return;
-  }
-  // ─── End TEST RUN fast path ───────────────────────────────────────────────
 
   clearPoisonedSessions();
   clearPaidNodes();
@@ -630,7 +519,9 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
     if (!canProceed) { broadcast('log', { msg: '⏹ Aborting — VPN interference not cleared.' }); break; }
 
     let batchSessionMap;
-    {
+    if (state.dryRun) {
+      batchSessionMap = new Map();
+    } else {
       try {
         broadcast('log', { msg: `\n💳 Batch ${b + 1}/${batches.length} (${batch.length} nodes) — paying...` });
         batchSessionMap = await submitBatchPayment(client, account, DENOM, GIGS, batch, state, broadcast);
@@ -966,7 +857,6 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
 
   const finalCache = getCacheStats();
   state.status = 'done';
-  state.dryRun = false;
   state.completedAt = new Date().toISOString();
   state.currentNode = null;
   broadcast('state', { state });
@@ -977,7 +867,6 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
 
 // ─── Retest Previously-Failed Nodes ─────────────────────────────────────────
 export async function runRetestSkips(skipAddrs, state, broadcast) {
-  state.dryRun = false;
   state.status = 'running';
   state.startedAt = new Date().toISOString();
   state.errorMessage = null;
