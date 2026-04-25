@@ -764,14 +764,17 @@
       } catch {}
     }
 
-    document.addEventListener('DOMContentLoaded', () => {
+    document.addEventListener('DOMContentLoaded', async () => {
       document.body.classList.remove('boot-pending');
       const urlEl = document.getElementById('mobileGateUrl');
       if (urlEl) urlEl.textContent = location.host + '/live';
       applyThemeIcons();
       renderTable();
       renderLiveStats();
-      checkBroadcastState();
+      // Resolve broadcast state BEFORE loading the current batch — otherwise
+      // loadCurrentBatch races and may un-pause the overlay using the default
+      // (broadcastLive=false) before we know the real state.
+      await checkBroadcastState();
       loadCurrentBatch();
       loadHeaderStats();
       setInterval(checkBroadcastState, 30000);
@@ -1500,6 +1503,10 @@
     // Seed: fetch current batch so an already-running loop fills the table on first load.
     // If no current batch, fall back to the last finished run so visitors always see history.
     async function loadCurrentBatch() {
+      // Broadcast off: always show the paused overlay even if there's a live run.
+      // We still hydrate the table with the historical/last-run data underneath
+      // so the page isn't blank if the operator flips broadcast on later.
+      const broadcastOff = !_broadcastLive;
       try {
         let res = await fetch('/api/public/runs/current', { credentials: 'same-origin' });
         let isHistorical = false;
@@ -1509,7 +1516,7 @@
           if (!res.ok) { showPaused(true); return; }
         }
         const data = await res.json();
-        if (isHistorical) showPaused(true);
+        if (isHistorical || broadcastOff) showPaused(true);
         const nodes = (data && data.nodes) || (data && data.results) || [];
         if (data && (data.started_at || data.id)) {
           cbApplyBatchStart({
@@ -1526,8 +1533,10 @@
             _cb.failed = (data.failed != null) ? data.failed : Math.max(0, testedSoFar - _cb.passed);
           }
           cbRender();
-          // Server returned an active batch — never show paused on first load.
-          if (!isHistorical) showPaused(false);
+          // Server returned an active batch — only un-pause if broadcast is also on.
+          // When broadcast is off, the user must see the paused overlay even if a
+          // run is actively in flight on the operator side.
+          if (!isHistorical && !broadcastOff) showPaused(false);
         }
         if (Array.isArray(nodes)) {
           for (const n of nodes) {
