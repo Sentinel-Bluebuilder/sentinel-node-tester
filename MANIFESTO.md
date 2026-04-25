@@ -129,3 +129,31 @@ When you work on this project, you are maintaining the founder's most important 
 The Node Tester is the founder's instrument for holding an entire decentralized network accountable. It validates that the SDK works, the protocol works, and the nodes work — not in theory, but in production, with real money, against real infrastructure operated by real people around the world.
 
 There is no substitute for this tool. Respect it.
+
+---
+
+# Sentinel Node Tester — Manifesto
+
+## Purpose
+Stress-test every node on the Sentinel chain. Surface the truth — fast nodes, slow nodes, broken nodes — without spin.
+
+## Expanded purpose (2026-04-24): failure transparency
+Testing a node is only half the job. When a node fails, the operator and the public both need to know WHY — exact stage, exact error, exact log snippet, in a copy-paste-friendly format.
+
+Every failure produces:
+1. A durable row in `error_logs` (`core/db.js` v2 migration).
+2. A per-row `⎘` copy button on every results table (admin, public, live).
+3. A drawer "Copy Failure Logs" + "Download .txt" for deep investigation.
+4. A formatted text block with header `Sentinel Node Tester — Failure Log`, Node/Address/Stage/Error code/Captured/Message/Log snippet — ready to paste into a GitHub issue or operator chat.
+
+This is the product. Hide it and we are running a black-box leaderboard, which is the opposite of what a decentralized bandwidth network needs.
+
+## Non-goals
+- Centralized reputation scoring.
+- Hiding failure reasons to make the network "look" better.
+- Public-facing action buttons (spectators only — per CLAUDE.md).
+
+## Hard lines
+- RPC-first, LCD fallback only.
+- Never commit `.env` or mnemonic.
+- Never `taskkill /F /IM node.exe` (kills Claude Code).

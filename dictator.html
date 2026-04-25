@@ -5,32 +5,25 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Dictator Mode — Sentinel Network Audit</title>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/sentinel.css">
   <style>
     :root {
-      --bg-base: #060608;
-      --bg-elevated: #0c0c10;
-      --glass-bg: rgba(12, 12, 18, 0.9);
-      --glass-border: rgba(255, 255, 255, 0.06);
-      --text-primary: #e8e8ec;
-      --text-secondary: #6a6a78;
-      --text-dim: #3a3a48;
-      --accent-green: #00c853;
-      --accent-green-dim: rgba(0, 200, 83, 0.12);
-      --accent-red: #ff1744;
-      --accent-red-dim: rgba(255, 23, 68, 0.12);
-      --accent-amber: #ffa726;
-      --accent-amber-dim: rgba(255, 167, 38, 0.12);
-      --accent-blue: #448aff;
-      --mono: 'JetBrains Mono', monospace;
+      /* Page-local aliases — mapped onto Sentinel design tokens */
+      --bg-elevated: var(--bg-card-solid);
+      --glass-border: var(--border);
+      --text-primary: var(--text);
+      --text-secondary: var(--text-dim);
+      --accent-green: var(--green);
+      --accent-green-dim: var(--green-dim);
+      --accent-red: var(--red);
+      --accent-red-dim: var(--red-dim);
+      --accent-amber: var(--yellow);
+      --accent-amber-dim: var(--yellow-dim);
+      --accent-blue: var(--accent);
+      --mono: var(--font-mono);
     }
 
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-
     body {
-      background: var(--bg-base);
-      color: var(--text-primary);
-      font-family: 'Outfit', sans-serif;
       min-height: 100vh;
       overflow-x: hidden;
     }
@@ -544,7 +537,8 @@
   </style>
 </head>
 
-<body>
+<body class="boot-pending">
+<script>document.documentElement.dataset.theme = localStorage.getItem('theme') || 'dark'; document.addEventListener('DOMContentLoaded', () => document.body.classList.remove('boot-pending'));</script>
   <header>
     <div class="brand">
       <div class="brand-icon">&#9678;</div>
@@ -565,7 +559,7 @@
         <div class="refresh-dot"></div>
         <span id="refreshTimer">Live</span>
       </div>
-      <button id="exportCsvBtn" onclick="exportCSV()" style="font-size:12px;color:var(--text-secondary);background:transparent;border:1px solid var(--glass-border);border-radius:6px;padding:6px 14px;cursor:pointer;font-weight:500;font-family:'Outfit',sans-serif;transition:all 0.2s" onmouseover="this.style.color='var(--text-primary)';this.style.borderColor='rgba(255,255,255,0.15)';this.style.background='rgba(255,255,255,0.03)'" onmouseout="this.style.color='var(--text-secondary)';this.style.borderColor='var(--glass-border)';this.style.background='transparent'">Export CSV</button>
+      <button id="exportCsvBtn" onclick="exportCSV()" style="font-size:12px;color:var(--text-secondary);background:transparent;border:1px solid var(--glass-border);border-radius:6px;padding:6px 14px;cursor:pointer;font-weight:500;font-family:var(--font-display);transition:all 0.2s" onmouseover="this.style.color='var(--text-primary)';this.style.borderColor='rgba(255,255,255,0.15)';this.style.background='rgba(255,255,255,0.03)'" onmouseout="this.style.color='var(--text-secondary)';this.style.borderColor='var(--glass-border)';this.style.background='transparent'">Export CSV</button>
       <a href="/" class="back-link">&larr; Dashboard</a>
     </div>
   </header>

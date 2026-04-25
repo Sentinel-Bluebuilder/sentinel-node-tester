@@ -20,22 +20,108 @@
  */
 
 import { EventEmitter } from 'events';
-import { createState } from './pipeline.js';
+import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { createState, setActiveDbRunId, getActiveDbRunId } from './pipeline.js';
 import { sleep } from '../protocol/speedtest.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const LOOP_CONFIG_PATH = path.join(__dirname, '..', 'results', '.loop-config.json');
+
+/**
+ * Persist the current loop-config so a server restart can auto-resume.
+ * Writes `{ running, mode, planId, subscriptionId, subscriptionGranter, minDelayMs, updatedAt }`.
+ * Non-fatal on I/O failure — perpetual availability > durability here.
+ */
+function _persistLoopConfig() {
+  try {
+    const dir = path.dirname(LOOP_CONFIG_PATH);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const cfg = {
+      running: !!_ctrl.running,
+      mode: _ctrl.mode,
+      planId: _ctrl.planId,
+      subscriptionId: _ctrl.subscriptionId,
+      subscriptionGranter: _ctrl.subscriptionGranter,
+      minDelayMs: _ctrl.minDelayMs,
+      paused: !!_ctrl.paused,
+      pausedBatch: _ctrl.pausedBatch || null,
+      updatedAt: Date.now(),
+    };
+    writeFileSync(LOOP_CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf8');
+  } catch { /* non-fatal */ }
+}
+
+/**
+ * Read the persisted loop config if present. Returns null when no file exists
+ * or the file is unreadable/invalid.
+ *
+ * @returns {null | { running: boolean, mode: string|null, planId: string|null,
+ *   subscriptionId: string|null, subscriptionGranter: string|null,
+ *   minDelayMs: number, updatedAt: number }}
+ */
+export function readPersistedLoopConfig() {
+  try {
+    if (!existsSync(LOOP_CONFIG_PATH)) return null;
+    const raw = readFileSync(LOOP_CONFIG_PATH, 'utf8');
+    return JSON.parse(raw);
+  } catch { return null; }
+}
+
+/**
+ * If the last-known config had running:true, restart the loop on server boot.
+ * Returns `{ resumed: true, mode }` on success, `{ resumed: false, reason }` otherwise.
+ * Safe to call unconditionally — no-op when no config exists or running was false.
+ *
+ * @returns {Promise<{ resumed: boolean, mode?: string, reason?: string }>}
+ */
+export async function resumeFromPersisted() {
+  const cfg = readPersistedLoopConfig();
+  if (!cfg || !cfg.running) return { resumed: false, reason: 'no-config-or-stopped' };
+
+  // If the persisted state was paused, hydrate _ctrl and wait for an explicit resume() call.
+  if (cfg.paused && cfg.pausedBatch) {
+    _ctrl.paused = true;
+    _ctrl.pausedBatch = cfg.pausedBatch;
+    _ctrl.mode = cfg.mode || 'p2p';
+    _ctrl.planId = cfg.planId || null;
+    _ctrl.subscriptionId = cfg.subscriptionId || null;
+    _ctrl.subscriptionGranter = cfg.subscriptionGranter || null;
+    _ctrl.minDelayMs = typeof cfg.minDelayMs === 'number' ? cfg.minDelayMs : MIN_DELAY_MS;
+    // Do NOT auto-start — wait for an explicit resume() call.
+    return { resumed: false, reason: 'paused-awaiting-resume', paused: true };
+  }
+
+  try {
+    const r = await start({
+      mode: cfg.mode || 'p2p',
+      planId: cfg.planId || undefined,
+      subscriptionId: cfg.subscriptionId || undefined,
+      subscriptionGranter: cfg.subscriptionGranter || undefined,
+      minDelayMs: cfg.minDelayMs,
+    });
+    if (!r.ok) return { resumed: false, reason: r.error };
+    return { resumed: true, mode: cfg.mode || 'p2p' };
+  } catch (err) {
+    return { resumed: false, reason: err.message };
+  }
+}
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const MIN_DELAY_MS = 30_000;       // Hard floor — prevent chain spam
+const MIN_DELAY_MS = 0;            // No inter-batch delay — snapshot → test → next snapshot is immediate
 const SLEEP_TICK_MS = 1_000;       // Interruptible-sleep check interval
-const MIN_INSERT_INTERVAL_MS = 1_000; // Lowest rate at which a runs row may be inserted
 const SAFETY_MAX_ITERATIONS = 100_000; // Absolute loop-iteration ceiling
-
-let _lastInsertAt = 0;             // Row-insert rate fuse (module-scoped)
 
 // ─── Internal State ───────────────────────────────────────────────────────────
 
 const _emitter = new EventEmitter();
 _emitter.setMaxListeners(50);
+
+function _emitScoped(name, payload) {
+  _emitter.emit(name, { ...(payload || {}) });
+}
 
 const _ctrl = {
   running: false,
@@ -47,6 +133,17 @@ const _ctrl = {
   subscriptionGranter: null,
   startedAt: null,
   lastError: null,
+  // TEST RUN flag — when true the loop never touches the real audit pipeline.
+  // It walks the live node snapshot, fabricates per-address speeds via a
+  // deterministic hash of the bech32 address, persists rows like a real run,
+  // and emits the same batch:* events. Survives server restart via
+  // _persistLoopConfig → readPersistedLoopConfig.
+  dryRun: false,
+  dryRunLoop: false, // false = stop after one full snapshot pass
+  // ─── Pause / Resume ───────────────────────────────────────────────────────
+  paused: false,
+  pausedBatch: null, // { batchId, mode, dryRun, dryRunLoop, planId, subscriptionId, subscriptionGranter, frozenNodes, testedAddrs }
+  resumeIntent: null, // { batchId, frozenNodes, testedAddrs } — set by resume(), consumed by _runLoop
 };
 
 // Injected pipeline runner (overridable in tests)
@@ -112,17 +209,19 @@ let _batchId = 0;
 function _sanitizeBatchNodeResult(result, batchId) {
   return {
     batchId,
-    address:   result.address   || '',
-    moniker:   result.moniker   || null,
-    country:   result.country   || null,
-    city:      result.city      || null,
-    type:      result.type      || null,
-    actualMbps: result.actualMbps ?? null,
-    peers:     result.peers     ?? null,
-    maxPeers:  result.maxPeers  ?? null,
-    error:     result.error     ? String(result.error).slice(0, 200) : null,
-    errorCode: result.errorCode || null,
-    testedAt:  Date.now(),
+    address:     result.address   || '',
+    moniker:     result.moniker   || null,
+    country:     result.country   || null,
+    countryCode: result.countryCode || null,
+    city:        result.city      || null,
+    // Renamed from `type` to avoid clobbering the SSE dispatch type in broadcast().
+    serviceType: result.type      || null,
+    actualMbps:  result.actualMbps ?? null,
+    peers:       result.peers     ?? null,
+    maxPeers:    result.maxPeers  ?? null,
+    error:       result.error     ? String(result.error).slice(0, 200) : null,
+    errorCode:   result.errorCode || null,
+    testedAt:    Date.now(),
   };
 }
 
@@ -135,9 +234,10 @@ function _sanitizeBatchNodeResult(result, batchId) {
  *
  * @param {object} loopState - Pipeline state object (created fresh per iteration)
  * @param {number} batchId   - Current batch DB id
+ * @param {Array|null} frozenNodes - Pre-resolved node snapshot; p2p runAudit uses it instead of re-querying
  * @returns {Promise<{ passed: number, failed: number }>}
  */
-async function _runOnePass(loopState, batchId) {
+async function _runOnePass(loopState, batchId, frozenNodes = null) {
   // Build a broadcast intercept that captures 'result' events for batch tracking.
   // All other broadcast types (log, state) are silently dropped (noop) —
   // the continuous loop emits its own high-level events instead.
@@ -154,9 +254,9 @@ async function _runOnePass(loopState, batchId) {
     const raw = data?.result;
     if (!raw) return;
     const payload = _sanitizeBatchNodeResult(raw, batchId);
-    _emitter.emit('batch:node:result', payload);
+    _emitScoped('batch:node:result', payload);
     // Also emit old-compat event so existing public SSE listeners see per-node data
-    _emitter.emit('public-test:node:result', payload);
+    _emitScoped('public-test:node:result', payload);
     // Persist to batch_results (non-blocking, non-fatal)
     _getDb().then(db => {
       if (db) {
@@ -178,7 +278,12 @@ async function _runOnePass(loopState, batchId) {
           st,
           batchBroadcast,
         )
-      : (st) => pipeline.runAudit(false, st, batchBroadcast);
+      : (st) => {
+          const prev = getActiveDbRunId();
+          setActiveDbRunId(null);
+          return pipeline.runAudit(false, st, batchBroadcast, frozenNodes, { dryRun: !!_ctrl.dryRun })
+            .finally(() => setActiveDbRunId(prev));
+        };
   }
 
   await runner(loopState);
@@ -190,21 +295,19 @@ async function _runOnePass(loopState, batchId) {
 }
 
 /**
- * Resolve the number of nodes in the current snapshot (best-effort).
- * Used to populate `snapshot_size` on the batch record.
- * Returns 0 on any error rather than blocking loop startup.
+ * Resolve the node snapshot for this batch. Returns the frozen array plus its
+ * address list for persistence. Throws on failure so the caller can skip the
+ * iteration rather than testing an empty/partial set.
  *
- * @returns {Promise<number>}
+ * @returns {Promise<{ nodes: Array, addresses: string[] }>}
  */
-async function _resolveSnapshotSize() {
-  try {
-    const { getAllNodes, ensureLcd } = await import('../core/chain.js');
-    await ensureLcd();
-    const nodes = await getAllNodes(() => {});
-    return Array.isArray(nodes) ? nodes.length : 0;
-  } catch {
-    return 0;
-  }
+async function _resolveSnapshot() {
+  const { getAllNodes, ensureLcd } = await import('../core/chain.js');
+  await ensureLcd();
+  const nodes = await getAllNodes(() => {});
+  if (!Array.isArray(nodes)) throw new Error('getAllNodes returned non-array');
+  const addresses = nodes.map(n => n?.address).filter(Boolean);
+  return { nodes, addresses };
 }
 
 /**
@@ -215,6 +318,7 @@ async function _runLoop() {
   _ctrl.stopRequested = false;
   _ctrl.startedAt = Date.now();
   _ctrl.iteration = 0;
+  _persistLoopConfig();
 
   let stopReason = 'requested';
 
@@ -231,7 +335,7 @@ async function _runLoop() {
       _ctrl.iteration += 1;
       const iterStart = Date.now();
 
-      _emitter.emit('iteration:start', {
+      _emitScoped('iteration:start', {
         iteration: _ctrl.iteration,
         mode: _ctrl.mode,
       });
@@ -240,100 +344,180 @@ async function _runLoop() {
       const loopState = createState();
       loopState.stopRequested = false;
 
-      // ─── Rate fuse ───────────────────────────────────────────────────────
-      // Refuse to insert more than 1 runs row per second. Any caller that
-      // bypasses the delay floor (bad test, misconfigured override) is
-      // short-circuited here so the DB cannot explode.
-      const sinceLast = iterStart - _lastInsertAt;
-      if (_lastInsertAt !== 0 && sinceLast < MIN_INSERT_INTERVAL_MS) {
-        const backoff = MIN_INSERT_INTERVAL_MS - sinceLast;
-        console.warn(`[continuous] insert rate fuse engaged — sleeping ${backoff}ms`);
-        await sleep(backoff);
-        if (_ctrl.stopRequested) break;
-      }
-
-      // ─── Persistence: open a DB run record (legacy runs table) ──────────
-      // Skip DB writes when a mock runner is injected (test path). Tests that
-      // need DB persistence should use their own :memory: handle via useDb().
-      let dbRunId = null;
-      if (!_runnerFn) {
-        try {
-          const { insertRun } = await import('../core/db.js');
-          dbRunId = insertRun({
-            started_at:     iterStart,
-            mode:           _ctrl.mode,
-            plan_id:        _ctrl.planId || null,
-            wallet_address: null, // resolved by pipeline from MNEMONIC
-            notes:          `continuous-loop iteration ${_ctrl.iteration}`,
-            tester_sdk:     _ctrl.activeSDK || 'js',
-            tester_os:      process.platform,
-          });
-          _lastInsertAt = iterStart;
-        } catch (dbErr) {
-          // Non-fatal — audit continues without DB tracking
-          console.error(`[continuous] insertRun failed: ${dbErr.message}`);
-        }
-      }
-
-      // ─── Batch: open a batch record ──────────────────────────────────────
-      // Each iteration of the continuous loop is one "batch" — a complete
-      // sweep of the node snapshot. batchId is module-scoped so status() can
-      // expose it and API endpoints can query it.
       let currentBatchId = 0;
-      let snapshotSize = 0;
-      if (!_runnerFn) {
-        snapshotSize = await _resolveSnapshotSize();
-        try {
-          const { insertBatch } = await import('../core/db.js');
-          currentBatchId = insertBatch({
-            started_at:    iterStart,
-            snapshot_size: snapshotSize,
-            mode:          _ctrl.mode || 'p2p',
-          });
-          _batchId = currentBatchId;
-        } catch (dbErr) {
-          console.error(`[continuous] insertBatch failed: ${dbErr.message}`);
-        }
-      }
-
-      _emitter.emit('batch:start', {
-        batchId:      currentBatchId,
-        snapshotSize,
-        mode:         _ctrl.mode,
-        startedAt:    iterStart,
-        iteration:    _ctrl.iteration,
-      });
-
+      let frozenNodes = null;
       let passed = 0;
       let failed = 0;
       let iterErr = null;
 
-      try {
-        ({ passed, failed } = await _runOnePass(loopState, currentBatchId));
-      } catch (err) {
-        iterErr = err;
-        _ctrl.lastError = err.message || String(err);
-        _emitter.emit('loop:error', {
-          error: _ctrl.lastError,
-          iteration: _ctrl.iteration,
+      // ─── Resume Intent: reuse a paused batch instead of opening a new one ─
+      if (_ctrl.resumeIntent) {
+        const intent = _ctrl.resumeIntent;
+        _ctrl.resumeIntent = null;
+        currentBatchId = intent.batchId;
+        _batchId = currentBatchId;
+
+        // Build filtered node list — exclude already-tested addresses.
+        const testedSet = new Set(intent.testedAddrs || []);
+        const allNodes = intent.frozenNodes || [];
+        const viableNodes = allNodes.filter(n => n?.address && !testedSet.has(n.address));
+        frozenNodes = viableNodes;
+
+        _emitScoped('batch:start', {
+          batchId:      currentBatchId,
+          snapshotSize: viableNodes.length,
+          mode:         _ctrl.dryRun ? 'dry' : _ctrl.mode,
+          dryRun:       !!_ctrl.dryRun,
+          startedAt:    iterStart,
+          iteration:    _ctrl.iteration,
+          resumed:      true,
         });
-      }
+
+        try {
+          ({ passed, failed } = await _runOnePass(loopState, currentBatchId, frozenNodes));
+        } catch (err) {
+          iterErr = err;
+          _ctrl.lastError = err.message || String(err);
+          _emitScoped('loop:error', { error: _ctrl.lastError, iteration: _ctrl.iteration });
+        }
+
+        // ─── Post-pipeline pause detection (resume path) ─────────────────
+        if (_ctrl.paused) {
+          let testedAddrs = [];
+          if (!_runnerFn) {
+            try {
+              const { getDb } = await import('../core/db.js');
+              const scoped = getDb('real');
+              const rows = scoped.prepare('SELECT node_address FROM batch_results WHERE batch_id = ?').all(currentBatchId);
+              testedAddrs = rows.map(r => r.node_address).filter(Boolean);
+            } catch { /* non-fatal */ }
+          }
+          _ctrl.pausedBatch = {
+            batchId:              currentBatchId,
+            mode:                 _ctrl.mode,
+            dryRun:               _ctrl.dryRun,
+            dryRunLoop:           _ctrl.dryRunLoop,
+            planId:               _ctrl.planId,
+            subscriptionId:       _ctrl.subscriptionId,
+            subscriptionGranter:  _ctrl.subscriptionGranter,
+            frozenNodes:          intent.frozenNodes, // full original snapshot
+            testedAddrs,
+          };
+          _persistLoopConfig();
+          _emitScoped('iteration:paused', { batchId: currentBatchId, testedCount: testedAddrs.length });
+          stopReason = 'paused';
+          break;
+        }
+
+      } else {
+        // ─── Normal path: open new run + batch records ───────────────────
+
+        // ─── Batch: resolve frozen snapshot + open a batch record ──────
+        let snapshotSize = 0;
+        let snapshotAddresses = null;
+
+        if (!_runnerFn && (_ctrl.mode !== 'subscription' || _ctrl.dryRun)) {
+          try {
+            const snap = await _resolveSnapshot();
+            frozenNodes = snap.nodes;
+            snapshotAddresses = snap.addresses;
+            snapshotSize = snap.nodes.length;
+          } catch (snapErr) {
+            _ctrl.lastError = `snapshot resolve failed: ${snapErr.message}`;
+            _emitScoped('loop:error', { error: _ctrl.lastError, iteration: _ctrl.iteration });
+            if (_ctrl.stopRequested) { stopReason = 'requested'; break; }
+            const delayMs = _delayOverride !== null ? _delayOverride : _ctrl.minDelayMs;
+            const interrupted = await sleepInterruptible(Math.max(delayMs, 2000));
+            if (interrupted) { stopReason = 'requested'; break; }
+            continue;
+          }
+        }
+
+        if (!_runnerFn) {
+          try {
+            const { insertBatch } = await import('../core/db.js');
+            currentBatchId = insertBatch({
+              started_at:         iterStart,
+              snapshot_size:      snapshotSize,
+              mode:               _ctrl.dryRun ? 'dry' : (_ctrl.mode || 'p2p'),
+              snapshot_addresses: snapshotAddresses,
+            }, 'real');
+            _batchId = currentBatchId;
+          } catch (dbErr) {
+            console.error(`[continuous] insertBatch failed: ${dbErr.message}`);
+          }
+        }
+
+        // ─── Pre-pipeline: seed pausedBatch so status() returns batchId even
+        //     while the pipeline is still running and paused=true is already set.
+        //     testedAddrs starts empty; the post-pipeline block updates it.
+        _ctrl.pausedBatch = {
+          batchId:              currentBatchId,
+          mode:                 _ctrl.mode,
+          dryRun:               _ctrl.dryRun,
+          dryRunLoop:           _ctrl.dryRunLoop,
+          planId:               _ctrl.planId,
+          subscriptionId:       _ctrl.subscriptionId,
+          subscriptionGranter:  _ctrl.subscriptionGranter,
+          frozenNodes:          frozenNodes,
+          testedAddrs:          [],
+        };
+
+        _emitScoped('batch:start', {
+          batchId:      currentBatchId,
+          snapshotSize,
+          mode:         _ctrl.dryRun ? 'dry' : _ctrl.mode,
+          dryRun:       !!_ctrl.dryRun,
+          startedAt:    iterStart,
+          iteration:    _ctrl.iteration,
+        });
+
+        try {
+          ({ passed, failed } = await _runOnePass(loopState, currentBatchId, frozenNodes));
+        } catch (err) {
+          iterErr = err;
+          _ctrl.lastError = err.message || String(err);
+          _emitScoped('loop:error', { error: _ctrl.lastError, iteration: _ctrl.iteration });
+        }
+
+        // ─── Post-pipeline pause detection (normal path) ─────────────────
+        if (_ctrl.paused) {
+          let testedAddrs = [];
+          if (!_runnerFn) {
+            try {
+              const { getDb } = await import('../core/db.js');
+              const scoped = getDb('real');
+              const rows = scoped.prepare('SELECT node_address FROM batch_results WHERE batch_id = ?').all(currentBatchId);
+              testedAddrs = rows.map(r => r.node_address).filter(Boolean);
+            } catch { /* non-fatal */ }
+          }
+          // Update testedAddrs now that the pipeline has settled; batchId + rest
+          // were already seeded above so status() returned the correct batchId
+          // even while the pipeline was in-flight.
+          _ctrl.pausedBatch = {
+            batchId:              currentBatchId,
+            mode:                 _ctrl.mode,
+            dryRun:               _ctrl.dryRun,
+            dryRunLoop:           _ctrl.dryRunLoop,
+            planId:               _ctrl.planId,
+            subscriptionId:       _ctrl.subscriptionId,
+            subscriptionGranter:  _ctrl.subscriptionGranter,
+            frozenNodes:          frozenNodes,
+            testedAddrs,
+          };
+          _persistLoopConfig();
+          _emitScoped('iteration:paused', { batchId: currentBatchId, testedCount: testedAddrs.length });
+          stopReason = 'paused';
+          break;
+        }
+
+        // Not paused — clear the pre-pipeline seed so stale paused-state is
+        // never left on a successfully completed (non-paused) iteration.
+        _ctrl.pausedBatch = null;
+
+      } // end normal-path else
 
       const durationMs = Date.now() - iterStart;
-
-      // ─── Persistence: close the DB run record (legacy) ──────────────────
-      if (dbRunId != null) {
-        try {
-          const { updateRunOnFinish } = await import('../core/db.js');
-          updateRunOnFinish(dbRunId, {
-            finished_at: Date.now(),
-            node_count:  passed + failed,
-            pass_count:  passed,
-          });
-        } catch (dbErr) {
-          console.error(`[continuous] updateRunOnFinish failed: ${dbErr.message}`);
-        }
-      }
 
       // ─── Batch: close the batch record ──────────────────────────────────
       if (!_runnerFn && currentBatchId > 0) {
@@ -343,13 +527,13 @@ async function _runLoop() {
             finished_at: Date.now(),
             passed,
             failed,
-          });
+          }, 'real');
         } catch (dbErr) {
           console.error(`[continuous] updateBatchOnFinish failed: ${dbErr.message}`);
         }
       }
 
-      _emitter.emit('batch:end', {
+      _emitScoped('batch:end', {
         batchId:   currentBatchId,
         passed,
         failed,
@@ -357,7 +541,7 @@ async function _runLoop() {
         iteration: _ctrl.iteration,
       });
 
-      _emitter.emit('iteration:end', {
+      _emitScoped('iteration:end', {
         iteration: _ctrl.iteration,
         mode: _ctrl.mode,
         durationMs,
@@ -372,11 +556,17 @@ async function _runLoop() {
         break;
       }
 
+      // TEST RUN: if LOOP is disabled, exit after the first complete pass.
+      if (_ctrl.dryRun && !_ctrl.dryRunLoop) {
+        stopReason = 'dry-run-single-pass';
+        break;
+      }
+
       // Interruptible delay before the next iteration
       const delayMs = _delayOverride !== null ? _delayOverride : _ctrl.minDelayMs;
       const nextBatchAt = Date.now() + delayMs;
 
-      _emitter.emit('batch:gap', {
+      _emitScoped('batch:gap', {
         gapMs:       delayMs,
         nextBatchAt,
         iteration:   _ctrl.iteration,
@@ -391,14 +581,15 @@ async function _runLoop() {
   } catch (outerErr) {
     stopReason = 'error';
     _ctrl.lastError = outerErr.message || String(outerErr);
-    _emitter.emit('loop:error', {
+    _emitScoped('loop:error', {
       error: _ctrl.lastError,
       iteration: _ctrl.iteration,
     });
   } finally {
     _ctrl.running = false;
     _ctrl.stopRequested = false;
-    _emitter.emit('loop:stopped', {
+    _persistLoopConfig();
+    _emitScoped('loop:stopped', {
       iterations: _ctrl.iteration,
       reason: stopReason,
     });
@@ -423,8 +614,13 @@ export async function start(opts = {}) {
   if (_ctrl.running) {
     return { ok: false, error: 'Loop already running' };
   }
+  if (_ctrl.paused) {
+    return { ok: false, error: 'paused — call resume() instead' };
+  }
 
   const mode = opts.mode || 'p2p';
+  const dryRun = !!opts.dryRun;
+  const dryRunLoop = !!opts.dryRunLoop;
 
   // ─── Validate mode ────────────────────────────────────────────────────────
   if (mode !== 'p2p' && mode !== 'subscription') {
@@ -432,17 +628,21 @@ export async function start(opts = {}) {
   }
 
   // ─── Wallet safety check ──────────────────────────────────────────────────
-  // Read live from env so tests can override process.env.MNEMONIC.
-  const mnemonic = process.env.MNEMONIC;
-  if (!mnemonic || !mnemonic.trim()) {
-    return {
-      ok: false,
-      error: 'MNEMONIC not set in .env — cannot sign session TXs',
-    };
+  // Skipped for TEST RUN — the simulator never signs a TX or spends funds.
+  if (!dryRun) {
+    // Read live from env so tests can override process.env.MNEMONIC.
+    const mnemonic = process.env.MNEMONIC;
+    if (!mnemonic || !mnemonic.trim()) {
+      return {
+        ok: false,
+        error: 'MNEMONIC not set in .env — cannot sign session TXs',
+      };
+    }
   }
 
   // ─── Subscription-mode prerequisites ─────────────────────────────────────
-  if (mode === 'subscription') {
+  // Skipped entirely for TEST RUN — sim doesn't talk to chain in subscription.
+  if (mode === 'subscription' && !dryRun) {
     if (!opts.planId) {
       return { ok: false, error: 'planId required for subscription mode' };
     }
@@ -477,12 +677,16 @@ export async function start(opts = {}) {
   _ctrl.minDelayMs         = minDelayMs;
   _ctrl.lastError          = null;
   _ctrl.iteration          = 0;
+  _ctrl.dryRun             = dryRun;
+  _ctrl.dryRunLoop         = dryRunLoop;
 
-  _emitter.emit('loop:started', {
+  _emitScoped('loop:started', {
     mode,
     minDelayMs,
     iteration: 0,
     planId: _ctrl.planId,
+    dryRun,
+    dryRunLoop,
   });
 
   // Fire-and-forget — loop runs in background
@@ -502,7 +706,76 @@ export async function start(opts = {}) {
 export function stop() {
   if (!_ctrl.running) return { ok: true, alreadyStopped: true };
   _ctrl.stopRequested = true;
-  _emitter.emit('loop:stopping', {});
+  _emitScoped('loop:stopping', {});
+  return { ok: true };
+}
+
+/**
+ * Pause the in-progress batch mid-run. The pipeline's stopRequested flag is
+ * raised so the in-flight runAudit returns promptly. _runLoop then captures
+ * the already-tested addresses into _ctrl.pausedBatch before breaking out.
+ *
+ * @returns {{ ok: boolean, error?: string }}
+ */
+export function pause() {
+  if (!_ctrl.running) return { ok: false, error: 'not running' };
+  if (_ctrl.paused) return { ok: false, error: 'already paused' };
+  // Raise stopRequested so the in-flight pipeline returns.
+  _ctrl.stopRequested = true;
+  // Sentinel for _runLoop: break out without clearing state.
+  _ctrl.paused = true;
+  _emitScoped('loop:stopping', {});
+  return { ok: true };
+}
+
+/**
+ * Resume a paused batch. Reattaches _ctrl from pausedBatch, sets a
+ * resumeIntent so _runLoop skips re-opening a new batch, and re-kicks the loop.
+ *
+ * @returns {Promise<{ ok: boolean, error?: string }>}
+ */
+export async function resume() {
+  if (!_ctrl.paused || !_ctrl.pausedBatch) {
+    return { ok: false, error: 'no paused run' };
+  }
+
+  const pb = _ctrl.pausedBatch;
+
+  // Restore all loop flags from pausedBatch.
+  _ctrl.mode                = pb.mode;
+  _ctrl.dryRun              = pb.dryRun;
+  _ctrl.dryRunLoop          = pb.dryRunLoop;
+  _ctrl.planId              = pb.planId;
+  _ctrl.subscriptionId      = pb.subscriptionId;
+  _ctrl.subscriptionGranter = pb.subscriptionGranter;
+
+  // Build the resume intent so _runLoop reuses the existing batch row.
+  _ctrl.resumeIntent = {
+    batchId:      pb.batchId,
+    frozenNodes:  pb.frozenNodes,
+    testedAddrs:  pb.testedAddrs || [],
+  };
+
+  // Transition back to running state.
+  _ctrl.paused        = false;
+  _ctrl.pausedBatch   = null;
+  _ctrl.stopRequested = false;
+  _ctrl.running       = true;
+
+  _persistLoopConfig();
+
+  _emitScoped('iteration:resumed', {
+    batchId:   _ctrl.resumeIntent.batchId,
+    remaining: (_ctrl.resumeIntent.frozenNodes || []).filter(
+      n => !_ctrl.resumeIntent.testedAddrs.includes(n?.address),
+    ).length,
+  });
+
+  // Re-kick the loop in the background.
+  _runLoop().catch(err => {
+    console.error(`[continuous] _runLoop (resumed) unhandled: ${err.message}`);
+  });
+
   return { ok: true };
 }
 
@@ -518,19 +791,25 @@ export function stop() {
  *   startedAt: number|null,
  *   lastError: string|null,
  *   uptime: number|null,
+ *   paused: boolean,
+ *   pausedBatchId: number|null,
  * }}
  */
 export function status() {
   return {
-    running:      _ctrl.running,
-    iteration:    _ctrl.iteration,
-    mode:         _ctrl.mode,
-    planId:       _ctrl.planId,
-    minDelayMs:   _ctrl.minDelayMs,
-    startedAt:    _ctrl.startedAt,
-    lastError:    _ctrl.lastError,
-    uptime:       _ctrl.startedAt ? Date.now() - _ctrl.startedAt : null,
-    batchId:      _batchId,
+    running:        _ctrl.running,
+    iteration:      _ctrl.iteration,
+    mode:           _ctrl.mode,
+    planId:         _ctrl.planId,
+    minDelayMs:     _ctrl.minDelayMs,
+    startedAt:      _ctrl.startedAt,
+    lastError:      _ctrl.lastError,
+    uptime:         _ctrl.startedAt ? Date.now() - _ctrl.startedAt : null,
+    batchId:        _batchId,
+    dryRun:         !!_ctrl.dryRun,
+    dryRunLoop:     !!_ctrl.dryRunLoop,
+    paused:         !!_ctrl.paused,
+    pausedBatchId:  _ctrl.pausedBatch?.batchId || null,
   };
 }
 

@@ -15,7 +15,7 @@ import { countryToContinent } from './countries.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', 'data');
-const DB_PATH = path.join(DATA_DIR, 'audit.db');
+const DB_PATH_REAL = path.join(DATA_DIR, 'audit.db');
 
 // ─── Open / Create ───────────────────────────────────────────────────────────
 
@@ -23,23 +23,32 @@ if (!existsSync(DATA_DIR)) {
   mkdirSync(DATA_DIR, { recursive: true });
 }
 
-/** Shared singleton database handle. */
-let _db = null;
+const _handles = { real: null };
 
 /**
- * Returns the open Database instance, creating it on first call.
- * Runs all migrations automatically.
+ * Returns the open Database instance, creating it on first call. Runs all
+ * migrations automatically. Any scope param ('real', 'dry', or a path) is
+ * accepted for back-compat but always returns the single audit.db handle.
  *
- * @param {string} [dbPath] - Override DB path (e.g. ':memory:' for tests).
- *   When provided, the returned handle is NOT stored as the singleton.
- *   Use `useDb(handle)` to make it the active singleton for testing.
+ * @param {string} [which] - Ignored (back-compat). Pass ':memory:' for tests.
  * @returns {import('better-sqlite3').Database}
  */
-export function getDb(dbPath) {
-  if (_db && !dbPath) return _db;
-  const target = dbPath || DB_PATH;
+export function getDb(which) {
+  // Path-override path (test/back-compat): caller passed an actual file path
+  // or ':memory:'. Don't cache; behave like the old getDb(dbPath) signature.
+  if (typeof which === 'string' && (which === ':memory:' || which.includes('/') || which.includes('\\') || which.endsWith('.db'))) {
+    return _openHandle(which, /*cache*/ false);
+  }
 
-  // Tripwire: prod DB must never be opened from a test process.
+  if (_handles.real) return _handles.real;
+
+  const db = _openHandle(DB_PATH_REAL, /*cache*/ false);
+  _handles.real = db;
+  return db;
+}
+
+function _openHandle(target, cache) {
+  // Tripwire: prod DBs must never be opened from a test process.
   // A runaway continuous-loop test once wrote 55M rows to data/audit.db
   // before anyone noticed (WAL ballooned to 13GB). This hard-fails loudly
   // instead of silently accepting the writes.
@@ -63,13 +72,12 @@ export function getDb(dbPath) {
     if (row && row.c > 100_000) {
       db.close();
       throw new Error(
-        `FATAL: runs table has ${row.c.toLocaleString()} rows (limit: 100,000). ` +
+        `FATAL: runs table at ${target} has ${row.c.toLocaleString()} rows (limit: 100,000). ` +
         `This indicates a runaway writer. Run: node scripts/cleanup-runaway-runs.mjs --yes`
       );
     }
   }
 
-  if (!dbPath) _db = db;
   return db;
 }
 
@@ -85,14 +93,14 @@ function isTestEnv() {
 }
 
 /**
- * Override the active singleton handle.
- * Useful in tests: call `useDb(getDb(':memory:'))` to redirect all
- * exported helpers to an in-memory database.
+ * Override the active singleton handle. Useful in tests:
+ * `useDb(getDb(':memory:'))` redirects all helpers to an in-memory DB.
  *
  * @param {import('better-sqlite3').Database} db
+ * @param {string} [which] - Ignored (back-compat).
  */
-export function useDb(db) {
-  _db = db;
+export function useDb(db, which) {
+  _handles.real = db;
 }
 
 // ─── Migrations ──────────────────────────────────────────────────────────────
@@ -242,6 +250,27 @@ function runMigrations(db) {
     db.prepare('UPDATE schema_version SET version = 4').run();
     })();
   }
+
+  if (current < 5) {
+    db.transaction(() => {
+    const batchCols = db.prepare(`PRAGMA table_info(batches)`).all().map(c => c.name);
+    if (!batchCols.includes('snapshot_addresses')) {
+      db.exec(`ALTER TABLE batches ADD COLUMN snapshot_addresses TEXT`);
+    }
+    db.prepare('UPDATE schema_version SET version = 5').run();
+    })();
+  }
+
+  if (current < 6) {
+    db.transaction(() => {
+    // ── Migration v6: country_code on batch_results for flag rendering ───────
+    const brCols = db.prepare(`PRAGMA table_info(batch_results)`).all().map(c => c.name);
+    if (!brCols.includes('country_code')) {
+      db.exec(`ALTER TABLE batch_results ADD COLUMN country_code TEXT`);
+    }
+    db.prepare('UPDATE schema_version SET version = 6').run();
+    })();
+  }
 }
 
 // ─── Run Mutations ───────────────────────────────────────────────────────────
@@ -255,8 +284,8 @@ function runMigrations(db) {
 export function insertRun({
   started_at, mode, plan_id = null, wallet_address = null, notes = null,
   tester_sdk = null, tester_os = null,
-}) {
-  const db = getDb();
+}, which) {
+  const db = getDb(which);
   const stmt = db.prepare(`
     INSERT INTO runs (started_at, mode, plan_id, wallet_address, notes, tester_sdk, tester_os)
     VALUES (@started_at, @mode, @plan_id, @wallet_address, @notes, @tester_sdk, @tester_os)
@@ -274,8 +303,8 @@ export function insertRun({
  * @param {number} runId
  * @param {{ finished_at: number, node_count: number, pass_count: number }} opts
  */
-export function updateRunOnFinish(runId, { finished_at, node_count, pass_count }) {
-  const db = getDb();
+export function updateRunOnFinish(runId, { finished_at, node_count, pass_count }, which) {
+  const db = getDb(which);
   db.prepare(`
     UPDATE runs SET finished_at = @finished_at, node_count = @node_count, pass_count = @pass_count
     WHERE id = @id
@@ -354,8 +383,8 @@ const _insertResultSql = `
  * @param {object} result - Raw result object from pipeline
  * @returns {number} inserted row id
  */
-export function insertResult(run_id, result) {
-  const db = getDb();
+export function insertResult(run_id, result, which) {
+  const db = getDb(which);
   const row = mapResultToRow(run_id, result);
   const info = db.prepare(_insertResultSql).run(row);
   return info.lastInsertRowid;
@@ -366,9 +395,10 @@ export function insertResult(run_id, result) {
  *
  * @param {number} run_id
  * @param {object[]} results
+ * @param {'real'|'dry'} [which='real']
  */
-export function insertResultsBatch(run_id, results) {
-  const db = getDb();
+export function insertResultsBatch(run_id, results, which) {
+  const db = getDb(which);
   const stmt = db.prepare(_insertResultSql);
   const insert = db.transaction((rows) => {
     for (const r of rows) stmt.run(r);
@@ -384,8 +414,8 @@ export function insertResultsBatch(run_id, results) {
  * @param {number} id
  * @returns {object|undefined}
  */
-export function getRun(id) {
-  return getDb().prepare('SELECT * FROM runs WHERE id = @id').get({ id });
+export function getRun(id, which) {
+  return getDb(which).prepare('SELECT * FROM runs WHERE id = @id').get({ id });
 }
 
 /**
@@ -395,8 +425,8 @@ export function getRun(id) {
  * @param {string} mode
  * @returns {object|undefined}
  */
-export function findRunByKey(started_at, mode) {
-  return getDb().prepare(
+export function findRunByKey(started_at, mode, which) {
+  return getDb(which).prepare(
     'SELECT * FROM runs WHERE started_at = @started_at AND mode = @mode LIMIT 1',
   ).get({ started_at, mode });
 }
@@ -407,8 +437,8 @@ export function findRunByKey(started_at, mode) {
  * @param {{ limit?: number }} [opts]
  * @returns {object[]}
  */
-export function listRuns({ limit = 50 } = {}) {
-  return getDb().prepare(
+export function listRuns({ limit = 50 } = {}, which) {
+  return getDb(which).prepare(
     'SELECT * FROM runs ORDER BY started_at DESC LIMIT @limit',
   ).all({ limit });
 }
@@ -417,8 +447,8 @@ export function listRuns({ limit = 50 } = {}) {
  * Return the most recently started run that has not finished yet, augmented
  * with in-progress counts. Returns null when nothing is running.
  */
-export function getActiveRun() {
-  const db = getDb();
+export function getActiveRun(which) {
+  const db = getDb(which);
   const run = db.prepare(
     'SELECT * FROM runs WHERE finished_at IS NULL ORDER BY started_at DESC LIMIT 1',
   ).get();
@@ -442,8 +472,8 @@ export function getActiveRun() {
 /**
  * Return the most recently completed run, or null.
  */
-export function getLastCompletedRun() {
-  const run = getDb().prepare(
+export function getLastCompletedRun(which) {
+  const run = getDb(which).prepare(
     'SELECT * FROM runs WHERE finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1',
   ).get();
   return run || null;
@@ -453,8 +483,8 @@ export function getLastCompletedRun() {
  * Return bandwidth history rows for a node, newest first, filtered to rows
  * that actually measured a speed. Used by the node detail bandwidth chart.
  */
-export function getBandwidthHistory(nodeAddr, { limit = 100 } = {}) {
-  return getDb().prepare(`
+export function getBandwidthHistory(nodeAddr, { limit = 100 } = {}, which) {
+  return getDb(which).prepare(`
     SELECT tested_at, actual_mbps, advertised_mbps
     FROM results
     WHERE node_addr = @nodeAddr AND actual_mbps IS NOT NULL
@@ -472,8 +502,8 @@ export function getBandwidthHistory(nodeAddr, { limit = 100 } = {}) {
  * @param {{ q?: string, country?: string, limit?: number, offset?: number }} [opts]
  * @returns {object[]}
  */
-export function getLatestResultPerNode({ q = null, country = null, limit = 200, offset = 0 } = {}) {
-  const db = getDb();
+export function getLatestResultPerNode({ q = null, country = null, limit = 200, offset = 0 } = {}, which) {
+  const db = getDb(which);
 
   // Sub-query: latest tested_at per node_addr
   let where = '';
@@ -525,8 +555,8 @@ export function getLatestResultPerNode({ q = null, country = null, limit = 200, 
  * @param {{ limit?: number }} [opts]
  * @returns {object[]}
  */
-export function getNodeHistory(nodeAddr, { limit = 50 } = {}) {
-  return getDb().prepare(
+export function getNodeHistory(nodeAddr, { limit = 50 } = {}, which) {
+  return getDb(which).prepare(
     'SELECT * FROM results WHERE node_addr = @node_addr ORDER BY tested_at DESC LIMIT @limit',
   ).all({ node_addr: nodeAddr, limit });
 }
@@ -538,22 +568,23 @@ export function getNodeHistory(nodeAddr, { limit = 50 } = {}) {
  *
  * @returns {{ totalNodes: number, passingPct: number, medianMbps: number|null, lastRunAt: number|null }}
  */
-export function getNetworkStats() {
-  const db = getDb();
+export function getNetworkStats(which) {
+  const db = getDb(which);
 
-  // Latest result per node (MAX(id) tiebreaker for equal tested_at)
+  // Latest result per node (MAX(id) tiebreaker for equal tested_at).
+  // No mode filter needed: real and dry data live in separate DB files.
   const rows = db.prepare(`
     SELECT r.actual_mbps, r.session_ok
     FROM results r
     INNER JOIN (
-      SELECT node_addr, MAX(id) AS max_id
+      SELECT r2.node_addr, MAX(r2.id) AS max_id
       FROM results r2
       WHERE (r2.node_addr, r2.tested_at) IN (
-        SELECT node_addr, MAX(tested_at)
-        FROM results
-        GROUP BY node_addr
+        SELECT r3.node_addr, MAX(r3.tested_at)
+        FROM results r3
+        GROUP BY r3.node_addr
       )
-      GROUP BY node_addr
+      GROUP BY r2.node_addr
     ) latest ON r.id = latest.max_id
   `).all();
 
@@ -600,8 +631,8 @@ export function insertErrorLog({
   error_code = null,
   error_message = null,
   log_snippet = null,
-}) {
-  const db = getDb();
+}, which) {
+  const db = getDb(which);
   // Truncate log snippet to 8 KB
   const snippet = log_snippet ? log_snippet.slice(-8192) : null;
   const info = db.prepare(`
@@ -655,8 +686,8 @@ export function searchNodes({
   limit = 50,
   offset = 0,
   runId = null,
-} = {}) {
-  const db = getDb();
+} = {}, which) {
+  const db = getDb(which);
 
   // Build WHERE clauses for the outer filter
   const conditions = [];
@@ -834,8 +865,8 @@ export function searchNodes({
  * @param {{ historyLimit?: number }} [opts]
  * @returns {{ node: object|null, history: object[], errors: object[] }}
  */
-export function getNodeDetail(addr, { historyLimit = 100 } = {}) {
-  const db = getDb();
+export function getNodeDetail(addr, { historyLimit = 100 } = {}, which) {
+  const db = getDb(which);
 
   // Latest result row used as the "node" record
   const node = db.prepare(`
@@ -872,8 +903,8 @@ export function getNodeDetail(addr, { historyLimit = 100 } = {}) {
  * @param {{ limit?: number, stage?: string }} [opts]
  * @returns {object[]}
  */
-export function getNodeErrors(addr, { limit = 50, stage = null } = {}) {
-  const db = getDb();
+export function getNodeErrors(addr, { limit = 50, stage = null } = {}, which) {
+  const db = getDb(which);
   const params = { addr, limit };
   let stageClause = '';
   if (stage) {
@@ -895,8 +926,8 @@ export function getNodeErrors(addr, { limit = 50, stage = null } = {}) {
  *
  * @returns {Array<{ country: string, node_count: number }>}
  */
-export function getCountryList() {
-  return getDb().prepare(`
+export function getCountryList(which) {
+  return getDb(which).prepare(`
     WITH latest AS (
       SELECT node_addr, country
       FROM results
@@ -926,8 +957,8 @@ export function getCountryList() {
  * @param {number}  [opts.offset=0]
  * @returns {{ total: number, items: object[] }}
  */
-export function searchErrors({ q = null, stage = null, limit = 100, offset = 0 } = {}) {
-  const db = getDb();
+export function searchErrors({ q = null, stage = null, limit = 100, offset = 0 } = {}, which) {
+  const db = getDb(which);
   const cappedLimit = Math.min(Math.max(1, parseInt(limit, 10) || 100), 500);
   const safeOffset  = Math.max(0, parseInt(offset, 10) || 0);
 
@@ -990,15 +1021,18 @@ export function searchErrors({ q = null, stage = null, limit = 100, offset = 0 }
 /**
  * Insert a new batch record. Returns the inserted batch id.
  *
- * @param {{ started_at: number, snapshot_size: number, mode?: string }} opts
+ * @param {{ started_at: number, snapshot_size: number, mode?: string, snapshot_addresses?: string[] }} opts
  * @returns {number} batch id
  */
-export function insertBatch({ started_at, snapshot_size, mode = 'p2p' }) {
-  const db = getDb();
+export function insertBatch({ started_at, snapshot_size, mode = 'p2p', snapshot_addresses = null }, which) {
+  const db = getDb(which);
+  const addrsJson = Array.isArray(snapshot_addresses) && snapshot_addresses.length > 0
+    ? JSON.stringify(snapshot_addresses)
+    : null;
   const info = db.prepare(`
-    INSERT INTO batches (started_at, snapshot_size, passed, failed, mode)
-    VALUES (@started_at, @snapshot_size, 0, 0, @mode)
-  `).run({ started_at, snapshot_size, mode });
+    INSERT INTO batches (started_at, snapshot_size, passed, failed, mode, snapshot_addresses)
+    VALUES (@started_at, @snapshot_size, 0, 0, @mode, @snapshot_addresses)
+  `).run({ started_at, snapshot_size, mode, snapshot_addresses: addrsJson });
   return info.lastInsertRowid;
 }
 
@@ -1008,8 +1042,8 @@ export function insertBatch({ started_at, snapshot_size, mode = 'p2p' }) {
  * @param {number} batchId
  * @param {{ finished_at: number, passed: number, failed: number }} opts
  */
-export function updateBatchOnFinish(batchId, { finished_at, passed, failed }) {
-  getDb().prepare(`
+export function updateBatchOnFinish(batchId, { finished_at, passed, failed }, which) {
+  getDb(which).prepare(`
     UPDATE batches SET finished_at = @finished_at, passed = @passed, failed = @failed
     WHERE id = @id
   `).run({ id: batchId, finished_at, passed, failed });
@@ -1022,21 +1056,22 @@ export function updateBatchOnFinish(batchId, { finished_at, passed, failed }) {
  * @param {object} r - Sanitized result object
  * @returns {number} inserted row id
  */
-export function insertBatchResult(batch_id, r) {
-  const db = getDb();
+export function insertBatchResult(batch_id, r, which) {
+  const db = getDb(which);
   const info = db.prepare(`
     INSERT INTO batch_results
-      (batch_id, node_address, type, moniker, country, city,
+      (batch_id, node_address, type, moniker, country, country_code, city,
        actual_mbps, peers, max_peers, error, error_code, tested_at)
     VALUES
-      (@batch_id, @node_address, @type, @moniker, @country, @city,
+      (@batch_id, @node_address, @type, @moniker, @country, @country_code, @city,
        @actual_mbps, @peers, @max_peers, @error, @error_code, @tested_at)
   `).run({
     batch_id,
     node_address: r.address || r.node_address || '',
-    type:         r.type || null,
+    type:         r.type || r.serviceType || null,
     moniker:      r.moniker || null,
     country:      r.country || null,
+    country_code: r.countryCode || r.country_code || null,
     city:         r.city || null,
     actual_mbps:  r.actualMbps ?? r.actual_mbps ?? null,
     peers:        r.peers ?? null,
@@ -1054,8 +1089,8 @@ export function insertBatchResult(batch_id, r) {
  * @param {{ limit?: number }} [opts]
  * @returns {object[]}
  */
-export function listBatches({ limit = 50 } = {}) {
-  return getDb().prepare(`
+export function listBatches({ limit = 50 } = {}, which) {
+  return getDb(which).prepare(`
     SELECT id, started_at, finished_at, snapshot_size, passed, failed, mode
     FROM batches
     ORDER BY started_at DESC
@@ -1070,12 +1105,12 @@ export function listBatches({ limit = 50 } = {}) {
  * @param {{ limit?: number, offset?: number }} [opts]
  * @returns {{ batch: object|null, results: object[] }}
  */
-export function getBatchResults(batchId, { limit = 500, offset = 0 } = {}) {
-  const db = getDb();
+export function getBatchResults(batchId, { limit = 500, offset = 0 } = {}, which) {
+  const db = getDb(which);
   const batch = db.prepare('SELECT * FROM batches WHERE id = @id').get({ id: batchId });
   if (!batch) return { batch: null, results: [] };
   const results = db.prepare(`
-    SELECT node_address, type, moniker, country, city,
+    SELECT node_address, type, moniker, country, country_code, city,
            actual_mbps, peers, max_peers, error, error_code, tested_at
     FROM batch_results
     WHERE batch_id = @batch_id
@@ -1085,14 +1120,81 @@ export function getBatchResults(batchId, { limit = 500, offset = 0 } = {}) {
   return { batch, results };
 }
 
+/**
+ * Return the currently-running batch (finished_at IS NULL) plus every node
+ * result persisted for it so far. Drives `/api/public/runs/current` so a
+ * /live page refresh never goes blank mid-batch.
+ *
+ * @returns {{ batch: object, nodes: object[] }|null}
+ */
+export function getActiveBatch(which) {
+  const db = getDb(which);
+  const batch = db.prepare(`
+    SELECT id, started_at, finished_at, snapshot_size, passed, failed, mode
+    FROM batches
+    WHERE finished_at IS NULL
+    ORDER BY started_at DESC
+    LIMIT 1
+  `).get();
+  if (!batch) return null;
+  const nodes = db.prepare(`
+    SELECT node_address AS address,
+           moniker, country, country_code AS countryCode, city, type,
+           actual_mbps AS actualMbps, peers, max_peers AS maxPeers,
+           error, error_code AS errorCode, tested_at AS testedAt
+    FROM batch_results
+    WHERE batch_id = @batch_id
+    ORDER BY tested_at ASC
+  `).all({ batch_id: batch.id });
+  // Derive live pass/fail counts from persisted rows. `batches.passed/failed`
+  // are only written on finish — without this the mid-batch /live refresh
+  // would always show 0/0.
+  let passed = 0, failed = 0;
+  for (const n of nodes) {
+    if (n.actualMbps != null && n.actualMbps > 0 && !n.error) passed++;
+    else failed++;
+  }
+  batch.passed = passed;
+  batch.failed = failed;
+  return { batch, nodes };
+}
+
+/**
+ * Return the most-recent finished batch plus its node results. Mirrors
+ * getActiveBatch() shape so /live's refresh-fallback path can hydrate from
+ * the last completed sweep when no batch is currently running.
+ *
+ * @returns {{ batch: object, nodes: object[] }|null}
+ */
+export function getLastBatch(which) {
+  const db = getDb(which);
+  const batch = db.prepare(`
+    SELECT id, started_at, finished_at, snapshot_size, passed, failed, mode
+    FROM batches
+    WHERE finished_at IS NOT NULL
+    ORDER BY finished_at DESC
+    LIMIT 1
+  `).get();
+  if (!batch) return null;
+  const nodes = db.prepare(`
+    SELECT node_address AS address,
+           moniker, country, country_code AS countryCode, city, type,
+           actual_mbps AS actualMbps, peers, max_peers AS maxPeers,
+           error, error_code AS errorCode, tested_at AS testedAt
+    FROM batch_results
+    WHERE batch_id = @batch_id
+    ORDER BY tested_at ASC
+  `).all({ batch_id: batch.id });
+  return { batch, nodes };
+}
+
 // ─── Close ────────────────────────────────────────────────────────────────────
 
 /**
- * Close the singleton DB handle (useful in tests / graceful shutdown).
+ * Close the singleton DB handle.
+ *
+ * @param {string} [which] - Ignored (back-compat).
  */
-export function closeDb() {
-  if (_db) {
-    _db.close();
-    _db = null;
-  }
+export function closeDb(which) {
+  if (_handles.real) { _handles.real.close(); _handles.real = null; }
 }
