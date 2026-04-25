@@ -172,6 +172,42 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
   const nodePriceUdvpn = Math.round(parseFloat(priceEntry.quote_value) || 0);
   const thisCostUdvpn = nodePriceUdvpn * gigabytes;
 
+  if (state.dryRun) {
+    if (broadcast) broadcast('log', { msg: '  🧪 TEST RUN — skipping payment + handshake + speedtest.' });
+    const _reportedDownloadMbps = status.bandwidth.download * 8 / 1_000_000;
+    return {
+      timestamp: new Date().toISOString(),
+      address: node.address,
+      type: typeName,
+      moniker: status.moniker || '',
+      country: status.location.country || '',
+      countryCode: status.location.country_code || '',
+      city: status.location.city || '',
+      reportedDownloadMbps: parseFloat(_reportedDownloadMbps.toFixed(2)),
+      actualMbps: null,
+      skipped: true,
+      error: 'TEST_RUN_SKIP',
+      errorCode: 'TEST_RUN_SKIP',
+      baselineAtTest: baselineMbps,
+      ispBottleneck: false,
+      baselineViable: baselineMbps != null && baselineMbps >= 30,
+      dynamicThreshold: null,
+      slaApplicable: false,
+      pass15mbps: false,
+      pass10mbps: false,
+      passBaseline: false,
+      peers: status.peers,
+      maxPeers: status.qos?.max_peers,
+      gigabytePrices: node.gigabyte_prices || [],
+      googleAccessible: null,
+      googleLatencyMs: null,
+      sdk: state.activeSDK || 'js',
+      os: process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux',
+      inPlan: (node.planIds || []).length > 0,
+      planIds: node.planIds || [],
+    };
+  }
+
   // ─── Session resolution ───────────────────────────────────────────────────
   const cached = getCredential(node.address);
   let useCached = false;

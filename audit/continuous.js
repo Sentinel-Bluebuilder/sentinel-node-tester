@@ -133,16 +133,9 @@ const _ctrl = {
   subscriptionGranter: null,
   startedAt: null,
   lastError: null,
-  // TEST RUN flag — when true the loop never touches the real audit pipeline.
-  // It walks the live node snapshot, fabricates per-address speeds via a
-  // deterministic hash of the bech32 address, persists rows like a real run,
-  // and emits the same batch:* events. Survives server restart via
-  // _persistLoopConfig → readPersistedLoopConfig.
-  dryRun: false,
-  dryRunLoop: false, // false = stop after one full snapshot pass
   // ─── Pause / Resume ───────────────────────────────────────────────────────
   paused: false,
-  pausedBatch: null, // { batchId, mode, dryRun, dryRunLoop, planId, subscriptionId, subscriptionGranter, frozenNodes, testedAddrs }
+  pausedBatch: null, // { batchId, mode, planId, subscriptionId, subscriptionGranter, frozenNodes, testedAddrs }
   resumeIntent: null, // { batchId, frozenNodes, testedAddrs } — set by resume(), consumed by _runLoop
 };
 
@@ -255,8 +248,6 @@ async function _runOnePass(loopState, batchId, frozenNodes = null) {
     if (!raw) return;
     const payload = _sanitizeBatchNodeResult(raw, batchId);
     _emitScoped('batch:node:result', payload);
-    // Also emit old-compat event so existing public SSE listeners see per-node data
-    _emitScoped('public-test:node:result', payload);
     // Persist to batch_results (non-blocking, non-fatal)
     _getDb().then(db => {
       if (db) {
@@ -281,7 +272,7 @@ async function _runOnePass(loopState, batchId, frozenNodes = null) {
       : (st) => {
           const prev = getActiveDbRunId();
           setActiveDbRunId(null);
-          return pipeline.runAudit(false, st, batchBroadcast, frozenNodes, { dryRun: !!_ctrl.dryRun })
+          return pipeline.runAudit(false, st, batchBroadcast, frozenNodes)
             .finally(() => setActiveDbRunId(prev));
         };
   }
@@ -366,8 +357,7 @@ async function _runLoop() {
         _emitScoped('batch:start', {
           batchId:      currentBatchId,
           snapshotSize: viableNodes.length,
-          mode:         _ctrl.dryRun ? 'dry' : _ctrl.mode,
-          dryRun:       !!_ctrl.dryRun,
+          mode:         _ctrl.mode,
           startedAt:    iterStart,
           iteration:    _ctrl.iteration,
           resumed:      true,
@@ -395,8 +385,6 @@ async function _runLoop() {
           _ctrl.pausedBatch = {
             batchId:              currentBatchId,
             mode:                 _ctrl.mode,
-            dryRun:               _ctrl.dryRun,
-            dryRunLoop:           _ctrl.dryRunLoop,
             planId:               _ctrl.planId,
             subscriptionId:       _ctrl.subscriptionId,
             subscriptionGranter:  _ctrl.subscriptionGranter,
@@ -416,7 +404,7 @@ async function _runLoop() {
         let snapshotSize = 0;
         let snapshotAddresses = null;
 
-        if (!_runnerFn && (_ctrl.mode !== 'subscription' || _ctrl.dryRun)) {
+        if (!_runnerFn && _ctrl.mode !== 'subscription') {
           try {
             const snap = await _resolveSnapshot();
             frozenNodes = snap.nodes;
@@ -439,7 +427,7 @@ async function _runLoop() {
             currentBatchId = insertBatch({
               started_at:         iterStart,
               snapshot_size:      snapshotSize,
-              mode:               _ctrl.dryRun ? 'dry' : (_ctrl.mode || 'p2p'),
+              mode:               _ctrl.mode || 'p2p',
               snapshot_addresses: snapshotAddresses,
             }, 'real');
             _batchId = currentBatchId;
@@ -454,8 +442,6 @@ async function _runLoop() {
         _ctrl.pausedBatch = {
           batchId:              currentBatchId,
           mode:                 _ctrl.mode,
-          dryRun:               _ctrl.dryRun,
-          dryRunLoop:           _ctrl.dryRunLoop,
           planId:               _ctrl.planId,
           subscriptionId:       _ctrl.subscriptionId,
           subscriptionGranter:  _ctrl.subscriptionGranter,
@@ -466,8 +452,7 @@ async function _runLoop() {
         _emitScoped('batch:start', {
           batchId:      currentBatchId,
           snapshotSize,
-          mode:         _ctrl.dryRun ? 'dry' : _ctrl.mode,
-          dryRun:       !!_ctrl.dryRun,
+          mode:         _ctrl.mode,
           startedAt:    iterStart,
           iteration:    _ctrl.iteration,
         });
@@ -497,8 +482,6 @@ async function _runLoop() {
           _ctrl.pausedBatch = {
             batchId:              currentBatchId,
             mode:                 _ctrl.mode,
-            dryRun:               _ctrl.dryRun,
-            dryRunLoop:           _ctrl.dryRunLoop,
             planId:               _ctrl.planId,
             subscriptionId:       _ctrl.subscriptionId,
             subscriptionGranter:  _ctrl.subscriptionGranter,
@@ -553,12 +536,6 @@ async function _runLoop() {
       // Honor stop request that arrived during the pass
       if (_ctrl.stopRequested) {
         stopReason = 'requested';
-        break;
-      }
-
-      // TEST RUN: if LOOP is disabled, exit after the first complete pass.
-      if (_ctrl.dryRun && !_ctrl.dryRunLoop) {
-        stopReason = 'dry-run-single-pass';
         break;
       }
 
@@ -619,8 +596,6 @@ export async function start(opts = {}) {
   }
 
   const mode = opts.mode || 'p2p';
-  const dryRun = !!opts.dryRun;
-  const dryRunLoop = !!opts.dryRunLoop;
 
   // ─── Validate mode ────────────────────────────────────────────────────────
   if (mode !== 'p2p' && mode !== 'subscription') {
@@ -628,21 +603,17 @@ export async function start(opts = {}) {
   }
 
   // ─── Wallet safety check ──────────────────────────────────────────────────
-  // Skipped for TEST RUN — the simulator never signs a TX or spends funds.
-  if (!dryRun) {
-    // Read live from env so tests can override process.env.MNEMONIC.
-    const mnemonic = process.env.MNEMONIC;
-    if (!mnemonic || !mnemonic.trim()) {
-      return {
-        ok: false,
-        error: 'MNEMONIC not set in .env — cannot sign session TXs',
-      };
-    }
+  // Read live from env so tests can override process.env.MNEMONIC.
+  const mnemonic = process.env.MNEMONIC;
+  if (!mnemonic || !mnemonic.trim()) {
+    return {
+      ok: false,
+      error: 'MNEMONIC not set in .env — cannot sign session TXs',
+    };
   }
 
   // ─── Subscription-mode prerequisites ─────────────────────────────────────
-  // Skipped entirely for TEST RUN — sim doesn't talk to chain in subscription.
-  if (mode === 'subscription' && !dryRun) {
+  if (mode === 'subscription') {
     if (!opts.planId) {
       return { ok: false, error: 'planId required for subscription mode' };
     }
@@ -677,16 +648,12 @@ export async function start(opts = {}) {
   _ctrl.minDelayMs         = minDelayMs;
   _ctrl.lastError          = null;
   _ctrl.iteration          = 0;
-  _ctrl.dryRun             = dryRun;
-  _ctrl.dryRunLoop         = dryRunLoop;
 
   _emitScoped('loop:started', {
     mode,
     minDelayMs,
     iteration: 0,
     planId: _ctrl.planId,
-    dryRun,
-    dryRunLoop,
   });
 
   // Fire-and-forget — loop runs in background
@@ -743,8 +710,6 @@ export async function resume() {
 
   // Restore all loop flags from pausedBatch.
   _ctrl.mode                = pb.mode;
-  _ctrl.dryRun              = pb.dryRun;
-  _ctrl.dryRunLoop          = pb.dryRunLoop;
   _ctrl.planId              = pb.planId;
   _ctrl.subscriptionId      = pb.subscriptionId;
   _ctrl.subscriptionGranter = pb.subscriptionGranter;
@@ -806,8 +771,6 @@ export function status() {
     lastError:      _ctrl.lastError,
     uptime:         _ctrl.startedAt ? Date.now() - _ctrl.startedAt : null,
     batchId:        _batchId,
-    dryRun:         !!_ctrl.dryRun,
-    dryRunLoop:     !!_ctrl.dryRunLoop,
     paused:         !!_ctrl.paused,
     pausedBatchId:  _ctrl.pausedBatch?.batchId || null,
   };

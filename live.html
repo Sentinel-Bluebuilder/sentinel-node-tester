@@ -924,7 +924,7 @@
       const proto = (hasKnownType
         ? `<span class="badge ${isWg ? 'badge-wg' : 'badge-v2'}">${isWg ? 'WG' : 'V2'}</span>`
         : '<span style="color:var(--text-muted);font-size:11px">—</span>'
-      ) + (r.dryRun ? '<span class="badge badge-dry">DRY</span>' : '');
+      ) + (r.errorCode === 'TEST_RUN_SKIP' ? '<span class="badge badge-dry">DRY</span>' : '');
       const addrFull = r.address || '';
       const monikerText = r.moniker || r.nodeName || '(unknown)';
       const addr = addrFull
@@ -1008,7 +1008,7 @@
 
     // Structured log entry. Takes opts:
     //   { tag, cat, status ('pass'|'fail'|'warn'|'ok'|'sys'),
-    //     transport, cc, moniker, addr, mbps, errCode, msg, dryRun }
+    //     transport, cc, moniker, addr, mbps, errCode, msg }
     // OR a plain string (back-compat) + optional klass.
     function appendLog(opts, klass) {
       const body = document.getElementById('logBody');
@@ -1050,7 +1050,7 @@
         'tag-sys';
       parts.push(`<span class="log-tag ${tagClass}">${escHtml(tagText)}</span>`);
 
-      if (o.dryRun) parts.push('<span class="log-tag tag-dry">DRY</span>');
+      if (o.errCode === 'TEST_RUN_SKIP') parts.push('<span class="log-tag tag-dry">DRY</span>');
 
       if (o.transport) {
         const t = o.transport.toLowerCase().includes('wire') ? 'WG' : o.transport.toLowerCase().includes('v2') ? 'V2' : o.transport.toUpperCase();
@@ -1229,7 +1229,7 @@
 
       // "Connected" = node returned mbps>0 (handshake + speed both succeeded).
       const connected = arr.filter(r => r.actualMbps != null && r.actualMbps > 0).length;
-      // "Failed" = explicit error OR mbps==null (excluding skipped dry-run probes).
+      // "Failed" = explicit error OR mbps==null (excluding TEST RUN skips).
       const failed    = arr.filter(r => !r.skipped && (r.error || r.errorCode || r.actualMbps == null)).length;
       // Pass 10 Mbps SLA: real connections at or above 10.
       const p10       = arr.filter(r => r.actualMbps != null && Number(r.actualMbps) >= 10).length;
@@ -1299,44 +1299,34 @@
 
     function handleEvent(d) {
       switch (d.type) {
-        case 'public-test:loop:started':
+        case 'loop:started':
           setStatus('running');
           showPaused(false);
           appendLog({ tag: 'SYS', cat: 'sys', status: 'ok', msg: 'Testing started' });
           break;
-        case 'public-test:loop:stopping':
+        case 'loop:stopping':
           setStatus('stopping');
           appendLog({ tag: 'SYS', cat: 'sys', status: 'warn', msg: 'Stopping…' });
           break;
-        case 'public-test:loop:stopped':
+        case 'loop:stopped':
           setStatus('idle');
           showPaused(true);
           appendLog({ tag: 'SYS', cat: 'sys', msg: 'Testing stopped' });
           break;
-        case 'public-test:loop:error':
+        case 'loop:error':
           setStatus('error');
           showPaused(true);
           appendLog({ tag: 'SYS', cat: 'fail', status: 'fail', errCode: 'TESTER_ERROR', msg: d.error || 'unknown error' });
           break;
-        case 'public-test:iteration:start':
+        case 'iteration:start':
           appendLog({ tag: 'ROUND', cat: 'sys', msg: `Round ${d.iteration || '?'} starting` });
           break;
-        case 'public-test:iteration:end': {
+        case 'iteration:end': {
           const passed = d.passed != null ? d.passed : 0;
           const failed = d.failed != null ? d.failed : 0;
           const total  = passed + failed;
           const rate   = total > 0 ? Math.round(passed / total * 100) + '%' : '—';
           appendLog({ tag: 'ROUND', cat: 'sys', status: 'ok', msg: `Round ${d.iteration || '?'} done — ${passed} online, ${failed} down (${rate} online)` });
-          break;
-        }
-        case 'public-test:error': {
-          appendLog({
-            tag: 'FAIL', cat: 'fail', status: 'fail',
-            moniker: d.moniker || '',
-            addr: d.node_addr || d.address || '',
-            errCode: d.errorCode || (d.error || 'ERROR').slice(0, 24),
-            msg: d.error && d.error.length > 24 ? d.error : '',
-          });
           break;
         }
         case 'batch:start':
@@ -1345,7 +1335,6 @@
           cbApplyBatchStart(d);
           appendLog({
             tag: 'ROUND', cat: 'sys', status: 'ok',
-            dryRun: d.dryRun === true,
             msg: `Round ${d.iteration != null ? d.iteration : (d.batchId || '?')} — testing ${d.snapshotSize || d.snapshot_size || d.total || '?'} nodes`,
           });
           break;
@@ -1356,8 +1345,8 @@
           const mbps    = d.actual_mbps ?? d.actualMbps ?? null;
           const err     = d.error || d.errorCode || null;
           const tested  = d.tested_at || d.testedAt || new Date().toISOString();
-          const isDry   = d.dryRun === true;
-          const skipped = d.skipped || err === 'DRY_RUN_SKIP';
+          const isDry   = err === 'TEST_RUN_SKIP';
+          const skipped = d.skipped || err === 'TEST_RUN_SKIP';
           const cc      = d.country_code || d.countryCode || '';
           const svc     = d.serviceType ?? d.service_type;
           let typeStr   = null;
@@ -1376,7 +1365,6 @@
             cc,
             moniker: moniker || '',
             addr: addr || '',
-            dryRun: isDry,
           };
 
           if (skipped) {
@@ -1409,17 +1397,12 @@
             errorCode:  err || null,
             skipped,
             inPlan:     d.inPlan === true,
-            dryRun:     isDry,
+            dryRun:     err === 'TEST_RUN_SKIP',
             testedAt:   tested,
           });
           cbApplyNodeResult({ passed: resultMbps != null && resultMbps >= 10 });
           break;
         }
-        case 'dry-run:log':
-          // Any dry-run chatter means testing is live — clear paused overlay.
-          showPaused(false);
-          if (d.msg) appendLog({ tag: 'SYS', cat: 'sys', dryRun: true, msg: d.msg });
-          break;
         case 'batch:end': {
           cbApplyBatchEnd(d);
           const next   = d.next_in_ms ? Math.round(d.next_in_ms / 1000) : null;
@@ -1430,7 +1413,6 @@
           const tail   = next != null ? ` · next round in ${next}s` : '';
           appendLog({
             tag: 'ROUND', cat: 'sys', status: 'ok',
-            dryRun: d.dryRun === true,
             msg: `Round done — ${passed} online, ${failed} down (${rate} online)${tail}`,
           });
           showToast(`Round done · ${passed}/${total} online${tail}`);
@@ -1536,7 +1518,7 @@
               errorCode: n.errorCode || n.error_code || null,
               skipped: !!n.skipped,
               inPlan: n.inPlan === true || n.in_plan === true,
-              dryRun: !!n.dry_run,
+              dryRun: n.error_code === 'TEST_RUN_SKIP',
               testedAt: n.testedAt || n.tested_at || null,
             });
           }

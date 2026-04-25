@@ -833,14 +833,13 @@
         <div class="header-stat-value" style="color:var(--text-muted)" id="estCost">--</div>
       </div>
       <div class="header-divider"></div>
-      <button id="btnBroadcast" class="broadcast-toggle" onclick="toggleBroadcast()" title="Toggle public live broadcast — when ON, public.html and /live forward real-time SSE events; when OFF, public sees last completed run only.">
-        <span class="broadcast-dot"></span>
-        <span id="broadcastLabel">BROADCAST</span>
-      </button>
-      <div class="header-divider"></div>
       <button id="btnTheme" class="theme-toggle-btn" onclick="toggleTheme()" title="Toggle light/dark theme" aria-label="Toggle theme">
         <svg id="themeIconDark" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
         <svg id="themeIconLight" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>
+      </button>
+      <button id="btnBroadcast" class="broadcast-toggle" onclick="toggleBroadcast()" title="Toggle public live broadcast — when ON, public.html and /live forward real-time SSE events; when OFF, public sees last completed run only.">
+        <span class="broadcast-dot"></span>
+        <span id="broadcastLabel">BROADCAST</span>
       </button>
       <button id="btnLogout" class="btn-outline-red btn-sm" onclick="doLogout()" title="Clear session and switch account/mnemonic" style="letter-spacing:1.5px">LOGOUT</button>
     </div>
@@ -886,14 +885,11 @@
       <button class="btn btn-start" id="btnResume" onclick="resumeAudit()" style="background:var(--accent);color:var(--bg)">Resume</button>
       <button class="btn btn-rescan" id="btnRescan" onclick="rescanNodes()" title="Re-fetch node list from chain to verify current total">Rescan</button>
       <button class="btn btn-start" id="btnRetestFails" onclick="retestFails()" style="background:var(--red);color:#fff;border-color:var(--red)">Retest Failed</button>
-      <button class="btn btn-start" id="btnTestPlan" onclick="testPlanFlow()" title="Pick a subscription plan you own — only that plan's nodes are tested. Honors TEST RUN.">Test Plan</button>
+      <button class="btn btn-start" id="btnTestPlan" onclick="testPlanFlow()" title="Pick a subscription plan you own — only that plan's nodes are tested.">Test Plan</button>
       <button class="btn btn-stop" id="btnStop" disabled onclick="stopAudit()">Stop</button>
       <div style="margin-left:auto; display:flex; gap:10px; align-items:center">
         <label id="dryRunDevWrap" title="When checked, New Test / Resume / Retest Failed run as a TEST RUN — same code path, but each node skips the actual connect and uses the tester baseline. Stored as mode='dry' (excluded from network stats)." style="display:inline-flex;align-items:center;gap:6px;padding:0 12px;border:1px solid var(--border-hover);border-radius:var(--radius-sm);cursor:pointer;font-size:11px;font-weight:600;letter-spacing:0.5px;color:var(--text-dim);user-select:none;height:34px;box-sizing:border-box;">
           <input type="checkbox" id="dryRunDev" style="accent-color:var(--accent);margin:0;cursor:pointer;"> TEST RUN (skip-only demo)
-        </label>
-        <label id="dryRunLoopWrap" title="When checked with TEST RUN, the simulator keeps running forever — each batch ends and a new one starts immediately. Uncheck to stop after one full pass of the snapshot." style="display:inline-flex;align-items:center;gap:6px;padding:0 12px;border:1px solid var(--border-hover);border-radius:var(--radius-sm);cursor:pointer;font-size:11px;font-weight:600;letter-spacing:0.5px;color:var(--text-dim);user-select:none;height:34px;box-sizing:border-box;">
-          <input type="checkbox" id="dryRunLoop" style="accent-color:var(--accent);margin:0;cursor:pointer;"> <span style="font-size:14px;line-height:1;">∞</span> LOOP
         </label>
         <button class="btn-help" onclick="showInfoPopup()" title="Dashboard guide">?</button>
       </div>
@@ -1353,13 +1349,10 @@
       btnStop.disabled = !active;
 
       if (active) {
-        const isDryRun = !!state.dryRun;
-        const label = paused
-          ? (isDryRun ? 'Test Paused' : 'Paused')
-          : (isDryRun ? 'Test Running...' : 'Running...');
+        const label = paused ? 'Paused' : 'Running...';
         btnStart.textContent = label;
         btnStart.classList.add('loading');
-        btnStop.textContent = isDryRun ? 'Stop Test Run' : 'Stop Audit';
+        btnStop.textContent = 'Stop Audit';
         btnStop.classList.remove('loading');
       } else {
         btnStart.textContent = 'New Test';
