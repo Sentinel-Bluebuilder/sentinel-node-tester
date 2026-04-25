@@ -698,97 +698,6 @@
       animation: pulse 2s infinite;
     }
 
-    /* ─── Current Batch panel ─── */
-    .cb-header-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      flex-wrap: wrap;
-      gap: 10px;
-    }
-
-    .cb-title {
-      font-family: var(--font-display);
-      font-size: 14px;
-      font-weight: 700;
-      letter-spacing: 1.5px;
-      color: var(--text);
-      text-transform: uppercase;
-    }
-
-    .cb-meta {
-      font-family: var(--font-display);
-      font-size: 11px;
-      color: var(--text-dim);
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .cb-progress-row {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      flex-wrap: wrap;
-    }
-
-    .cb-count {
-      font-family: var(--font-display);
-      font-size: 12px;
-      color: var(--text);
-      white-space: nowrap;
-      flex-shrink: 0;
-    }
-
-    .cb-progress-track {
-      flex: 1;
-      min-width: 80px;
-      height: 4px;
-      background: var(--border);
-      border-radius: 2px;
-      overflow: hidden;
-    }
-
-    .cb-progress-fill {
-      height: 100%;
-      width: 0%;
-      background: var(--accent);
-      border-radius: 2px;
-      transition: width 0.4s ease;
-    }
-
-    .cb-eta {
-      font-family: var(--font-display);
-      font-size: 11px;
-      color: var(--text-dim);
-      white-space: nowrap;
-      flex-shrink: 0;
-    }
-
-    .cb-snapshot-row {
-      display: flex;
-      align-items: center;
-      gap: 18px;
-      flex-wrap: wrap;
-      font-size: 11px;
-      font-family: var(--font-display);
-    }
-
-    .cb-snap-item { color: var(--text-dim); }
-    .cb-snap-pass { color: var(--green); font-weight: 700; }
-    .cb-snap-fail { color: var(--red); font-weight: 700; }
-
-    .cb-complete-msg {
-      font-family: var(--font-display);
-      font-size: 12px;
-      color: var(--text-dim);
-      padding: 8px 12px;
-      background: var(--bg-input);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-sm);
-      display: none;
-    }
-
   </style>
 </head>
 
@@ -970,30 +879,6 @@
         <div id="progressCount">0 / 0 Available Nodes</div>
         <div class="current-action" id="currentAction">Standby</div>
       </div>
-    </div>
-
-    <!-- ─── Current Batch Panel — full-width row above the data grid ─── -->
-    <div class="glass-panel" id="cbCard" style="padding:18px 22px;display:flex;flex-direction:column;gap:14px;margin-bottom:16px;">
-      <div class="cb-header-row">
-        <div style="display:flex;align-items:center;gap:10px;">
-          <span class="cb-title">Current Batch</span>
-          <div class="pulse-dot" id="cbDot"></div>
-        </div>
-        <span class="cb-meta" id="cbMeta">—</span>
-      </div>
-      <div class="cb-progress-row">
-        <span class="cb-count" id="cbCount">0 / 0 nodes tested</span>
-        <div class="cb-progress-track">
-          <div class="cb-progress-fill" id="cbProgressFill"></div>
-        </div>
-        <span class="cb-eta" id="cbEta"></span>
-      </div>
-      <div class="cb-snapshot-row">
-        <span class="cb-snap-item">Snapshot: <strong id="cbSnapshot">—</strong></span>
-        <span class="cb-snap-item">Passed: <strong class="cb-snap-pass" id="cbPassed">0</strong></span>
-        <span class="cb-snap-item">Failed: <strong class="cb-snap-fail" id="cbFailed">0</strong></span>
-      </div>
-      <div class="cb-complete-msg" id="cbCompleteMsg"></div>
     </div>
 
     <div class="data-grid">
@@ -1286,7 +1171,7 @@
           if (state.status === 'done' || state.status === 'idle') {
             const retestBtn = document.getElementById('btnRetestFails');
             if (retestBtn) {
-              const failCount = resultsArr.filter(r => r.actualMbps == null).length;
+              const failCount = resultsArr.filter(r => r.actualMbps == null && !r.skipped && r.errorCode !== 'TEST_RUN_SKIP').length;
               retestBtn.classList.remove('loading');
               retestBtn.disabled = false;
               retestBtn.textContent = failCount > 0 ? 'Retest Failed (' + failCount + ')' : 'Retest Failed';
@@ -1549,7 +1434,7 @@
 
     function applyFilter(arr) {
       if (activeFilter === 'all') return arr;
-      if (activeFilter === 'fail') return arr.filter(r => r.actualMbps == null);
+      if (activeFilter === 'fail') return arr.filter(r => r.actualMbps == null && !r.skipped && r.errorCode !== 'TEST_RUN_SKIP');
       if (activeFilter === 'pass') return arr.filter(r => r.actualMbps != null && r.actualMbps >= 10);
       if (activeFilter === 'slow') return arr.filter(r => r.actualMbps != null && r.actualMbps < 10);
       if (activeFilter === 'wg') return arr.filter(r => (r.type || '').toLowerCase().includes('wire'));
@@ -1909,7 +1794,7 @@
       document.getElementById('btnStart').disabled = true;
       document.getElementById('btnStop').disabled = false;
       try {
-        const failAddrs = resultsArr.filter(r => r.actualMbps == null).map(r => r.address);
+        const failAddrs = resultsArr.filter(r => r.actualMbps == null && !r.skipped && r.errorCode !== 'TEST_RUN_SKIP').map(r => r.address);
         if (failAddrs.length === 0) { appendLog('No failures to retest'); btn.disabled = false; return; }
         const res = await fetch('/api/retest-fails', {
           method: 'POST',
@@ -2606,154 +2491,6 @@
       loadBroadcastState();
     });
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // ─── Current Batch Panel (SSE-wired) ─────────────────────────────────
-    // ═══════════════════════════════════════════════════════════════════════
-
-    const _cb = {
-      batchId: null,
-      snapshotSize: 0,
-      startedAt: null,
-      iteration: null,
-      tested: 0,
-      passed: 0,
-      failed: 0,
-      gapEndsAt: null,
-      gapTimer: null,
-    };
-
-    function _cbEl(id) { return document.getElementById(id); }
-
-    function cbApplyBatchStart(data) {
-      _cb.batchId    = data.batchId;
-      _cb.snapshotSize = data.snapshotSize || 0;
-      _cb.startedAt  = data.startedAt ? new Date(data.startedAt).getTime() : Date.now();
-      _cb.iteration  = data.iteration;
-      _cb.tested     = 0;
-      _cb.passed     = 0;
-      _cb.failed     = 0;
-      _cb.gapEndsAt  = null;
-      if (_cb.gapTimer) { clearInterval(_cb.gapTimer); _cb.gapTimer = null; }
-
-      const dot = _cbEl('cbDot');
-      if (dot) { dot.className = 'pulse-dot running'; }
-      const msg = _cbEl('cbCompleteMsg');
-      if (msg) msg.style.display = 'none';
-      cbRender();
-    }
-
-    function cbApplyNodeResult(data) {
-      _cb.tested++;
-      if (data.passed) _cb.passed++;
-      else _cb.failed++;
-      cbRender();
-    }
-
-    function cbApplyBatchEnd(data) {
-      _cb.passed  = data.passed  != null ? data.passed  : _cb.passed;
-      _cb.failed  = data.failed  != null ? data.failed  : _cb.failed;
-      _cb.tested  = _cb.passed + _cb.failed;
-      const dot = _cbEl('cbDot');
-      if (dot) dot.className = 'pulse-dot';
-      cbRender();
-    }
-
-    function cbApplyGap(data) {
-      const nextAt = data.nextBatchAt ? data.nextBatchAt : (Date.now() + (data.gapMs || 30000));
-      _cb.gapEndsAt = nextAt;
-      if (_cb.gapTimer) clearInterval(_cb.gapTimer);
-      _cb.gapTimer = setInterval(() => {
-        const secs = Math.max(0, Math.round((nextAt - Date.now()) / 1000));
-        const msg = _cbEl('cbCompleteMsg');
-        if (msg) {
-          msg.style.display = '';
-          const iter = _cb.iteration != null ? ' #' + _cb.iteration : '';
-          msg.textContent = 'Batch' + iter + ' complete. Next batch in ' + secs + 's…';
-        }
-        if (secs <= 0) { clearInterval(_cb.gapTimer); _cb.gapTimer = null; }
-      }, 1000);
-    }
-
-    function cbRender() {
-      const snap   = _cb.snapshotSize;
-      const tested = _cb.tested;
-      const total  = snap || tested;
-      const pct    = total > 0 ? Math.min(100, Math.round(tested / total * 100)) : 0;
-
-      const fill = _cbEl('cbProgressFill');
-      if (fill) fill.style.width = pct + '%';
-
-      const countEl = _cbEl('cbCount');
-      if (countEl) countEl.textContent = tested + ' / ' + (total || '?') + ' nodes tested';
-
-      const passEl = _cbEl('cbPassed');
-      if (passEl) passEl.textContent = _cb.passed;
-      const failEl = _cbEl('cbFailed');
-      if (failEl) failEl.textContent = _cb.failed;
-
-      const snapEl = _cbEl('cbSnapshot');
-      if (snapEl) snapEl.textContent = snap || '?';
-
-      // Batch #N and elapsed time
-      const elapsed = _cb.startedAt ? Math.round((Date.now() - _cb.startedAt) / 1000) : 0;
-      const metaEl = _cbEl('cbMeta');
-      if (metaEl) {
-        const bNum = _cb.iteration != null ? 'Batch #' + _cb.iteration : '';
-        const elStr = elapsed > 0 ? elapsed + 's ago' : 'just started';
-        metaEl.textContent = bNum ? bNum + ' · Started ' + elStr : '—';
-      }
-
-      // ETA based on rate
-      const etaEl = _cbEl('cbEta');
-      if (etaEl && tested > 0 && elapsed > 0 && snap > tested) {
-        const rem = snap - tested;
-        const rate = tested / elapsed; // nodes/sec
-        const etaSec = Math.round(rem / rate);
-        const m = Math.floor(etaSec / 60), s = etaSec % 60;
-        etaEl.textContent = 'ETA ~' + (m > 0 ? m + 'm ' : '') + s + 's';
-      } else if (etaEl) {
-        etaEl.textContent = '';
-      }
-    }
-
-    // ─── Wire batch SSE events ─────────────────────────────────────────────
-    // The admin SSE stream sends named event types. The existing connectSSE()
-    // uses onmessage (unnamed events only). We add named listeners after SSE
-    // connects. We store a flag so we only attach once per EventSource instance.
-    function _attachBatchListeners(es) {
-      if (es._batchListened) return;
-      es._batchListened = true;
-      es.addEventListener('batch:start', (e) => {
-        try { cbApplyBatchStart(JSON.parse(e.data)); } catch {}
-      });
-      es.addEventListener('batch:node:result', (e) => {
-        try { cbApplyNodeResult(JSON.parse(e.data)); } catch {}
-      });
-      es.addEventListener('batch:end', (e) => {
-        try { cbApplyBatchEnd(JSON.parse(e.data)); } catch {}
-      });
-      es.addEventListener('batch:gap', (e) => {
-        try { cbApplyGap(JSON.parse(e.data)); } catch {}
-      });
-    }
-
-    // Poll for eventSource being set (SSE connects in DOMContentLoaded → connectSSE)
-    // then attach; re-attach on reconnect by checking _batchListened flag each tick.
-    window.addEventListener('DOMContentLoaded', () => {
-      function _tryAttach() {
-        if (eventSource) _attachBatchListeners(eventSource);
-      }
-      // Run once immediately, then check every 2s in case of reconnects
-      _tryAttach();
-      setInterval(() => {
-        if (eventSource && !eventSource._batchListened) _attachBatchListeners(eventSource);
-      }, 2000);
-    });
-
-    // ─── Elapsed ticker for cbMeta ─────────────────────────────────────────
-    setInterval(() => {
-      if (_cb.startedAt && _cb.tested >= 0) cbRender();
-    }, 5000);
   </script>
 </body>
 

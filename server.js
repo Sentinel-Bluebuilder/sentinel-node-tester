@@ -320,7 +320,8 @@ function loadRun(num) {
 // ─── Rehydrate state from results.json on startup ───────────────────────────
 function rehydrateState(results) {
   state.testedNodes = results.filter(r => r.actualMbps != null).length;
-  state.failedNodes = results.filter(r => r.actualMbps == null).length;
+  state.failedNodes = results.filter(r => r.actualMbps == null && !r.skipped && r.errorCode !== 'TEST_RUN_SKIP').length;
+  state.skippedNodes = results.filter(r => r.skipped || r.errorCode === 'TEST_RUN_SKIP').length;
   // Do NOT set totalNodes here — it must come from snapshot (last known chain total).
   // results.length = how many we tested, NOT how many exist on chain.
   state.passed10 = results.filter(r => r.actualMbps != null && r.actualMbps >= 10).length;
@@ -1085,6 +1086,7 @@ function startFreshRun(label, { mode = 'p2p', plan_id = null } = {}) {
   state.stopRequested = false;
   state.testedNodes = 0;
   state.failedNodes = 0;
+  state.skippedNodes = 0;
   state.passed15 = 0;
   state.passed10 = 0;
   state.passedBaseline = 0;
@@ -1317,7 +1319,7 @@ app.post('/api/test-sub-plan', adminOnly, async (req, res) => {
 app.post('/api/clear', adminOnly, (req, res) => {
   const results = getResults();
   results.length = 0;
-  state.testedNodes = state.failedNodes = state.passed15 = state.passed10 = state.passedBaseline = 0;
+  state.testedNodes = state.failedNodes = state.skippedNodes = state.passed15 = state.passed10 = state.passedBaseline = 0;
   state.retryCount = 0;
   state.baselineHistory = [];
   state.nodeSpeedHistory = [];
