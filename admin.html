@@ -972,31 +972,31 @@
       </div>
     </div>
 
-    <div class="data-grid">
-      <!-- ─── Current Batch Panel (public-only) — left slot in public mode ─── -->
-      <div class="glass-panel" id="cbCard" style="padding:18px 22px;display:flex;flex-direction:column;gap:14px;">
-        <div class="cb-header-row">
-          <div style="display:flex;align-items:center;gap:10px;">
-            <span class="cb-title">Current Batch</span>
-            <div class="pulse-dot" id="cbDot"></div>
-          </div>
-          <span class="cb-meta" id="cbMeta">—</span>
+    <!-- ─── Current Batch Panel — full-width row above the data grid ─── -->
+    <div class="glass-panel" id="cbCard" style="padding:18px 22px;display:flex;flex-direction:column;gap:14px;margin-bottom:16px;">
+      <div class="cb-header-row">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span class="cb-title">Current Batch</span>
+          <div class="pulse-dot" id="cbDot"></div>
         </div>
-        <div class="cb-progress-row">
-          <span class="cb-count" id="cbCount">0 / 0 nodes tested</span>
-          <div class="cb-progress-track">
-            <div class="cb-progress-fill" id="cbProgressFill"></div>
-          </div>
-          <span class="cb-eta" id="cbEta"></span>
-        </div>
-        <div class="cb-snapshot-row">
-          <span class="cb-snap-item">Snapshot: <strong id="cbSnapshot">—</strong></span>
-          <span class="cb-snap-item">Passed: <strong class="cb-snap-pass" id="cbPassed">0</strong></span>
-          <span class="cb-snap-item">Failed: <strong class="cb-snap-fail" id="cbFailed">0</strong></span>
-        </div>
-        <div class="cb-complete-msg" id="cbCompleteMsg"></div>
+        <span class="cb-meta" id="cbMeta">—</span>
       </div>
+      <div class="cb-progress-row">
+        <span class="cb-count" id="cbCount">0 / 0 nodes tested</span>
+        <div class="cb-progress-track">
+          <div class="cb-progress-fill" id="cbProgressFill"></div>
+        </div>
+        <span class="cb-eta" id="cbEta"></span>
+      </div>
+      <div class="cb-snapshot-row">
+        <span class="cb-snap-item">Snapshot: <strong id="cbSnapshot">—</strong></span>
+        <span class="cb-snap-item">Passed: <strong class="cb-snap-pass" id="cbPassed">0</strong></span>
+        <span class="cb-snap-item">Failed: <strong class="cb-snap-fail" id="cbFailed">0</strong></span>
+      </div>
+      <div class="cb-complete-msg" id="cbCompleteMsg"></div>
+    </div>
 
+    <div class="data-grid">
       <div class="glass-panel table-container">
         <div class="panel-header">
           <div class="panel-title">dVPN Node Connections</div>
