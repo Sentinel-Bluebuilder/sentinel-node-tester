@@ -172,7 +172,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
   const nodePriceUdvpn = Math.round(parseFloat(priceEntry.quote_value) || 0);
   const thisCostUdvpn = nodePriceUdvpn * gigabytes;
 
-  if (state.dryRun) {
+  if (state.testRun) {
     if (broadcast) broadcast('log', { msg: '  🧪 TEST RUN — skipping payment + handshake + speedtest.' });
     const _reportedDownloadMbps = status.bandwidth.download * 8 / 1_000_000;
     return {

@@ -798,8 +798,8 @@
       <button class="btn btn-start" id="btnTestPlan" onclick="testPlanFlow()" title="Pick a subscription plan you own — only that plan's nodes are tested.">Test Plan</button>
       <button class="btn btn-stop" id="btnStop" disabled onclick="stopAudit()">Stop</button>
       <div style="margin-left:auto; display:flex; gap:10px; align-items:center">
-        <label id="dryRunDevWrap" title="When checked, New Test / Resume / Retest Failed run as a TEST RUN — same code path, but each node skips the actual connect and uses the tester baseline. Stored as mode='dry' (excluded from network stats)." style="display:inline-flex;align-items:center;gap:6px;padding:0 12px;border:1px solid var(--border-hover);border-radius:var(--radius-sm);cursor:pointer;font-size:11px;font-weight:600;letter-spacing:0.5px;color:var(--text-dim);user-select:none;height:34px;box-sizing:border-box;">
-          <input type="checkbox" id="dryRunDev" style="accent-color:var(--accent);margin:0;cursor:pointer;"> TEST RUN (skip-only demo)
+        <label id="testRunDevWrap" title="When checked, New Test / Resume / Retest Failed run as a TEST RUN — same code path, but each node skips the actual connect and uses the tester baseline. Stored as mode='test' (excluded from network stats)." style="display:inline-flex;align-items:center;gap:6px;padding:0 12px;border:1px solid var(--border-hover);border-radius:var(--radius-sm);cursor:pointer;font-size:11px;font-weight:600;letter-spacing:0.5px;color:var(--text-dim);user-select:none;height:34px;box-sizing:border-box;">
+          <input type="checkbox" id="testRunDev" style="accent-color:var(--accent);margin:0;cursor:pointer;"> TEST RUN (skip-only demo)
         </label>
         <button class="btn-help" onclick="showInfoPopup()" title="Dashboard guide">?</button>
       </div>
@@ -1036,7 +1036,7 @@
       } catch {}
       window.location.href = '/';
     }
-    let state = { status: 'idle', dryRun: false, totalNodes: 0, testedNodes: 0, failedNodes: 0, retryCount: 0, passed15: 0, passedBaseline: 0, baselineMbps: null, baselineHistory: [], nodeSpeedHistory: [], startedAt: null, pauseReason: null };
+    let state = { status: 'idle', testRun: false, totalNodes: 0, testedNodes: 0, failedNodes: 0, retryCount: 0, passed15: 0, passedBaseline: 0, baselineMbps: null, baselineHistory: [], nodeSpeedHistory: [], startedAt: null, pauseReason: null };
     let resultsArr = [];
     // Full country map — 80+ countries from Sentinel SDK (core/countries.js)
     const _CC = {
@@ -1684,11 +1684,11 @@
       }
     }).catch(() => {});
 
-    async function devStart(dryRun) {
+    async function devStart(testRun) {
       const res = await fetch('/api/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Admin-Request': '1' },
-        body: JSON.stringify(dryRun ? { dryRun: true } : {}),
+        body: JSON.stringify(testRun ? { testRun: true } : {}),
       });
       const data = await res.json().catch(() => ({}));
       if (data.error) { appendLog('Start failed: ' + data.error); return false; }
@@ -1697,9 +1697,9 @@
 
     async function startAudit() {
       if (state.status === 'running' || state.status === 'paused') { stopAudit(); return; }
-      const dryEl = document.getElementById('dryRunDev');
-      const isDryRun = !!(dryEl && dryEl.checked);
-      if (!isDryRun && !confirm('Start a NEW test? Current results will be saved and a fresh test begins.')) return;
+      const dryEl = document.getElementById('testRunDev');
+      const isTestRun = !!(dryEl && dryEl.checked);
+      if (!isTestRun && !confirm('Start a NEW test? Current results will be saved and a fresh test begins.')) return;
       // Clear previous test data from dashboard
       resultsArr = [];
       state.testedNodes = 0;
@@ -1726,7 +1726,7 @@
       btn.disabled = true;
       document.getElementById('btnStop').disabled = false;
       try {
-        if (!await devStart(isDryRun)) {
+        if (!await devStart(isTestRun)) {
           btn.classList.remove('loading');
           btn.textContent = 'New Test';
           btn.disabled = false;
@@ -1741,7 +1741,7 @@
     }
 
     async function resumeAudit() {
-      const dryEl = document.getElementById('dryRunDev');
+      const dryEl = document.getElementById('testRunDev');
       if (dryEl && dryEl.checked) {
         if (state.status === 'running' || state.status === 'paused') { stopAudit(); return; }
         await devStart(true);
@@ -1773,7 +1773,7 @@
     }
 
     async function retestFails() {
-      const dryEl = document.getElementById('dryRunDev');
+      const dryEl = document.getElementById('testRunDev');
       if (dryEl && dryEl.checked) {
         if (state.status === 'running' || state.status === 'paused') { stopAudit(); return; }
         await devStart(true);
@@ -1995,7 +1995,7 @@
     }
 
     async function testPlanFlow() {
-      const dryEl = document.getElementById('dryRunDev');
+      const dryEl = document.getElementById('testRunDev');
       if (dryEl && dryEl.checked) {
         if (state.status === 'running' || state.status === 'paused') { stopAudit(); return; }
         await devStart(true);
@@ -2007,7 +2007,7 @@
     async function runSubPlanTest(planId, subscriptionId, granter) {
       const overlay = document.getElementById('subPlanOverlay');
       if (overlay) overlay.remove();
-      const dryEl = document.getElementById('dryRunDev');
+      const dryEl = document.getElementById('testRunDev');
       if (dryEl && dryEl.checked) {
         if (state.status === 'running' || state.status === 'paused') { stopAudit(); return; }
         await devStart(true);
@@ -2081,7 +2081,7 @@
 
     async function startCreateMode() {
       const btn = document.getElementById('btnCreateStart');
-      const dryEl = document.getElementById('dryRunDev');
+      const dryEl = document.getElementById('testRunDev');
       if (dryEl && dryEl.checked) {
         if (state.status === 'running' || state.status === 'paused') { stopAudit(); return; }
         await devStart(true);

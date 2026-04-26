@@ -2860,7 +2860,7 @@
           break;
         }
         case 'batch:node:result': {
-          // Real-run payloads use snake_case; dry-run fanout uses camelCase.
+          // Real-run payloads use snake_case; test-run fanout uses camelCase.
           const addr    = d.node_address ?? d.address ?? null;
           const moniker = d.moniker || '';
           const mbps    = d.actual_mbps ?? d.actualMbps ?? null;
@@ -2891,7 +2891,7 @@
               handshake_ok:   (d.skipped || err === 'TEST_RUN_SKIP') ? null
                               : (mbps > 0 ? true : (err ? false : null)),
               last_tested_at: tested,
-              dry_run:        err === 'TEST_RUN_SKIP' || undefined,
+              test_run:        err === 'TEST_RUN_SKIP' || undefined,
             });
             const idx = allNodes.findIndex(n => n.address === norm.address);
             if (idx >= 0) allNodes[idx] = norm; else allNodes.push(norm);

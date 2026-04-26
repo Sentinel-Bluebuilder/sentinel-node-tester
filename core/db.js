@@ -27,7 +27,7 @@ const _handles = { real: null };
 
 /**
  * Returns the open Database instance, creating it on first call. Runs all
- * migrations automatically. Any scope param ('real', 'dry', or a path) is
+ * migrations automatically. Any scope param ('real', 'test', or a path) is
  * accepted for back-compat but always returns the single audit.db handle.
  *
  * @param {string} [which] - Ignored (back-compat). Pass ':memory:' for tests.
@@ -271,6 +271,14 @@ function runMigrations(db) {
     db.prepare('UPDATE schema_version SET version = 6').run();
     })();
   }
+
+  if (current < 7) {
+    db.transaction(() => {
+    // ── Migration v7: rename legacy runs.mode='dry' to 'test' ────────────────
+    db.exec(`UPDATE runs SET mode='test' WHERE mode='dry'`);
+    db.prepare('UPDATE schema_version SET version = 7').run();
+    })();
+  }
 }
 
 // ─── Run Mutations ───────────────────────────────────────────────────────────
@@ -395,7 +403,7 @@ export function insertResult(run_id, result, which) {
  *
  * @param {number} run_id
  * @param {object[]} results
- * @param {'real'|'dry'} [which='real']
+ * @param {'real'|'test'} [which='real']
  */
 export function insertResultsBatch(run_id, results, which) {
   const db = getDb(which);

@@ -1366,7 +1366,7 @@
           });
           break;
         case 'batch:node:result': {
-          // Real-run uses snake_case; dry-run fanout uses camelCase.
+          // Real-run uses snake_case; test-run fanout uses camelCase.
           const addr    = d.node_address ?? d.address ?? null;
           const moniker = d.moniker || '';
           const mbps    = d.actual_mbps ?? d.actualMbps ?? null;
@@ -1424,7 +1424,7 @@
             errorCode:  err || null,
             skipped,
             inPlan:     d.inPlan === true,
-            dryRun:     err === 'TEST_RUN_SKIP',
+            testRun:     err === 'TEST_RUN_SKIP',
             testedAt:   tested,
           });
           cbApplyNodeResult({ passed: resultMbps != null && resultMbps >= 10 });
@@ -1560,7 +1560,7 @@
               errorCode: n.errorCode || n.error_code || null,
               skipped: !!n.skipped,
               inPlan: n.inPlan === true || n.in_plan === true,
-              dryRun: n.error_code === 'TEST_RUN_SKIP',
+              testRun: n.error_code === 'TEST_RUN_SKIP',
               testedAt: n.testedAt || n.tested_at || null,
             });
           }

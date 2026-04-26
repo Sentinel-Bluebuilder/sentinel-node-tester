@@ -1144,7 +1144,7 @@ function startFreshRun(label, { mode = 'p2p', plan_id = null } = {}) {
 
 // Start NEW test (saves current, clears, starts fresh).
 app.post('/api/start', adminOnly, async (req, res) => {
-  const dryRun = !!(req.body?.dryRun || req.query.dryRun);
+  const testRun = !!(req.body?.testRun || req.query.testRun);
 
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (continuous.status().running) {
@@ -1158,16 +1158,16 @@ app.post('/api/start', adminOnly, async (req, res) => {
       await new Promise(r => setTimeout(r, 100));
     }
   }
-  if (!dryRun && !MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
+  if (!testRun && !MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
 
-  const runMode = dryRun ? 'dry' : 'p2p';
+  const runMode = testRun ? 'test' : 'p2p';
   const { newNum } = startFreshRun(`Test #${getNextRunNumber()}`, { mode: runMode });
 
   const SDK_LABELS = { js: 'Blue JS', csharp: 'Blue C#', tkd: 'TKD JS' };
   const label = `${SDK_LABELS[state.activeSDK] || state.activeSDK} SDK, ${process.platform === 'win32' ? 'Windows' : process.platform}`;
-  broadcast('log', { msg: `🚀 Starting Test #${newNum} (${label})${dryRun ? ' [TEST RUN]' : ''}` });
-  res.json({ ok: true, testNumber: newNum, dryRun });
-  runAudit(false, state, broadcast, null, { dryRun }).then(() => {
+  broadcast('log', { msg: `🚀 Starting Test #${newNum} (${label})${testRun ? ' [TEST RUN]' : ''}` });
+  res.json({ ok: true, testNumber: newNum, testRun });
+  runAudit(false, state, broadcast, null, { testRun }).then(() => {
     saveCurrentRun(`Test #${newNum}`);
     broadcast('log', { msg: `💾 Test #${newNum} complete and saved` });
   }).catch(err => {

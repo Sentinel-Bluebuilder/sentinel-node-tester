@@ -42,15 +42,15 @@ The dual-mode (dev/bundled/public) system has been collapsed. There is now **one
 - Read via `GET /api/broadcast` — returns `{ broadcastLive: boolean }`.
 - No mode cookie, no `requireMode` middleware, no `_currentMode` client state. Those are gone.
 
-### TEST RUN (dry run)
+### TEST RUN (test run)
 
 TEST RUN is an optional skip-only demo — it is NOT a separate mode and it does NOT use a separate database.
 
-- Pass `dryRun: true` in the request body **or** `?dryRun=1` as a query parameter on `POST /api/start`.
+- Pass `testRun: true` in the request body **or** `?testRun=1` as a query parameter on `POST /api/start`.
 - The pipeline skips plan membership check, online scan, chain operations, and payments.
 - Every node row gets `actualMbps: null, errorCode: 'TEST_RUN_SKIP'`.
-- The run row is written to `audit.db` with `mode='dry'` so it is visually distinguishable in the admin table.
-- No second database. No `audit-dry.db`. One file on disk.
+- The run row is written to `audit.db` with `mode='test'` so it is visually distinguishable in the admin table.
+- No second database. No `audit-test.db`. One file on disk.
 
 ## Theme (Dark/Light)
 - Toggle exists on BOTH `admin.html` and `public.html` (and `/live` when built).
@@ -73,7 +73,7 @@ TEST RUN is an optional skip-only demo — it is NOT a separate mode and it does
 - `sentinel.css` — design tokens + theme.
 
 ## Existing Server Infrastructure (2026-04-25 audit)
-- `POST /api/start` (adminOnly) — body `{ planId?, subscriptionId?, subscriptionGranter? }`. Accepts optional `dryRun: true` in body or `?dryRun=1` query param to run a skip-only demo audit.
+- `POST /api/start` (adminOnly) — body `{ planId?, subscriptionId?, subscriptionGranter? }`. Accepts optional `testRun: true` in body or `?testRun=1` query param to run a skip-only demo audit.
 - `POST /api/broadcast` (adminOnly) — flips `state.broadcastLive`. No body required.
 - `GET  /api/broadcast` — returns `{ broadcastLive: boolean }`. Open.
 - `GET  /api/public/events` (SSE — forwards live events only when `broadcastLive=true`)
@@ -85,8 +85,8 @@ TEST RUN is an optional skip-only demo — it is NOT a separate mode and it does
 - DONE 2026-04-23: Port search to `public.html` (#20).
 - DONE 2026-04-23: Build `/live` page + route (Option B).
 - DONE 2026-04-25: Collapsed dual-mode (dev/bundled/public) → single mode + `broadcastLive` toggle. Removed mode cookie, `requireMode` middleware, `_currentMode`, `_applyModeUI`, `selectMode`, `switchMode`, mode overlay, public-test endpoints. Added `POST /GET /api/broadcast`.
-- DONE 2026-04-25: Consolidated `audit-dry.db` into `audit.db`. TEST RUN is now `?dryRun=1` on `/api/start`, writes `mode='dry'` rows to the single DB.
-- DONE 2026-04-25: TEST RUN parity — runs the real pipeline end-to-end, short-circuits per-node after price discovery with `errorCode='TEST_RUN_SKIP'`. Stripped all `public-test:*` SSE prefixes, `_pipelinePublicMode`, three `/api/admin/public-test/*` endpoints, `DRY_RUN_SKIP`, `dry-run:log`, `#dryRunLoop`. Broadcast Live toggle moved to top action cluster.
+- DONE 2026-04-25: Consolidated `audit-test.db` into `audit.db`. TEST RUN is now `?testRun=1` on `/api/start`, writes `mode='test'` rows to the single DB.
+- DONE 2026-04-25: TEST RUN parity — runs the real pipeline end-to-end, short-circuits per-node after price discovery with `errorCode='TEST_RUN_SKIP'`. Stripped all `public-test:*` SSE prefixes, `_pipelinePublicMode`, three `/api/admin/public-test/*` endpoints, `TEST_RUN_SKIP`, `test-run:log`, `#testRunLoop`. Broadcast Live toggle moved to top action cluster.
 - DONE: Theme toggle on `public.html` (#22) — `#btnTheme` + `toggleTheme()` already wired.
 
 ## Don't
@@ -95,3 +95,11 @@ TEST RUN is an optional skip-only demo — it is NOT a separate mode and it does
 - Don't commit `.env` or `MNEMONIC=...`.
 - Don't `taskkill /F /IM node.exe` — kills Claude Code's own runtime.
 - Don't hide or remove the per-row failure copy button — the failure-log UX is a MUST, not a polish item.
+- **DON'T FUCK WITH TEST RUN.** Never modify TEST RUN code paths. This file is the source of truth. This includes:
+  - The `if (state.testRun)` short-circuit in `audit/node-test.js` (the block that returns early with `errorCode: 'TEST_RUN_SKIP'` after price discovery).
+  - The TEST RUN branching in `audit/pipeline.js` (anything gated on `state.testRun`, including the batch-payment skip and `state.testRun = ...` assignment).
+  - The `testRun` flag plumbing through `POST /api/start` (body `testRun: true` and query `?testRun=1`) in `server.js`.
+  - The `mode='test'` row write in `core/db.js`.
+  - Any helper that exists solely to support TEST RUN (skip flags, `TEST_RUN_SKIP` error code, test-run UI badges, etc.).
+  - The vocabulary is `test`/`testRun`/`test-run`/`TEST_RUN` ONLY — never reintroduce `dry`/`dryRun`/`dry-run`/`DRY_RUN` anywhere in the project.
+  If a parity refactor, SDK upgrade, or "cleanup" seems to require touching TEST RUN — STOP. Ask the user first. Do not refactor, rename, "consolidate", "simplify", or otherwise modify these paths under any pretext. Treat TEST RUN as immutable.

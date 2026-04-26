@@ -13,7 +13,7 @@
  * drop the old one, rename. This is O(legitimate rows) = O(100), not O(54M).
  *
  * Usage:
- *   node scripts/cleanup-runaway-runs.mjs           # dry-run (counts only)
+ *   node scripts/cleanup-runaway-runs.mjs           # test-run (counts only)
  *   node scripts/cleanup-runaway-runs.mjs --yes     # actually execute
  */
 

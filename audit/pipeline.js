@@ -332,7 +332,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   state.retestPassed = null;
   state.retestFailed = null;
 
-  state.dryRun = !!opts.dryRun;
+  state.testRun = !!opts.testRun;
 
   clearPoisonedSessions();
   clearPaidNodes();
@@ -511,7 +511,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
     if (!canProceed) { broadcast('log', { msg: '⏹ Aborting — VPN interference not cleared.' }); break; }
 
     let batchSessionMap;
-    if (state.dryRun) {
+    if (state.testRun) {
       batchSessionMap = new Map();
     } else {
       try {
