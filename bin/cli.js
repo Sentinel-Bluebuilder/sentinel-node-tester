@@ -52,6 +52,7 @@ const COMMAND_GROUPS = {
   Discovery: ['list', 'functions', 'verify-sdks'],
   Read: ['nodes', 'node', 'balance', 'subscriptions', 'plans'],
   Action: ['speed', 'test', 'audit', 'serve'],
+  Agent: ['agent'],
 };
 
 // Flat list for quick lookup
@@ -94,6 +95,10 @@ function printHelp() {
       test <addr>       End-to-end test one node (paid — uses real tokens)
       audit             Run full audit loop across all nodes
       serve             Start the browser dashboard server
+
+    Agent
+      agent             End-to-end driver hitting every server function over HTTP
+                        (run "sentinel-audit agent map --pretty" for the registry)
 
   Examples:
     sentinel-audit list

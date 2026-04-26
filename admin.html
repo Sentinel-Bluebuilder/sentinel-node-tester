@@ -787,24 +787,44 @@
         <option value="opendns">OpenDNS</option>
       </select>
     </div>
+    <div class="subheader-group" style="margin-left:auto">
+      <span id="cliTabBtn" onclick="showCliPopup()" class="subheader-chip" title="Sentinel Audit CLI — commands, flags, usage" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px">
+        <span style="font-family:var(--font-mono,monospace);opacity:0.85">›_</span>
+        <span style="letter-spacing:1px">CLI</span>
+      </span>
+    </div>
   </div>
 
   <main id="mainContent">
     <div class="glass-panel controls">
-      <button class="btn btn-start" id="btnStart" onclick="startAudit()">New Test</button>
+      <button class="btn btn-start" id="btnStart" onclick="startAudit()" title="Start a new test using the selected Testing Mode.">Start Test</button>
       <button class="btn btn-start" id="btnResume" onclick="resumeAudit()" style="background:var(--accent);color:var(--bg)">Resume</button>
       <button class="btn btn-rescan" id="btnRescan" onclick="rescanNodes()" title="Re-fetch node list from chain to verify current total">Rescan</button>
       <button class="btn btn-start" id="btnRetestFails" onclick="retestFails()" style="background:var(--red);color:#fff;border-color:var(--red)">Retest Failed</button>
-      <button class="btn btn-start" id="btnTestPlan" onclick="testPlanFlow()" title="Pick a subscription plan you own — only that plan's nodes are tested.">Test Plan</button>
       <button class="btn btn-stop" id="btnStop" disabled onclick="stopAudit()">Stop</button>
       <div style="margin-left:auto; display:flex; gap:10px; align-items:center">
-        <label id="dryRunDevWrap" title="When checked, New Test / Resume / Retest Failed run as a TEST RUN — same code path, but each node skips the actual connect and uses the tester baseline. Stored as mode='dry' (excluded from network stats)." style="display:inline-flex;align-items:center;gap:6px;padding:0 12px;border:1px solid var(--border-hover);border-radius:var(--radius-sm);cursor:pointer;font-size:11px;font-weight:600;letter-spacing:0.5px;color:var(--text-dim);user-select:none;height:34px;box-sizing:border-box;">
-          <input type="checkbox" id="dryRunDev" style="accent-color:var(--accent);margin:0;cursor:pointer;"> TEST RUN (skip-only demo)
-        </label>
         <button class="btn-help" onclick="showInfoPopup()" title="Dashboard guide">?</button>
+      </div>
+      <!-- Hidden DOM stubs: mode/pricing/loop UI moved into the New Test chooser popup.
+           Kept here so legacy JS that reads these IDs (setTestingMode, setPricingMode,
+           applyState's lock loop, devStart's infiniteLoop checkbox) still works. -->
+      <div id="testingModeWrap" style="display:none">
+        <button type="button" id="modePlan"><span id="modePlanLabel">PLAN</span></button>
+        <button type="button" id="modeP2P">P2P</button>
+        <button type="button" id="modeTestRun">TEST RUN</button>
+      </div>
+      <label id="infiniteLoopWrap" style="display:none">
+        <input type="checkbox" id="infiniteLoop">
+      </label>
+      <div id="pricingModeWrap" style="display:none">
+        <button type="button" id="priceModeGB">PER GB</button>
+        <button type="button" id="priceModeHr">PER HOUR</button>
       </div>
     </div>
     <div id="regularLockNote" style="display:none;margin:6px 0 0;padding:8px 12px;border:1px solid var(--red);background:var(--red-dim);color:var(--text);border-radius:var(--radius-sm);font-size:12px;font-family:var(--font-display);">A test run is live — stop it before starting a regular audit.</div>
+    <div id="modeBadge" style="display:none;margin:6px 0 0;padding:6px 12px;border:1px solid var(--accent);background:transparent;color:var(--accent);border-radius:var(--radius-sm);font-size:11px;font-family:var(--font-display);font-weight:700;letter-spacing:1.2px;text-transform:uppercase;width:max-content;">
+      <span id="modeBadgeDot" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-right:8px;vertical-align:middle"></span><span id="modeBadgeLabel">—</span><span id="modeBadgeDetail" style="color:var(--text-dim);font-weight:500;letter-spacing:0.6px;margin-left:10px;text-transform:none"></span>
+    </div>
 
     <div class="stats-grid" style="grid-template-columns: repeat(6, 1fr);">
       <div class="glass-panel stat-card">
@@ -1036,7 +1056,7 @@
       } catch {}
       window.location.href = '/';
     }
-    let state = { status: 'idle', dryRun: false, totalNodes: 0, testedNodes: 0, failedNodes: 0, retryCount: 0, passed15: 0, passedBaseline: 0, baselineMbps: null, baselineHistory: [], nodeSpeedHistory: [], startedAt: null, pauseReason: null };
+    let state = { status: 'idle', testRun: false, totalNodes: 0, testedNodes: 0, failedNodes: 0, retryCount: 0, passed15: 0, passedBaseline: 0, baselineMbps: null, baselineHistory: [], nodeSpeedHistory: [], startedAt: null, pauseReason: null };
     let resultsArr = [];
     // Full country map — 80+ countries from Sentinel SDK (core/countries.js)
     const _CC = {
@@ -1199,7 +1219,7 @@
         done = state.retestTested || 0;
         total = state.retestTotal || 0;
       } else {
-        done = (state.testedNodes || 0) + (state.failedNodes || 0);
+        done = (state.testedNodes || 0) + (state.failedNodes || 0) + (state.skippedNodes || 0);
         total = state.totalNodes || 0;
       }
       const remaining = total - done;
@@ -1216,6 +1236,47 @@
       const active = running || paused;
       document.getElementById('headerDot').className = 'pulse-dot' + (running ? ' running' : paused ? ' paused' : '');
 
+      // ─── Mode badge: clear "what's running right now" ──────────────────
+      // Three states the operator and viewer must distinguish at a glance:
+      //   • Plan #N — testing only nodes inside a subscription plan
+      //   • P2P — testing every online node, paying each session ourselves
+      //   • Test Run — sample/skip data, no real measurements
+      const modeBadge = document.getElementById('modeBadge');
+      if (modeBadge) {
+        if (!active) {
+          modeBadge.style.display = 'none';
+        } else {
+          const lbl = document.getElementById('modeBadgeLabel');
+          const det = document.getElementById('modeBadgeDetail');
+          const dot = document.getElementById('modeBadgeDot');
+          let label, detail, color;
+          if (state.testRun || state.runMode === 'test') {
+            label = 'Test Run';
+            detail = 'sample data — no real measurements, no payments';
+            color = 'var(--accent)';
+          } else if (state.runMode === 'subscription' && state.runPlanId) {
+            label = 'Plan #' + state.runPlanId;
+            detail = 'subscription-allocated sessions, plan-scoped node set';
+            color = 'var(--green)';
+          } else {
+            label = 'P2P';
+            detail = 'all online nodes, per-session payments from this wallet';
+            color = 'var(--accent-bright, var(--accent))';
+          }
+          modeBadge.style.display = '';
+          modeBadge.style.borderColor = color;
+          modeBadge.style.color = color;
+          if (dot) dot.style.background = color;
+          if (lbl) lbl.textContent = label;
+          if (det) det.textContent = detail;
+        }
+      }
+
+      // Mode/pay/loop UI lives in the New Test chooser popup now — the toolbar
+      // stubs are display:none. Mode is locked by virtue of the chooser only
+      // opening when the operator clicks New Test, which is itself disabled
+      // while a run is active.
+
       const btnStart = document.getElementById('btnStart');
       const btnResume = document.getElementById('btnResume');
       const btnRetest = document.getElementById('btnRetestFails');
@@ -1229,13 +1290,13 @@
         const label = paused ? 'Paused' : 'Running...';
         btnStart.textContent = label;
         btnStart.classList.add('loading');
-        btnStop.textContent = 'Stop Audit';
+        btnStop.textContent = 'Stop Test';
         btnStop.classList.remove('loading');
       } else {
         btnStart.textContent = 'New Test';
         btnStart.classList.remove('loading');
         if (btnResume) { btnResume.textContent = 'Resume'; btnResume.classList.remove('loading'); btnResume.disabled = false; }
-        btnStop.textContent = 'Stop Audit';
+        btnStop.textContent = 'Stop Test';
         btnStop.classList.remove('loading');
       }
 
@@ -1274,34 +1335,52 @@
       }
 
       const t = state.totalNodes || 0;
-      const done = state.testedNodes || 0;
       const fail = state.failedNodes || 0;
+      const skipped = state.skippedNodes || 0;
       const p10 = state.passed10 || 0;
-      const processed = done + fail;
-
-      document.getElementById('statTested').textContent = processed;
+      // The SSE `result` event delivers every row once and we upsert by
+      // address — `resultsArr.length` is the authoritative processed count.
+      // Don't sum state counters; they double-count whenever the pipeline
+      // increments a counter before the next recomputeCounters pass.
+      const processed = Array.isArray(resultsArr) ? resultsArr.length : 0;
+      const done = resultsArr ? resultsArr.filter(r => r && r.actualMbps != null).length : (state.testedNodes || 0);
+      if (t > 0) {
+        document.getElementById('statTested').textContent = `${processed.toLocaleString()} / ${t.toLocaleString()}`;
+      } else {
+        document.getElementById('statTested').textContent = processed.toLocaleString();
+      }
       if (t > 0 && t > processed) {
         const remaining = t - processed;
-        document.getElementById('statTestedSub').textContent = `of ${t.toLocaleString()} total | ${remaining.toLocaleString()} remaining`;
+        document.getElementById('statTestedSub').textContent = `${remaining.toLocaleString()} remaining`;
       } else if (t > 0 && t <= processed) {
-        document.getElementById('statTestedSub').textContent = `of ${t.toLocaleString()} total | complete`;
+        document.getElementById('statTestedSub').textContent = 'complete';
       } else {
         document.getElementById('statTestedSub').textContent = processed > 0 ? `${processed} tested | hit Rescan for total` : 'no data yet';
       }
 
+      // TEST RUN detection — mirrors /live's logic so SLA-derived tiles can
+      // dash out (those metrics are not measured during a skip-only demo).
+      const isDryRun = !!state.testRun ||
+                       resultsArr.some(r => r && r.errorCode === 'TEST_RUN_SKIP');
+      const DASH = '—';
+
       // Total Failed
-      document.getElementById('statTotalFailed').textContent = fail;
+      document.getElementById('statTotalFailed').textContent = isDryRun ? DASH : fail;
       const failPct = processed > 0 ? (fail / processed * 100).toFixed(1) : 0;
-      document.getElementById('statTotalFailedPct').textContent = failPct + '% failure rate';
+      document.getElementById('statTotalFailedPct').textContent = isDryRun
+        ? 'not measured in test run'
+        : failPct + '% failure rate';
 
       // 10 Mbps SLA + pass rate combined
-      document.getElementById('statPassed').textContent = p10;
+      document.getElementById('statPassed').textContent = isDryRun ? DASH : p10;
       const passRate = done > 0 ? (p10 / done * 100).toFixed(1) : 0;
-      document.getElementById('statPassedPct').textContent = passRate + '% of connected';
+      document.getElementById('statPassedPct').textContent = isDryRun
+        ? 'not measured in test run'
+        : passRate + '% of connected';
 
       // Pass Rate = successful connections / total tested
       const connRate = processed > 0 ? (done / processed * 100).toFixed(1) : 0;
-      document.getElementById('statPassRate').textContent = connRate + '%';
+      document.getElementById('statPassRate').textContent = isDryRun ? DASH : connRate + '%';
 
       // Not Online: failed nodes with 0 peers or null peers
       const notOnline = resultsArr.filter(r => r.actualMbps == null && (r.peers === 0 || r.peers == null)).length;
@@ -1330,11 +1409,13 @@
       const currentSDK = state.activeSDK || 'js';
       const currentRunResults = resultsArr.filter(r => !r.sdk || r.sdk === currentSDK);
       const deadPlan = currentRunResults.filter(r => r.inPlan && r.actualMbps == null).length;
-      document.getElementById('statDeadPlan').textContent = deadPlan;
+      document.getElementById('statDeadPlan').textContent = isDryRun ? DASH : deadPlan;
       const totalPlanTested = currentRunResults.filter(r => r.inPlan).length;
-      document.getElementById('statDeadPlanPct').textContent = totalPlanTested > 0
-        ? `${deadPlan}/${totalPlanTested} plan nodes failed`
-        : 'No plan failures';
+      document.getElementById('statDeadPlanPct').textContent = isDryRun
+        ? 'not measured in test run'
+        : (totalPlanTested > 0
+            ? `${deadPlan}/${totalPlanTested} plan nodes failed`
+            : 'No plan failures');
 
       const retryCount = state.retryCount || 0;
       const fill = document.getElementById('progressFill');
@@ -1553,7 +1634,8 @@
 
       const isFail = r.actualMbps == null && !r.skipped;
       const copyCell = isFail && addrFull
-        ? `<button class="row-copy-btn" title="Copy failure log" data-addr="${addrFull}" data-moniker="${(r.moniker || '').replace(/"/g,'&quot;')}" onclick="copyRowFailure(event)">⎘</button>`
+        ? `<button class="row-copy-btn" title="Copy failure log" data-addr="${addrFull}" data-moniker="${(r.moniker || '').replace(/"/g,'&quot;')}" onclick="copyRowFailure(event)">⎘</button>
+           <button class="row-copy-btn" title="View error details" data-addr="${addrFull}" data-moniker="${(r.moniker || '').replace(/"/g,'&quot;')}" onclick="showRowFailurePopup(event)" style="margin-left:4px">👁</button>`
         : '<span style="color:var(--text-muted)">—</span>';
 
       tr.innerHTML = `
@@ -1684,11 +1766,94 @@
       }
     }).catch(() => {});
 
-    async function devStart(dryRun) {
+    let _pricingMode = 'gigabytes';
+    function setPricingMode(mode) {
+      _pricingMode = mode === 'hours' ? 'hours' : 'gigabytes';
+      const gb = document.getElementById('priceModeGB');
+      const hr = document.getElementById('priceModeHr');
+      const active = 'background:var(--accent);color:var(--bg-card-solid);border:0;padding:0 12px;height:100%;cursor:pointer;font:inherit;letter-spacing:inherit;';
+      const idle = 'background:transparent;color:var(--text-dim);border:0;padding:0 12px;height:100%;cursor:pointer;font:inherit;letter-spacing:inherit;';
+      const idleR = idle + 'border-left:1px solid var(--border);';
+      if (gb && hr) {
+        gb.setAttribute('style', _pricingMode === 'gigabytes' ? active : idle);
+        hr.setAttribute('style', _pricingMode === 'hours' ? active + 'border-left:1px solid var(--border);' : idleR);
+      }
+      try { localStorage.setItem('sntPricingMode', _pricingMode); } catch {}
+    }
+    try {
+      const saved = localStorage.getItem('sntPricingMode');
+      if (saved === 'hours') setPricingMode('hours');
+    } catch {}
+
+    // ─── Testing Mode (PLAN / P2P / TEST RUN) ────────────────────────────────
+    // One mutually-exclusive mode drives Start Test, Resume, and Retest Failed.
+    // ∞ LOOP is orthogonal — it applies to whichever mode is active.
+    // _selectedPlanId: when PLAN mode is active and a plan has been picked from
+    // the modal, the MODE box shows "PLAN #N" instead of just "PLAN".
+    let _testingMode = 'p2p';
+    let _selectedPlanId = null;
+    let _selectedSubscriptionId = null;
+    let _selectedGranter = null;
+    function _renderPlanLabel() {
+      const lbl = document.getElementById('modePlanLabel');
+      if (!lbl) return;
+      lbl.textContent = (_testingMode === 'plan' && _selectedPlanId) ? ('PLAN #' + _selectedPlanId) : 'PLAN';
+    }
+    function setTestingMode(mode, opts) {
+      const prev = _testingMode;
+      _testingMode = (mode === 'plan' || mode === 'testrun') ? mode : 'p2p';
+      const ids = { plan: 'modePlan', p2p: 'modeP2P', testrun: 'modeTestRun' };
+      Object.entries(ids).forEach(([m, id]) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        if (m === _testingMode) {
+          el.style.background = 'var(--accent)';
+          el.style.color = 'var(--bg-card-solid)';
+        } else {
+          el.style.background = 'transparent';
+          el.style.color = 'var(--text-dim)';
+        }
+      });
+      // Pricing toggle is meaningless in PLAN mode (subscription-allocated sessions)
+      const priceWrap = document.getElementById('pricingModeWrap');
+      if (priceWrap) priceWrap.style.opacity = _testingMode === 'plan' ? '0.45' : '1';
+      // Switching away from PLAN clears the previously-picked plan id.
+      if (_testingMode !== 'plan') {
+        _selectedPlanId = null;
+        _selectedSubscriptionId = null;
+        _selectedGranter = null;
+      }
+      _renderPlanLabel();
+      try { localStorage.setItem('sntTestingMode', _testingMode); } catch {}
+    }
+
+    // Clicking PLAN should open the picker WITHOUT pre-committing the mode.
+    // If the operator dismisses the modal without picking a plan, the toggle
+    // stays on whatever was previously active (P2P, TEST RUN, or a previously
+    // chosen plan). Only runSubPlanTest() (called when the operator actually
+    // picks a plan from the modal) commits the mode via setTestingMode('plan',
+    // { fromPick: true }).
+    function onClickPlanMode() {
+      try { openSubPlanModal(); } catch {}
+    }
+    try {
+      const savedMode = localStorage.getItem('sntTestingMode');
+      if (savedMode) setTestingMode(savedMode, { fromPick: true });
+    } catch {}
+
+    function isTestRunMode() { return _testingMode === 'testrun'; }
+    function isPlanMode() { return _testingMode === 'plan'; }
+
+    async function devStart(testRun) {
+      const loopEl = document.getElementById('infiniteLoop');
+      const infiniteLoop = !!(loopEl && loopEl.checked);
+      const body = { pricingMode: _pricingMode };
+      if (testRun) body.testRun = true;
+      if (infiniteLoop) body.infiniteLoop = true;
       const res = await fetch('/api/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Admin-Request': '1' },
-        body: JSON.stringify(dryRun ? { dryRun: true } : {}),
+        body: JSON.stringify(body),
       });
       const data = await res.json().catch(() => ({}));
       if (data.error) { appendLog('Start failed: ' + data.error); return false; }
@@ -1697,8 +1862,118 @@
 
     async function startAudit() {
       if (state.status === 'running' || state.status === 'paused') { stopAudit(); return; }
-      const dryEl = document.getElementById('dryRunDev');
-      const isDryRun = !!(dryEl && dryEl.checked);
+      // Open the mode chooser — operator picks Subscription Plan / Peer to Peer / Test Run.
+      // Each tile commits the testing mode and then calls _startAuditAfterChoice().
+      openModeChooser();
+    }
+
+    function openModeChooser() {
+      // Tear down any previous chooser
+      const existing = document.getElementById('modeChooserBackdrop');
+      if (existing) existing.remove();
+
+      const backdrop = document.createElement('div');
+      backdrop.id = 'modeChooserBackdrop';
+      backdrop.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9998;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);';
+
+      const modal = document.createElement('div');
+      modal.style.cssText = 'background:var(--bg-card-solid);border:1px solid var(--border-hover);border-radius:10px;padding:28px;max-width:920px;width:92%;max-height:90vh;overflow:auto;color:var(--text);font-family:var(--font-display);';
+
+      const close = () => backdrop.remove();
+      backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+      const onKey = (e) => { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } };
+      document.addEventListener('keydown', onKey);
+
+      modal.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <div style="font-size:18px;font-weight:700;letter-spacing:0.6px">Choose Test Mode</div>
+          <button id="modeChooserClose" style="background:transparent;border:0;color:var(--text-dim);font-size:22px;cursor:pointer;line-height:1">×</button>
+        </div>
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:14px;font-weight:400;letter-spacing:0.3px">Mode is locked once a test starts. To change, stop and start a new test.</div>
+        <label id="chooserLoopWrap" style="display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border:1px solid var(--border-hover);border-radius:6px;cursor:pointer;font-family:var(--font-display);font-size:11px;font-weight:700;letter-spacing:0.5px;color:var(--text-dim);user-select:none;margin-bottom:14px;line-height:1;">
+          <input type="checkbox" id="chooserInfiniteLoop" style="accent-color:var(--accent);margin:0;cursor:pointer;"><span style="font-size:18px;line-height:1;font-weight:400">∞</span>LOOP <span style="font-weight:400;color:var(--text-muted);margin-left:4px">— sweep forever, fresh chain snapshot per pass</span>
+        </label>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px">
+          <div id="tileSubPlan" class="mode-tile" style="border:1px solid var(--border-hover);border-radius:10px;padding:18px;cursor:pointer;background:var(--bg-card);transition:border-color 0.15s,transform 0.1s">
+            <div style="font-size:14px;font-weight:700;letter-spacing:0.7px;margin-bottom:8px;color:var(--green)">SUBSCRIPTION PLAN</div>
+            <div style="font-size:12px;color:var(--text-dim);font-weight:400;line-height:1.5;margin-bottom:10px">Test only nodes inside a subscription plan. Sessions are subscription-allocated; the plan owner pays gas via fee grant.</div>
+            <div style="font-size:11px;color:var(--text-muted);font-weight:400">Opens the plan picker.</div>
+          </div>
+          <div id="tileP2P" class="mode-tile" style="border:1px solid var(--border-hover);border-radius:10px;padding:18px;cursor:pointer;background:var(--bg-card);transition:border-color 0.15s,transform 0.1s">
+            <div style="font-size:14px;font-weight:700;letter-spacing:0.7px;margin-bottom:8px;color:var(--accent)">PEER TO PEER</div>
+            <div style="font-size:12px;color:var(--text-dim);font-weight:400;line-height:1.5;margin-bottom:10px">Test every online node, paying each session from this wallet directly.</div>
+            <div style="margin:10px 0 8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+              <span style="font-size:10px;color:var(--text-muted);letter-spacing:0.5px">PRICING:</span>
+              <button type="button" id="p2pPriceGB" data-pm="gigabytes" style="background:var(--accent);color:var(--bg-card-solid);border:0;border-radius:4px;padding:4px 10px;font:inherit;font-size:10px;font-weight:700;letter-spacing:0.5px;cursor:pointer">PER GB</button>
+              <button type="button" id="p2pPriceHr" data-pm="hours" style="background:transparent;color:var(--text-dim);border:1px solid var(--border);border-radius:4px;padding:3px 9px;font:inherit;font-size:10px;font-weight:700;letter-spacing:0.5px;cursor:pointer">PER HOUR</button>
+            </div>
+            <div style="font-size:10px;color:var(--text-muted);font-weight:400;line-height:1.5;font-style:italic">Note: refund-on-disconnect (closing the locked escrow with the node after each connection) is under research — current behavior locks the per-session quote until the chain settles it.</div>
+          </div>
+          <div id="tileTestRun" class="mode-tile" style="border:1px solid var(--border-hover);border-radius:10px;padding:18px;cursor:pointer;background:var(--bg-card);transition:border-color 0.15s,transform 0.1s">
+            <div style="font-size:14px;font-weight:700;letter-spacing:0.7px;margin-bottom:8px;color:var(--text)">TEST RUN</div>
+            <div style="font-size:12px;color:var(--text-dim);font-weight:400;line-height:1.5;margin-bottom:10px">Skip-only demo. Runs the full pipeline but skips per-node connect + payment. Every node row gets <code style="font-size:11px;color:var(--accent)">TEST_RUN_SKIP</code>.</div>
+            <div style="font-size:11px;color:var(--text-muted);font-weight:400">No real measurements. No payments. One database.</div>
+          </div>
+        </div>
+      `;
+      backdrop.appendChild(modal);
+      document.body.appendChild(backdrop);
+
+      modal.querySelector('#modeChooserClose').addEventListener('click', close);
+
+      // Hover styling
+      const tiles = modal.querySelectorAll('.mode-tile');
+      tiles.forEach(t => {
+        t.addEventListener('mouseenter', () => { t.style.borderColor = 'var(--accent)'; t.style.transform = 'translateY(-1px)'; });
+        t.addEventListener('mouseleave', () => { t.style.borderColor = 'var(--border-hover)'; t.style.transform = ''; });
+      });
+
+      // P2P pricing toggle inside the chooser
+      let chooserPricingMode = (typeof _pricingMode === 'string' && _pricingMode) ? _pricingMode : 'gigabytes';
+      const pmGB = modal.querySelector('#p2pPriceGB');
+      const pmHr = modal.querySelector('#p2pPriceHr');
+      const syncPm = () => {
+        if (chooserPricingMode === 'hours') {
+          pmHr.style.background = 'var(--accent)'; pmHr.style.color = 'var(--bg-card-solid)'; pmHr.style.border = '0';
+          pmGB.style.background = 'transparent'; pmGB.style.color = 'var(--text-dim)'; pmGB.style.border = '1px solid var(--border)';
+        } else {
+          pmGB.style.background = 'var(--accent)'; pmGB.style.color = 'var(--bg-card-solid)'; pmGB.style.border = '0';
+          pmHr.style.background = 'transparent'; pmHr.style.color = 'var(--text-dim)'; pmHr.style.border = '1px solid var(--border)';
+        }
+      };
+      syncPm();
+      pmGB.addEventListener('click', (e) => { e.stopPropagation(); chooserPricingMode = 'gigabytes'; syncPm(); });
+      pmHr.addEventListener('click', (e) => { e.stopPropagation(); chooserPricingMode = 'hours'; syncPm(); });
+
+      // Sync chooser's ∞ LOOP into the hidden #infiniteLoop the start path reads.
+      const syncLoop = () => {
+        const live = document.getElementById('infiniteLoop');
+        const choice = modal.querySelector('#chooserInfiniteLoop');
+        if (live && choice) live.checked = !!choice.checked;
+      };
+
+      modal.querySelector('#tileSubPlan').addEventListener('click', () => {
+        syncLoop();
+        close();
+        // setTestingMode is committed by the picker callback (fromPick:true).
+        try { openSubPlanModal(); } catch {}
+      });
+      modal.querySelector('#tileP2P').addEventListener('click', async () => {
+        syncLoop();
+        close();
+        try { setPricingMode(chooserPricingMode); } catch {}
+        setTestingMode('p2p', { fromPick: true });
+        await _startAuditAfterChoice(false);
+      });
+      modal.querySelector('#tileTestRun').addEventListener('click', async () => {
+        syncLoop();
+        close();
+        setTestingMode('testrun', { fromPick: true });
+        await _startAuditAfterChoice(true);
+      });
+    }
+
+    async function _startAuditAfterChoice(isDryRun) {
       if (!isDryRun && !confirm('Start a NEW test? Current results will be saved and a fresh test begins.')) return;
       // Clear previous test data from dashboard
       resultsArr = [];
@@ -1728,25 +2003,26 @@
       try {
         if (!await devStart(isDryRun)) {
           btn.classList.remove('loading');
-          btn.textContent = 'New Test';
+          btn.textContent = 'Start Test';
           btn.disabled = false;
           return;
         }
         loadRunsList();
       } catch (e) {
         btn.classList.remove('loading');
-        btn.textContent = 'New Test';
+        btn.textContent = 'Start Test';
         btn.disabled = false;
       }
     }
 
     async function resumeAudit() {
-      const dryEl = document.getElementById('dryRunDev');
-      if (dryEl && dryEl.checked) {
+      if (isTestRunMode()) {
         if (state.status === 'running' || state.status === 'paused') { stopAudit(); return; }
         await devStart(true);
         return;
       }
+      // Plan mode: server-side resume is mode-aware and uses the persisted
+      // planId/subId/granter from the run that was paused — DO NOT re-prompt.
       const btn = document.getElementById('btnResume');
       btn.classList.add('loading');
       btn.textContent = 'Resuming...';
@@ -1773,8 +2049,7 @@
     }
 
     async function retestFails() {
-      const dryEl = document.getElementById('dryRunDev');
-      if (dryEl && dryEl.checked) {
+      if (isTestRunMode()) {
         if (state.status === 'running' || state.status === 'paused') { stopAudit(); return; }
         await devStart(true);
         return;
@@ -1829,6 +2104,118 @@
       }
     }
 
+    // Sentinel Audit CLI reference popup. Mirrors the bundled `bin/cli.js`
+    // (npm bin: `sentinel-audit`). Closeable via × button, Escape, or
+    // backdrop click — same UX as showInfoPopup().
+    function showCliPopup() {
+      const existing = document.getElementById('cliOverlay');
+      if (existing) { existing.remove(); return; }
+
+      const overlay = document.createElement('div');
+      overlay.id = 'cliOverlay';
+      overlay.style.cssText = 'position:fixed;inset:0;background:var(--glass-bg);backdrop-filter:blur(8px);z-index:9999;display:flex;align-items:center;justify-content:center;';
+      overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+      const popup = document.createElement('div');
+      popup.style.cssText = 'background:var(--bg-card-solid);border:1px solid var(--border-hover);border-radius:16px;padding:28px 32px;max-width:760px;width:92%;max-height:86vh;overflow-y:auto;color:var(--text);font-family:var(--font-display);line-height:1.55;box-shadow:var(--shadow-lg)';
+
+      const codeStyle = 'font-family:var(--font-mono,ui-monospace,Menlo,Consolas,monospace);background:var(--bg-input);color:var(--text);padding:2px 6px;border-radius:4px;font-size:12px;border:1px solid var(--border);';
+      const blockStyle = 'font-family:var(--font-mono,ui-monospace,Menlo,Consolas,monospace);background:var(--bg-input);color:var(--text);padding:10px 12px;border-radius:6px;font-size:12px;border:1px solid var(--border);white-space:pre;overflow-x:auto;line-height:1.6;';
+
+      popup.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">
+          <div>
+            <h2 style="font-family:var(--font-serif);font-size:20px;font-weight:700;letter-spacing:1px;margin:0">Sentinel Audit CLI</h2>
+            <div style="font-size:11px;color:var(--text-muted);letter-spacing:0.4px;margin-top:4px">Headless control of the same audit pipeline that powers this dashboard</div>
+          </div>
+          <span onclick="document.getElementById('cliOverlay').remove()" style="cursor:pointer;color:var(--text-dim);font-size:22px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:50%;transition:all 0.15s" onmouseover="this.style.color='var(--text)';this.style.background='var(--border-hover)'" onmouseout="this.style.color='var(--text-dim)';this.style.background='transparent'">&times;</span>
+        </div>
+
+        <div style="font-size:13px;color:var(--text-dim)">
+          <div style="margin-bottom:18px">
+            <div style="color:var(--accent);font-weight:600;font-size:14px;margin-bottom:6px">Install &amp; Invoke</div>
+            <div style="margin-bottom:8px">Bundled in this repo as <span style="${codeStyle}">bin/cli.js</span> and exposed via the npm bin <span style="${codeStyle}">sentinel-audit</span>.</div>
+            <div style="${blockStyle}"># From a clone of the repo
+npm install
+node bin/cli.js list
+
+# Or install globally and use the bin directly
+npm install -g .
+sentinel-audit --help</div>
+          </div>
+
+          <div style="margin-bottom:18px">
+            <div style="color:var(--text);font-weight:600;font-size:14px;margin-bottom:6px">Global Flags</div>
+            <div style="${blockStyle}">--help, -h          Show help for the command (or top-level)
+--version, -v       Print version
+--json              Force JSON output (default for most commands)
+--pretty            Human-readable output
+--lcd &lt;url&gt;         Override LCD endpoint
+--sdk &lt;js|tkd&gt;      SDK for chain queries (default: js)</div>
+          </div>
+
+          <div style="margin-bottom:18px">
+            <div style="color:var(--accent);font-weight:600;font-size:14px;margin-bottom:6px">Discovery</div>
+            <div style="margin-bottom:6px"><span style="${codeStyle}">list</span> — Every command with description + flags. AI agents use this as a registry.</div>
+            <div style="margin-bottom:6px"><span style="${codeStyle}">functions</span> — Every exported SDK function grouped by module.</div>
+            <div><span style="${codeStyle}">verify-sdks</span> — Verify installed SDKs match their GitHub tag (byte-for-byte).</div>
+          </div>
+
+          <div style="margin-bottom:18px">
+            <div style="color:var(--text);font-weight:600;font-size:14px;margin-bottom:6px">Read (chain queries — no tokens spent)</div>
+            <div style="margin-bottom:6px"><span style="${codeStyle}">nodes</span> — List all active chain nodes.</div>
+            <div style="margin-bottom:6px"><span style="${codeStyle}">node &lt;addr&gt;</span> — Single node details.</div>
+            <div style="margin-bottom:6px"><span style="${codeStyle}">balance [addr]</span> — P2P token balance for a wallet (default: configured mnemonic).</div>
+            <div style="margin-bottom:6px"><span style="${codeStyle}">subscriptions</span> — List subscriptions for the configured wallet.</div>
+            <div><span style="${codeStyle}">plans</span> — List all on-chain plans.</div>
+          </div>
+
+          <div style="margin-bottom:18px">
+            <div style="color:var(--red);font-weight:600;font-size:14px;margin-bottom:6px">Action (spends real tokens / starts processes)</div>
+            <div style="margin-bottom:6px"><span style="${codeStyle}">speed</span> — Baseline internet speed test (no VPN).</div>
+            <div style="margin-bottom:6px"><span style="${codeStyle}">test &lt;addr&gt;</span> — End-to-end test one node. Pays a real session fee.</div>
+            <div style="margin-bottom:6px"><span style="${codeStyle}">audit</span> — Full audit loop across every node. Long-running.</div>
+            <div><span style="${codeStyle}">serve</span> — Start the browser dashboard server (this UI).</div>
+          </div>
+
+          <div style="margin-bottom:18px">
+            <div style="color:var(--accent);font-weight:600;font-size:14px;margin-bottom:6px">Agent</div>
+            <div><span style="${codeStyle}">agent</span> — End-to-end driver hitting every server function over HTTP. Useful for AI / automation. Run <span style="${codeStyle}">sentinel-audit agent map --pretty</span> for the registry.</div>
+          </div>
+
+          <div style="margin-bottom:18px">
+            <div style="color:var(--text);font-weight:600;font-size:14px;margin-bottom:6px">Examples</div>
+            <div style="${blockStyle}">sentinel-audit list
+sentinel-audit nodes --pretty
+sentinel-audit node sentnode1abc... --pretty
+sentinel-audit balance --pretty
+sentinel-audit test sentnode1abc... --pretty
+sentinel-audit serve --port 3001
+
+# AI quick-start (machine-readable)
+sentinel-audit list
+sentinel-audit functions</div>
+          </div>
+
+          <div style="margin-bottom:4px">
+            <div style="color:var(--text-muted);font-weight:600;font-size:14px;margin-bottom:6px">Notes</div>
+            <div style="margin-bottom:4px">• Reads <span style="${codeStyle}">.env</span> from the package root for <span style="${codeStyle}">MNEMONIC</span>, <span style="${codeStyle}">RPC_ENDPOINTS</span>, etc.</div>
+            <div style="margin-bottom:4px">• Default output is JSON so agents can pipe it. Add <span style="${codeStyle}">--pretty</span> for human reading.</div>
+            <div>• The <span style="${codeStyle}">serve</span> command starts the same Express server this dashboard runs on (port 3001 by default).</div>
+          </div>
+        </div>
+
+        <div style="text-align:center;margin-top:20px;font-size:11px;color:var(--text-muted)">
+          Press Escape or click outside to close
+        </div>
+      `;
+      overlay.appendChild(popup);
+      document.body.appendChild(overlay);
+      document.addEventListener('keydown', function esc(e) {
+        if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', esc); }
+      });
+    }
+
     function showInfoPopup() {
       const existing = document.getElementById('infoOverlay');
       if (existing) { existing.remove(); return; }
@@ -1868,7 +2255,7 @@
           </div>
 
           <div style="margin-bottom:18px">
-            <div style="color:var(--text-muted);font-weight:600;font-size:14px;margin-bottom:4px">Stop Audit</div>
+            <div style="color:var(--text-muted);font-weight:600;font-size:14px;margin-bottom:4px">Stop Test</div>
             Gracefully stops the current scan after the active node finishes. Results are saved. You can Resume later.
           </div>
 
@@ -1928,13 +2315,12 @@
       popup.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
           <div>
-            <div style="font-size:10px;text-transform:uppercase;letter-spacing:2px;color:var(--text-dim);margin-bottom:4px">Subscription Plan</div>
-            <h2 style="font-family:var(--font-display);font-size:22px;font-weight:700;letter-spacing:0.5px;margin:0;color:var(--text)">Test Sub. Plan</h2>
+            <h2 style="font-family:var(--font-display);font-size:22px;font-weight:700;letter-spacing:0.5px;margin:0;color:var(--text)">Test Subscription Plan</h2>
           </div>
           <span onclick="document.getElementById('subPlanOverlay').remove()" style="cursor:pointer;color:var(--text-dim);font-size:20px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:50%;transition:all 0.15s" onmouseover="this.style.color='var(--text)';this.style.background='var(--border-hover)'" onmouseout="this.style.color='var(--text-dim)';this.style.background='transparent'">&times;</span>
         </div>
         <div style="font-size:12px;color:var(--text-dim);margin:14px 0 22px;padding:12px 14px;background:var(--accent-dim);border:1px solid rgba(30,136,229,0.2);border-radius:var(--radius-sm);line-height:1.5">
-          Only tests nodes in the selected plan. Every session TX is <b style="color:var(--accent-bright)">fee-granted by the plan owner</b> — this wallet pays zero gas.
+          Only tests nodes in the selected plan. Session TXs are <b style="color:var(--accent-bright)">fee-granted by the plan owner</b> — but only if that plan owner has an active feegrant for this wallet. Plans without a feegrant are flagged below and disabled (this wallet would otherwise pay gas itself).
         </div>
         <div id="subPlanList" style="font-size:13px;color:var(--text-dim)">
           <div style="padding:24px;text-align:center;color:var(--text-dim)">Loading your subscriptions…</div>
@@ -1962,6 +2348,9 @@
           const badge = p.feeGrantActive
             ? '<span class="mono-tag-green" style="font-size:9px;padding:2px 8px;letter-spacing:1px">FEE GRANT ACTIVE</span>'
             : '<span class="mono-tag-red" style="font-size:9px;padding:2px 8px;letter-spacing:1px">NO FEE GRANT</span>';
+          const allocBadge = p.viaAllocation
+            ? '<span class="mono-tag" style="font-size:9px;padding:2px 8px;letter-spacing:1px;border:1px solid var(--accent);color:var(--accent)">ALLOCATION</span>'
+            : '';
           const disabled = !p.feeGrantActive || p.nodeCount === 0 || !p.ownerSentAddr;
           const reason = !p.ownerSentAddr ? 'Plan owner unknown'
             : p.nodeCount === 0 ? 'No active nodes in this plan'
@@ -1976,6 +2365,7 @@
                 <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
                   <span style="color:var(--text);font-weight:700;font-size:15px;font-family:var(--font-display);letter-spacing:0.3px">Plan ${p.planId}</span>
                   ${badge}
+                  ${allocBadge}
                 </div>
                 <div style="font-size:11px;color:var(--text-dim);line-height:1.6;display:flex;flex-wrap:wrap;gap:4px 14px">
                   <span>Subscription <span style="color:var(--text);font-family:var(--font-mono);font-size:10px">#${p.subscriptionId}</span></span>
@@ -1995,8 +2385,7 @@
     }
 
     async function testPlanFlow() {
-      const dryEl = document.getElementById('dryRunDev');
-      if (dryEl && dryEl.checked) {
+      if (isTestRunMode()) {
         if (state.status === 'running' || state.status === 'paused') { stopAudit(); return; }
         await devStart(true);
         return;
@@ -2007,17 +2396,39 @@
     async function runSubPlanTest(planId, subscriptionId, granter) {
       const overlay = document.getElementById('subPlanOverlay');
       if (overlay) overlay.remove();
-      const dryEl = document.getElementById('dryRunDev');
-      if (dryEl && dryEl.checked) {
+      // Reflect the chosen plan in the MODE picker so the operator sees "PLAN #N"
+      // both before pressing Start Test and while the run is live.
+      _selectedPlanId = planId;
+      _selectedSubscriptionId = subscriptionId;
+      _selectedGranter = granter;
+      setTestingMode('plan', { fromPick: true });
+      // Reset the live log + result rows so this run starts on a clean canvas,
+      // matching the wipe that startAudit() performs for the P2P path.
+      const _logBody = document.getElementById('logBody');
+      if (_logBody) _logBody.innerHTML = '';
+      resultsArr = [];
+      state.testedNodes = 0;
+      state.failedNodes = 0;
+      state.totalNodes = 0;
+      state.passed10 = 0;
+      state.passed15 = 0;
+      state.passedBaseline = 0;
+      state.nodeSpeedHistory = [];
+      state.baselineHistory = [];
+      renderTable();
+      applyState();
+      if (isTestRunMode()) {
         if (state.status === 'running' || state.status === 'paused') { stopAudit(); return; }
         await devStart(true);
         return;
       }
       try {
+        const loopEl = document.getElementById('infiniteLoop');
+        const infiniteLoop = !!(loopEl && loopEl.checked);
         const r = await fetch('/api/test-sub-plan', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Admin-Request': '1' },
-          body: JSON.stringify({ planId, subscriptionId, granter }),
+          body: JSON.stringify({ planId, subscriptionId, granter, infiniteLoop }),
         });
         const data = await r.json();
         if (data.error) alert('Sub. Plan test failed to start: ' + data.error);
@@ -2081,7 +2492,7 @@
 
     async function startCreateMode() {
       const btn = document.getElementById('btnCreateStart');
-      const dryEl = document.getElementById('dryRunDev');
+      const dryEl = document.getElementById('testRunDev');
       if (dryEl && dryEl.checked) {
         if (state.status === 'running' || state.status === 'paused') { stopAudit(); return; }
         await devStart(true);
@@ -2441,6 +2852,87 @@
         nsShowToast('Copy failed: ' + (err.message || 'unknown'));
       }
       setTimeout(() => { btn.innerHTML = original; btn.disabled = false; }, 1500);
+    }
+
+    async function showRowFailurePopup(ev) {
+      ev.stopPropagation();
+      const btn = ev.currentTarget;
+      const addr = btn.dataset.addr;
+      const moniker = btn.dataset.moniker || '';
+      if (!addr) { nsShowToast('No address'); return; }
+
+      const existing = document.getElementById('errorPopupOverlay');
+      if (existing) existing.remove();
+
+      const overlay = document.createElement('div');
+      overlay.id = 'errorPopupOverlay';
+      overlay.style.cssText = 'position:fixed;inset:0;background:var(--glass-bg);backdrop-filter:blur(8px);z-index:9999;display:flex;align-items:center;justify-content:center;';
+      overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+      const popup = document.createElement('div');
+      popup.style.cssText = 'background:var(--bg-card-solid);border:1px solid var(--border);border-radius:16px;padding:24px 28px;max-width:780px;width:92%;max-height:85vh;overflow-y:auto;color:var(--text);font-family:var(--font-display);line-height:1.55';
+      popup.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+          <h2 style="font-family:var(--font-serif);font-size:18px;font-weight:700;letter-spacing:1px;margin:0">Node Error Details</h2>
+          <span onclick="document.getElementById('errorPopupOverlay').remove()" style="cursor:pointer;color:var(--text-dim);font-size:22px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:50%" onmouseover="this.style.color='var(--text)';this.style.background='var(--border-hover)'" onmouseout="this.style.color='var(--text-dim)';this.style.background='transparent'">&times;</span>
+        </div>
+        <div id="errorPopupBody" style="font-size:13px;color:var(--text-dim)">Loading…</div>
+      `;
+      overlay.appendChild(popup);
+      document.body.appendChild(overlay);
+
+      try {
+        const res = await fetch('/api/public/node/' + encodeURIComponent(addr) + '/errors?limit=1', {
+          credentials: 'same-origin',
+        });
+        const data = await res.json();
+        const errs = (data && data.errors) || [];
+        const body = document.getElementById('errorPopupBody');
+        if (!body) return;
+        if (!errs.length) {
+          body.innerHTML = '<div style="color:var(--text-muted)">No stored failure log for this node yet.</div>';
+          return;
+        }
+        const er = errs[0];
+        const escapeHtml = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+        const captured = er.captured_at ? new Date(typeof er.captured_at === 'number' ? er.captured_at : Number(er.captured_at) || er.captured_at).toLocaleString() : '—';
+        const row = (label, value) => `
+          <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+            <div style="color:var(--text-muted);font-size:12px">${label}</div>
+            <div style="color:var(--text);word-break:break-all">${value || '—'}</div>
+          </div>`;
+        body.innerHTML = `
+          ${row('Node', escapeHtml(moniker))}
+          ${row('Address', `<span style="font-family:var(--font-mono);font-size:12px">${escapeHtml(addr)}</span>`)}
+          ${row('Stage', escapeHtml(er.stage))}
+          ${row('Error Code', `<span style="font-family:var(--font-mono);font-size:12px">${escapeHtml(er.error_code)}</span>`)}
+          ${row('Captured', escapeHtml(captured))}
+          ${row('Message', `<span style="font-family:var(--font-mono);font-size:12px;white-space:pre-wrap">${escapeHtml(er.error_message)}</span>`)}
+          ${er.log_snippet ? `
+            <div style="margin-top:14px">
+              <div style="color:var(--text-muted);font-size:12px;margin-bottom:6px">Log Snippet</div>
+              <pre style="background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:10px 12px;color:var(--text);font-family:var(--font-mono);font-size:11.5px;line-height:1.5;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0">${escapeHtml(er.log_snippet)}</pre>
+            </div>` : ''}
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+            <button onclick="(function(b){const t=[
+              'Sentinel Node Tester — Failure Log',
+              '──────────────────────────────────',
+              'Node:       ' + ${JSON.stringify(moniker || '—')},
+              'Address:    ' + ${JSON.stringify(addr)},
+              'Stage:      ' + ${JSON.stringify(er.stage || '—')},
+              'Error Code: ' + ${JSON.stringify(er.error_code || '—')},
+              'Message:    ' + ${JSON.stringify(er.error_message || '—')},
+              'Captured:   ' + ${JSON.stringify(er.captured_at || '—')},
+              '',
+              ${er.log_snippet ? `'Log Snippet:', ${JSON.stringify(er.log_snippet)}` : ''}
+            ].filter(x=>x!=null&&x!==undefined).join('\\n');navigator.clipboard&&navigator.clipboard.writeText(t).then(()=>{b.textContent='✓ Copied';setTimeout(()=>b.textContent='⎘ Copy',1500)}).catch(()=>{const ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();b.textContent='✓ Copied';setTimeout(()=>b.textContent='⎘ Copy',1500)})})(this)" class="row-copy-btn" style="padding:6px 14px">⎘ Copy</button>
+            <button onclick="document.getElementById('errorPopupOverlay').remove()" class="row-copy-btn" style="padding:6px 14px">Close</button>
+          </div>
+        `;
+      } catch (err) {
+        const body = document.getElementById('errorPopupBody');
+        if (body) body.innerHTML = '<div style="color:var(--red)">Failed to load: ' + (err.message || 'unknown') + '</div>';
+      }
     }
 
     // ═══════════════════════════════════════════════════════════════════════

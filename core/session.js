@@ -333,6 +333,9 @@ export function extractSessionMap(txResult, nodeAddrs) {
  * Returns Map<nodeAddr, BigInt sessionId> for all NEW sessions.
  */
 export async function submitBatchPayment(client, account, denom, gigabytes, batch, state, broadcast) {
+  const pricingMode = state?.pricingMode === 'hours' ? 'hours' : 'gigabytes';
+  const sessionGigabytes = pricingMode === 'hours' ? 0 : gigabytes;
+  const sessionHours = pricingMode === 'hours' ? 1 : 0;
   const result = new Map();
   const reusedAddrs = new Set();
   const toPayBatch = [];
@@ -341,15 +344,20 @@ export async function submitBatchPayment(client, account, denom, gigabytes, batc
       if (broadcast) broadcast('log', { msg: `  ⏭ Skip ${node.address.slice(0, 20)}… — already paid this run` });
       continue;
     }
-    const priceEntry = (node.gigabyte_prices || []).find(p => p.denom === denom);
-    if (priceEntry) toPayBatch.push({ node, priceEntry });
+    const priceList = pricingMode === 'hours' ? (node.hourly_prices || []) : (node.gigabyte_prices || []);
+    const priceEntry = priceList.find(p => p.denom === denom);
+    if (priceEntry) {
+      toPayBatch.push({ node, priceEntry });
+    } else if (broadcast && pricingMode === 'hours') {
+      broadcast('log', { msg: `  ⏭ Skip ${node.address.slice(0, 20)}… — no hourly price` });
+    }
   }
   if (toPayBatch.length > 0) {
     const messages = toPayBatch.map(({ node, priceEntry }) => ({
       typeUrl: V3_MSG_TYPE,
       value: {
         from: account.address, node_address: node.address,
-        gigabytes, hours: 0,
+        gigabytes: sessionGigabytes, hours: sessionHours,
         max_price: { denom: priceEntry.denom, base_value: priceEntry.base_value, quote_value: priceEntry.quote_value },
       },
     }));
@@ -369,7 +377,7 @@ export async function submitBatchPayment(client, account, denom, gigabytes, batc
           typeUrl: V3_MSG_TYPE,
           value: {
             from: account.address, node_address: node.address,
-            gigabytes, hours: 0,
+            gigabytes: sessionGigabytes, hours: sessionHours,
           },
         }));
         txResult = await signAndBroadcastRetry(client, account.address, messagesNoMax, fee, broadcast);
@@ -410,8 +418,10 @@ export async function submitBatchPayment(client, account, denom, gigabytes, batc
     }
     if (broadcast) broadcast('log', { msg: `  Batch tx (${n} msgs): ${txResult.transactionHash.slice(0, 16)}…` });
     toPayBatch.forEach(({ node }) => {
-      const priceEntry = (node.gigabyte_prices || []).find(p => p.denom === denom);
-      if (priceEntry) state.spentUdvpn += Math.round(parseFloat(priceEntry.quote_value) || 0) * gigabytes;
+      const list = pricingMode === 'hours' ? (node.hourly_prices || []) : (node.gigabyte_prices || []);
+      const priceEntry = list.find(p => p.denom === denom);
+      const units = pricingMode === 'hours' ? sessionHours : gigabytes;
+      if (priceEntry) state.spentUdvpn += Math.round(parseFloat(priceEntry.quote_value) || 0) * units;
     });
     state.spentUdvpn += 200000 * n;
     state.balance = `${(Math.max(0, state.balanceUdvpn - state.spentUdvpn) / 1_000_000).toFixed(4)} P2P (est. remaining)`;

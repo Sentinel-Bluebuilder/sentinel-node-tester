@@ -648,17 +648,20 @@ function isActiveStatus(status) {
 }
 
 export async function querySubscriptions(walletAddress) {
-  // RPC-first: rpcQuerySubscriptionsForAccount returns raw Any-bytes per sub.
-  // Decode each entry to extract plan_id and subscription_id via _decodePlanSubscription.
+  // RPC-first for direct subs (fast). RPC's QuerySubscriptionsForAccount does
+  // NOT return shared-plan allocations (e.g. plan 36 where wallet is allocatee
+  // not acc_address) — those only appear via LCD. So we always do an LCD pass
+  // afterwards and merge any IDs RPC missed.
+  const rpcOut = [];
   try {
     const rpcClient = await getRpcClient();
     if (rpcClient) {
-      const rawEntries = await rpcQuerySubscriptionsForAccount(rpcClient, walletAddress);
+      // Bug fix: SDK default limit is 100 — wallets with long sub history (older
+      // expired subs still iterated by chain) silently drop newer subscriptions.
+      const rawEntries = await rpcQuerySubscriptionsForAccount(rpcClient, walletAddress, { limit: 5000 });
       if (rawEntries && rawEntries.length > 0) {
-        const out = [];
         for (const entry of rawEntries) {
           try {
-            // Each entry may be an Any-wrapped bytes blob or already-decoded object
             const bytes = entry instanceof Uint8Array ? entry
               : entry.value instanceof Uint8Array ? entry.value
               : null;
@@ -666,24 +669,25 @@ export async function querySubscriptions(walletAddress) {
             const anyDecoded = _decodeAny(bytes);
             if (!anyDecoded.valueBytes) continue;
             const sub = _decodePlanSubscription(anyDecoded.valueBytes);
-            if (!sub.planId) continue; // not a plan subscription
-            out.push({
+            if (!sub.planId) continue;
+            rpcOut.push({
               id: sub.subscriptionId,
               plan_id: sub.planId,
-              status: 'STATUS_ACTIVE', // RPC only returns active subs when status=1
+              status: 'STATUS_ACTIVE',
               expiry: null,
+              ownerAddress: walletAddress, // RPC only returns direct subs
+              viaAllocation: false,
+              grantedBytes: null,
             });
-          } catch { /* skip malformed entries */ }
+          } catch { /* skip malformed */ }
         }
-        if (out.length > 0) return out;
-        // RPC returned entries but none decoded as plan subs — fall through to LCD
       }
     }
   } catch (rpcErr) {
     console.warn('[querySubscriptions] RPC failed, falling back to LCD:', rpcErr.message);
   }
 
-  // LCD fallback: direct query with ?status=1 so chain pre-filters at source.
+  // LCD pass: direct query with ?status=1 so chain pre-filters at source.
   // Also filter client-side with isActiveStatus() to handle both chain v2
   // ("active") and chain v3 ("STATUS_ACTIVE") response formats.
   const lcd = await ensureLcd();
@@ -695,17 +699,54 @@ export async function querySubscriptions(walletAddress) {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     const raw = Array.isArray(data.subscriptions) ? data.subscriptions : [];
-    return raw
-      .filter(s => s.acc_address === walletAddress)
-      .filter(s => isActiveStatus(s.status))
-      .map(s => ({
-        id: s.id,
+    // /accounts/{addr}/subscriptions returns BOTH direct subs and subs where
+    // addr is an allocatee on a shared plan. For non-direct subs, verify a
+    // non-zero allocation via v2 /subscriptions/{id}/allocations.
+    const active = raw.filter(s => isActiveStatus(s.status));
+    const haveIds = new Set(rpcOut.map(s => String(s.id)));
+    const out = [...rpcOut];
+    for (const s of active) {
+      const isOwner = s.acc_address === walletAddress;
+      const sid = String(s.id);
+      // Enrich expiry on RPC entries
+      if (haveIds.has(sid)) {
+        const existing = out.find(x => String(x.id) === sid);
+        if (existing && !existing.expiry) existing.expiry = s.inactive_at || null;
+        if (existing && s.acc_address) existing.ownerAddress = s.acc_address;
+        continue;
+      }
+      let viaAllocation = false;
+      let grantedBytes = null;
+      if (!isOwner) {
+        try {
+          const ar = await fetch(
+            `${lcd}/sentinel/subscription/v2/subscriptions/${sid}/allocations?pagination.limit=500`,
+            { signal: AbortSignal.timeout(10_000) },
+          );
+          if (ar.ok) {
+            const aj = await ar.json();
+            const mine = (aj.allocations || []).find(a => a.address === walletAddress);
+            if (mine && mine.granted_bytes && mine.granted_bytes !== '0') {
+              viaAllocation = true;
+              grantedBytes = mine.granted_bytes;
+            }
+          }
+        } catch { /* skip */ }
+        if (!viaAllocation) continue;
+      }
+      out.push({
+        id: sid,
         plan_id: s.plan_id,
         status: s.status,
         expiry: s.inactive_at || null,
-      }));
+        ownerAddress: s.acc_address,
+        viaAllocation,
+        grantedBytes,
+      });
+    }
+    return out;
   } catch {
-    return [];
+    return rpcOut;
   }
 }
 
@@ -848,6 +889,9 @@ export async function querySubscriberPlansEnriched(walletAddress) {
       feeGrantActive,
       feeGrantCheckFailed,
       nodeCount,
+      viaAllocation: !!s.viaAllocation,
+      grantedBytes: s.grantedBytes || null,
+      subOwnerAddress: s.ownerAddress || null,
     });
   }
   return results;
@@ -893,14 +937,60 @@ export async function queryFeeGrantRpcFirst(client, lcd, granter, grantee) {
         request,
       );
       if (result?.value && result.value.length > 0) {
-        // Successfully got a response — the allowance exists.
-        // Decode the response: field 1 = Grant proto (embedded)
-        const fields = decodeRpcProto(new Uint8Array(result.value));
-        if (fields[1]?.[0]) {
-          // Minimal: return a truthy object indicating active grant.
-          // Full decode would require the Grant proto schema; enough to signal "exists".
-          return { exists: true, _rpcSource: true };
+        // QueryAllowanceResponse { Grant allowance = 1 }
+        // Grant { string granter = 1; string grantee = 2; Any allowance = 3 }
+        // Any { string type_url = 1; bytes value = 2 }
+        const top = decodeRpcProto(new Uint8Array(result.value));
+        const grantBytes = top[1]?.[0]?.value;
+        if (!grantBytes) return null;
+        const grant = decodeRpcProto(grantBytes);
+        const anyBytes = grant[3]?.[0]?.value;
+        if (!anyBytes) return { exists: true, _rpcSource: true };
+        const anyFields = decodeRpcProto(anyBytes);
+        const typeUrl = anyFields[1]?.[0]?.value ? decodeRpcString(anyFields[1][0].value) : null;
+        const innerBytes = anyFields[2]?.[0]?.value;
+
+        // Walk through wrapping allowances (PeriodicAllowance/AllowedMsgAllowance) to
+        // reach the BasicAllowance that carries spend_limit.
+        let outerType = typeUrl;
+        let basicBytes = innerBytes;
+        for (let depth = 0; depth < 3 && basicBytes; depth++) {
+          if (outerType?.endsWith('BasicAllowance')) break;
+          const wrap = decodeRpcProto(basicBytes);
+          // PeriodicAllowance.basic = 1 (BasicAllowance) | AllowedMsgAllowance.allowance = 1 (Any)
+          const innerAnyBytes = wrap[1]?.[0]?.value;
+          if (!innerAnyBytes) break;
+          if (outerType?.endsWith('PeriodicAllowance')) {
+            outerType = '/cosmos.feegrant.v1beta1.BasicAllowance';
+            basicBytes = innerAnyBytes;
+            break;
+          }
+          // AllowedMsgAllowance: inner is Any
+          const innerAny = decodeRpcProto(innerAnyBytes);
+          outerType = innerAny[1]?.[0]?.value ? decodeRpcString(innerAny[1][0].value) : null;
+          basicBytes = innerAny[2]?.[0]?.value;
         }
+
+        // BasicAllowance { repeated Coin spend_limit = 1; Timestamp expiration = 2 }
+        // Coin { string denom = 1; string amount = 2 }
+        const spend_limit = [];
+        if (outerType?.endsWith('BasicAllowance') && basicBytes) {
+          const basic = decodeRpcProto(basicBytes);
+          for (const coinEntry of (basic[1] || [])) {
+            const coin = decodeRpcProto(coinEntry.value);
+            spend_limit.push({
+              denom: coin[1]?.[0]?.value ? decodeRpcString(coin[1][0].value) : '',
+              amount: coin[2]?.[0]?.value ? decodeRpcString(coin[2][0].value) : '0',
+            });
+          }
+        }
+
+        return {
+          exists: true,
+          _rpcSource: true,
+          '@type': typeUrl,
+          spend_limit: spend_limit.length ? spend_limit : null,
+        };
       }
       // Empty response = no grant found
       return null;

@@ -576,7 +576,7 @@
         </select>
         <button class="btn btn-plan" id="btnPlanTest" onclick="testPlan()" style="display:none" title="WIP — Plan testing is under development">Test Plan</button>
         <button class="btn btn-start" id="btnTestAllP2P" onclick="startAudit()" title="Scan every active node on chain. Each session paid from this wallet.">Test ALL (P2P)</button>
-        <button class="btn btn-plan" id="btnTestSubPlan" onclick="openSubPlanModal()" title="Pick a plan you are subscribed to. Every session TX is fee-granted by the plan owner — this wallet pays zero gas.">Test Sub. Plan</button>
+        <button class="btn btn-plan" id="btnTestSubPlan" onclick="openSubPlanModal()" title="Pick a plan you are subscribed to. Session TXs are fee-granted by the plan owner ONLY if they've granted an active feegrant to this wallet — plans without one are flagged and disabled.">Test Sub. Plan</button>
         <button class="btn-help" onclick="showInfoPopup()" title="Dashboard guide">?</button>
       </div>
     </div>
@@ -883,13 +883,13 @@
         const label = paused ? 'Paused' : 'Running...';
         btnStart.textContent = label;
         btnStart.classList.add('loading');
-        btnStop.textContent = 'Stop Audit';
+        btnStop.textContent = 'Stop Test';
         btnStop.classList.remove('loading');
       } else {
         btnStart.textContent = 'New Test';
         btnStart.classList.remove('loading');
         if (btnResume) { btnResume.textContent = 'Resume'; btnResume.classList.remove('loading'); btnResume.disabled = false; }
-        btnStop.textContent = 'Stop Audit';
+        btnStop.textContent = 'Stop Test';
         btnStop.classList.remove('loading');
       }
 
@@ -1503,7 +1503,7 @@
           </div>
 
           <div style="margin-bottom:18px">
-            <div style="color:#888;font-weight:600;font-size:14px;margin-bottom:4px">Stop Audit</div>
+            <div style="color:#888;font-weight:600;font-size:14px;margin-bottom:4px">Stop Test</div>
             Gracefully stops the current scan after the active node finishes. Results are saved. You can Resume later.
           </div>
 
@@ -1571,7 +1571,7 @@
           <span onclick="document.getElementById('subPlanOverlay').remove()" style="cursor:pointer;color:#666;font-size:22px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:50%;transition:all 0.2s" onmouseover="this.style.color='#fff';this.style.background='rgba(255,255,255,0.1)'" onmouseout="this.style.color='#666';this.style.background='transparent'">&times;</span>
         </div>
         <div style="font-size:12px;color:#888;margin-bottom:20px">
-          Only tests nodes in the selected plan. Every session TX is <b style="color:#7c3aed">fee-granted by the plan owner</b> — this wallet pays zero gas.
+          Only tests nodes in the selected plan. Session TXs are <b style="color:#7c3aed">fee-granted by the plan owner</b> — but only if that plan owner has an active feegrant for this wallet. Plans without a feegrant are flagged below and disabled (this wallet would otherwise pay gas itself).
         </div>
         <div id="subPlanList" style="font-size:13px;color:#aaa">
           <div style="padding:20px;text-align:center;color:#666">Loading your subscriptions…</div>

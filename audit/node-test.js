@@ -64,6 +64,30 @@ function logFailure(nodeAddr, error, context = {}) {
   appendFileSync(FAILURE_LOG, JSON.stringify(entry) + '\n', 'utf8');
 }
 
+// Sleep but break out within ~250ms when state.stopRequested flips.
+async function stopAwareSleep(ms, state) {
+  const tick = 250;
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (state?.stopRequested) throw new Error('Stop requested');
+    await sleep(Math.min(tick, deadline - Date.now()));
+  }
+  if (state?.stopRequested) throw new Error('Stop requested');
+}
+
+// Race a promise against state.stopRequested polling so long awaits abort fast.
+async function withStopGuard(promise, state) {
+  let cancelled = false;
+  const stopPoll = new Promise((_, reject) => {
+    const iv = setInterval(() => {
+      if (cancelled) { clearInterval(iv); return; }
+      if (state?.stopRequested) { clearInterval(iv); reject(new Error('Stop requested')); }
+    }, 250);
+  });
+  try { return await Promise.race([promise, stopPoll]); }
+  finally { cancelled = true; }
+}
+
 /**
  * Test a single node. Returns a TestResult or null if fundamentally untestable.
  * With the zero-skip system, null is only returned for truly untestable cases
@@ -164,15 +188,29 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
   }
 
   // ─── Price check ──────────────────────────────────────────────────────────
-  const priceEntry = (node.gigabyte_prices || []).find(p => p.denom === denom);
-  if (!priceEntry) {
+  // Pricing mode: 'gigabytes' (default) or 'hours'.
+  // In subscription-plan flows the pipeline supplies its own messages — this
+  // toggle only affects the P2P MsgStartSession path below.
+  const pricingMode = state.pricingMode === 'hours' ? 'hours' : 'gigabytes';
+  const gigabytePrice = (node.gigabyte_prices || []).find(p => p.denom === denom);
+  const hourlyPrice = (node.hourly_prices || []).find(p => p.denom === denom);
+
+  if (pricingMode === 'hours' && !hourlyPrice) {
+    throw new Error('No hourly udvpn pricing available (node has no hourly_prices entry)');
+  }
+  if (pricingMode === 'gigabytes' && !gigabytePrice) {
     throw new Error('No udvpn pricing available');
   }
 
-  const nodePriceUdvpn = Math.round(parseFloat(priceEntry.quote_value) || 0);
-  const thisCostUdvpn = nodePriceUdvpn * gigabytes;
+  const priceEntry = pricingMode === 'hours' ? hourlyPrice : gigabytePrice;
+  const sessionGigabytes = pricingMode === 'hours' ? 0 : gigabytes;
+  const sessionHours = pricingMode === 'hours' ? 1 : 0;
+  const priceUnits = pricingMode === 'hours' ? sessionHours : sessionGigabytes;
 
-  if (state.dryRun) {
+  const nodePriceUdvpn = Math.round(parseFloat(priceEntry.quote_value) || 0);
+  const thisCostUdvpn = nodePriceUdvpn * priceUnits;
+
+  if (state.testRun) {
     if (broadcast) broadcast('log', { msg: '  🧪 TEST RUN — skipping payment + handshake + speedtest.' });
     const _reportedDownloadMbps = status.bandwidth.download * 8 / 1_000_000;
     return {
@@ -241,7 +279,8 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
     if (broadcast) broadcast('log', { msg: `⚠ LOW BALANCE: ${(remainingBalance / 1_000_000).toFixed(4)} P2P` });
   }
 
-  const costLabel = preSessionId ? 'pre-paid' : sessionId ? '0 (reuse)' : thisCostUdvpn + ' udvpn';
+  const unitLabel = pricingMode === 'hours' ? `${sessionHours}h` : `${sessionGigabytes}GB`;
+  const costLabel = preSessionId ? 'pre-paid' : sessionId ? '0 (reuse)' : `${thisCostUdvpn} udvpn (${unitLabel})`;
   if (broadcast) broadcast('log', {
     msg: `→ ${typeName} | ${status.location.city}, ${status.location.country} | ${reportedDownloadMbps.toFixed(1)} Mbps | Cost: ${costLabel}`,
   });
@@ -257,7 +296,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
         typeUrl: V3_MSG_TYPE,
         value: {
           from: account.address, node_address: node.address,
-          gigabytes, hours: 0,
+          gigabytes: sessionGigabytes, hours: sessionHours,
           max_price: { denom: priceEntry.denom, base_value: priceEntry.base_value, quote_value: priceEntry.quote_value },
         },
       }], fee, broadcast);
@@ -280,7 +319,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
             typeUrl: V3_MSG_TYPE,
             value: {
               from: account.address, node_address: node.address,
-              gigabytes, hours: 0,
+              gigabytes: sessionGigabytes, hours: sessionHours,
               max_price: { denom: priceEntry.denom, base_value: priceEntry.base_value, quote_value: priceEntry.quote_value },
             },
           }], fee, broadcast);
@@ -295,7 +334,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
                 typeUrl: V3_MSG_TYPE,
                 value: {
                   from: account.address, node_address: node.address,
-                  gigabytes, hours: 0,
+                  gigabytes: sessionGigabytes, hours: sessionHours,
                   max_price: { denom: priceEntry.denom, base_value: priceEntry.base_value, quote_value: priceEntry.quote_value },
                 },
               }], fee, broadcast);
@@ -315,7 +354,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
             typeUrl: V3_MSG_TYPE,
             value: {
               from: account.address, node_address: node.address,
-              gigabytes, hours: 0,
+              gigabytes: sessionGigabytes, hours: sessionHours,
             },
           }], fee, broadcast);
           assertIsDeliverTxSuccess(txResult);
@@ -338,11 +377,11 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
     markPaid(node.address);
 
     if (broadcast) broadcast('log', { msg: `  Session ${sessionId} — polling for chain confirmation…` });
-    await waitForSessionActive(node.address, account.address, 20_000, sessionId);
+    await withStopGuard(waitForSessionActive(node.address, account.address, 20_000, sessionId), state);
     // Extra delay: node needs time to index the session into its own DB
     // Without this, handshake races with node indexing → 409 "already exists"
     if (broadcast) broadcast('log', { msg: `  Waiting 5s for node to index session…` });
-    await sleep(5_000);
+    await stopAwareSleep(5_000, state);
   }
 
   // ─── Handshake + Connect ──────────────────────────────────────────────────
@@ -360,7 +399,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
         typeUrl: V3_MSG_TYPE,
         value: {
           from: account.address, node_address: node.address,
-          gigabytes, hours: 0,
+          gigabytes: sessionGigabytes, hours: sessionHours,
           max_price: { denom: priceEntry.denom, base_value: priceEntry.base_value, quote_value: priceEntry.quote_value },
         },
       }], fee, broadcast);
@@ -370,7 +409,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
         if (broadcast) broadcast('log', { msg: `  ⚠ "invalid price" — retrying fresh session without max_price...` });
         txResult = await signAndBroadcastRetry(client, account.address, [{
           typeUrl: V3_MSG_TYPE,
-          value: { from: account.address, node_address: node.address, gigabytes, hours: 0 },
+          value: { from: account.address, node_address: node.address, gigabytes: sessionGigabytes, hours: sessionHours },
         }], fee, broadcast);
         assertIsDeliverTxSuccess(txResult);
       } else {
@@ -388,8 +427,8 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
     state.estimatedTotalCost = `${(state.spentUdvpn / 1_000_000).toFixed(4)} P2P`;
     if (broadcast) broadcast('state', { state });
     if (broadcast) broadcast('log', { msg: `  Fresh session ${sessionId} — waiting for chain + node indexing...` });
-    await waitForSessionActive(node.address, account.address, 20_000, sessionId);
-    await sleep(5_000);
+    await withStopGuard(waitForSessionActive(node.address, account.address, 20_000, sessionId), state);
+    await stopAwareSleep(5_000, state);
     return sessionId;
   }
 

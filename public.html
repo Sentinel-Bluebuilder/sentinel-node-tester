@@ -2078,7 +2078,8 @@
         const countryFull = `${ctry}${city}`;
         const isFail = n.handshake_ok === false;
         const rowCopy = isFail
-          ? `<button class="row-copy-btn" title="Copy latest failure log" data-addr="${escHtml(n.address)}" data-moniker="${escHtml(n.moniker || '')}" onclick="copyRowFailure(event)">⎘</button>`
+          ? `<button class="row-copy-btn" title="Copy latest failure log" data-addr="${escHtml(n.address)}" data-moniker="${escHtml(n.moniker || '')}" onclick="copyRowFailure(event)">⎘</button>
+             <button class="row-copy-btn" title="View error details" data-addr="${escHtml(n.address)}" data-moniker="${escHtml(n.moniker || '')}" onclick="showRowFailurePopup(event)" style="margin-left:4px">👁</button>`
           : '';
         tr.innerHTML = `
           <td style="color:var(--text-dim);font-size:11px;padding-left:10px;width:40px">${idx}</td>
@@ -2172,6 +2173,72 @@
         btn.innerHTML = '!';
       }
       setTimeout(() => { btn.innerHTML = original; btn.disabled = false; }, 1500);
+    }
+
+    async function showRowFailurePopup(ev) {
+      ev.stopPropagation();
+      const btn = ev.currentTarget;
+      const addr = btn.dataset.addr;
+      const moniker = btn.dataset.moniker || '';
+      if (!addr) return;
+
+      const existing = document.getElementById('errorPopupOverlay');
+      if (existing) existing.remove();
+
+      const overlay = document.createElement('div');
+      overlay.id = 'errorPopupOverlay';
+      overlay.style.cssText = 'position:fixed;inset:0;background:var(--glass-bg);backdrop-filter:blur(8px);z-index:9999;display:flex;align-items:center;justify-content:center;';
+      overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+      const popup = document.createElement('div');
+      popup.style.cssText = 'background:var(--bg-card-solid);border:1px solid var(--border);border-radius:16px;padding:24px 28px;max-width:780px;width:92%;max-height:85vh;overflow-y:auto;color:var(--text);font-family:var(--font-display);line-height:1.55';
+      popup.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+          <h2 style="font-size:18px;font-weight:700;letter-spacing:1px;margin:0">Node Error Details</h2>
+          <span onclick="document.getElementById('errorPopupOverlay').remove()" style="cursor:pointer;color:var(--text-dim);font-size:22px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:50%">&times;</span>
+        </div>
+        <div id="errorPopupBody" style="font-size:13px;color:var(--text-dim)">Loading…</div>
+      `;
+      overlay.appendChild(popup);
+      document.body.appendChild(overlay);
+
+      try {
+        const res = await fetch('/api/public/node/' + encodeURIComponent(addr) + '/errors?limit=1');
+        const data = await res.json();
+        const errs = (data && data.errors) || [];
+        const body = document.getElementById('errorPopupBody');
+        if (!body) return;
+        if (!errs.length) {
+          body.innerHTML = '<div style="color:var(--text-muted)">No stored failure log for this node yet.</div>';
+          return;
+        }
+        const er = errs[0];
+        const eh = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+        const captured = er.captured_at ? new Date(typeof er.captured_at === 'number' ? er.captured_at : Number(er.captured_at) || er.captured_at).toLocaleString() : '—';
+        const row = (label, value) => `
+          <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+            <div style="color:var(--text-muted);font-size:12px">${label}</div>
+            <div style="color:var(--text);word-break:break-all">${value || '—'}</div>
+          </div>`;
+        body.innerHTML = `
+          ${row('Node', eh(moniker))}
+          ${row('Address', `<span style="font-family:var(--font-mono);font-size:12px">${eh(addr)}</span>`)}
+          ${row('Stage', eh(er.stage))}
+          ${row('Error Code', `<span style="font-family:var(--font-mono);font-size:12px">${eh(er.error_code)}</span>`)}
+          ${row('Captured', eh(captured))}
+          ${row('Message', `<span style="font-family:var(--font-mono);font-size:12px;white-space:pre-wrap">${eh(er.error_message)}</span>`)}
+          ${er.log_snippet ? `
+            <div style="margin-top:14px">
+              <div style="color:var(--text-muted);font-size:12px;margin-bottom:6px">Log Snippet</div>
+              <pre style="background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:10px 12px;color:var(--text);font-family:var(--font-mono);font-size:11.5px;line-height:1.5;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0">${eh(er.log_snippet)}</pre>
+            </div>` : ''}
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+            <button onclick="document.getElementById('errorPopupOverlay').remove()" class="row-copy-btn" style="padding:6px 14px">Close</button>
+          </div>
+        `;
+      } catch (err) {
+        const body = document.getElementById('errorPopupBody');
+        if (body) body.innerHTML = '<div style="color:var(--red)">Failed to load: ' + (err.message || 'unknown') + '</div>';
+      }
     }
 
     // ─── Detail Drawer ───
@@ -2860,7 +2927,7 @@
           break;
         }
         case 'batch:node:result': {
-          // Real-run payloads use snake_case; dry-run fanout uses camelCase.
+          // Real-run payloads use snake_case; test-run fanout uses camelCase.
           const addr    = d.node_address ?? d.address ?? null;
           const moniker = d.moniker || '';
           const mbps    = d.actual_mbps ?? d.actualMbps ?? null;
@@ -2891,7 +2958,7 @@
               handshake_ok:   (d.skipped || err === 'TEST_RUN_SKIP') ? null
                               : (mbps > 0 ? true : (err ? false : null)),
               last_tested_at: tested,
-              dry_run:        err === 'TEST_RUN_SKIP' || undefined,
+              test_run:       err === 'TEST_RUN_SKIP' || undefined,
             });
             const idx = allNodes.findIndex(n => n.address === norm.address);
             if (idx >= 0) allNodes[idx] = norm; else allNodes.push(norm);

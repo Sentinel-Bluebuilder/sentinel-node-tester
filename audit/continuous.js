@@ -243,9 +243,27 @@ async function _runOnePass(loopState, batchId, frozenNodes = null) {
   };
 
   function batchBroadcast(type, data) {
+    // Forward live log lines + state snapshots through the scoped emitter so
+    // the admin dashboard AND /live (when broadcastLive=true) see real-time
+    // activity during continuous-loop runs — not just batch checkpoints.
+    if (type === 'log') {
+      _emitScoped('log', data || {});
+      return;
+    }
+    if (type === 'state') {
+      _emitScoped('state', data || {});
+      return;
+    }
+    if (type === 'progress') {
+      _emitScoped('progress', data || {});
+      return;
+    }
     if (type !== 'result') return; // only care about per-node results
     const raw = data?.result;
     if (!raw) return;
+    // Forward the full per-node result to the global stream so the live
+    // dashboard upserts rows identically to admin. Public SSE will sanitize.
+    _emitScoped('result', { result: raw, batchId });
     const payload = _sanitizeBatchNodeResult(raw, batchId);
     _emitScoped('batch:node:result', payload);
     // Persist to batch_results (non-blocking, non-fatal)

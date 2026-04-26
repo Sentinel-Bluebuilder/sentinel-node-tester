@@ -1,14 +1,52 @@
 # Node Tester — Handoff
 
+## 2026-04-25 — Rename dry run → test run across entire project
+- **62 occurrences renamed** across 12 files. All `dryRun`/`dry_run`/`dry-run`/`DRY_RUN` identifiers replaced with the `testRun`/`test_run`/`--test-run`/`TEST_RUN` family. Comments/docs updated to "test run" phrasing.
+- **DB migration v7 added** (`core/db.js` lines 275–282): `UPDATE runs SET mode='test' WHERE mode='dry'` — idempotent, runs automatically on next startup. Existing `audit.db` rows with `mode='dry'` are migrated to `mode='test'`. Schema version bumped from 6 → 7.
+- **Backward-compat alias in `server.js` `/api/start`**: accepts `req.body.testRun` / `?testRun=1` (new, send going forward) AND `req.body.dryRun` / `?dryRun=1` (old, one-release alias). Coalesced to single `testRun` boolean. `bin/commands/agent.js` now sends `testRun` via `--test-run` flag.
+- **Do NOT change**: `TEST_RUN_SKIP` error code (already correct), "TEST RUN" UI labels (already correct), `audit-dry.db` historical tombstones in this handoff.
+
+## 2026-04-25 — Admin top-row alignment pass 2
+- Bumped TEST RUN, ∞ LOOP, PAY/PER GB/PER HOUR boxes to `height:38px` and `border-radius:6px` to match the surrounding `.btn` controls (38px). Uniform padding `0 14px` on outer wrappers + button segments. ∞ glyph bumped to `font-size:24px` inside a fixed-width `width:20px` inline-block (text-centered) so it can't push baseline. All three boxes share `font-family:var(--font-display)`, `font-size:11px`, `font-weight:700`, `letter-spacing:0.5px`, `line-height:1` so vertical center matches across the row.
+
+## 2026-04-25 — Admin SLA tiles dash out in TEST RUN
+- Total Failed, Pass 10 Mbps SLA, Dead Plan Nodes, and Pass Rate now render `—` with sub `not measured in test run` when admin detects a TEST RUN (`state.testRun || any row with errorCode==='TEST_RUN_SKIP'`). Matches /live's behavior so the operator can't mis-read skip-only demo numbers as real measurements. Tested tile + Not Online still show real progress.
+
+## 2026-04-25 — /live Not Online parity with admin
+- TEST RUN was reporting "0 nodes offline" on /live while admin reported the real count. /live's `trulyOffline` filter excluded TEST_RUN_SKIP rows; admin's does not. Aligned /live to admin's filter (`actualMbps == null && (peers === 0 || peers == null)`) so both surfaces report identical counts in every mode.
+
+## 2026-04-25 — /live counter parity, transport in TEST RUN, banner gap, admin top-row alignment
+- **Public 227 vs admin 150 Tested mismatch.** The earlier "prefer `state.testedNodes`" fix on /live caused public to *outpace* admin: pipeline counter increments (retries, race with recompute) made `state.testedNodes` greater than the deduped row count admin uses. Reverted both `cbRender()` and `renderLiveStats()` in `live.html` to use `resultsArr.length` (deduped by address via `upsert`) — same single source of truth as `admin.html` line 1296. Pass/Fail derived from `resultsArr` filter (matches admin's recompute). Mid-run joiners get the full backlog via the `init` SSE event + REST fallback, so the new approach can't regress the original "0 / 1048" symptom.
+- **Transport missing in TEST RUN.** `live.html` was reading `r.serviceType` from the `result` SSE event, but the pipeline emits `r.type` (set in `audit/node-test.js:219` for the TEST_RUN_SKIP early return) — sanitizer maps `r.type → serviceType` for `batch:node:result` but the `result` event passes the raw object through. Patched `live.html` `case 'result'` + the `init` replay to use `normalizeServiceType(r.serviceType ?? r.type)`. Transport badge now renders for every TEST RUN row.
+- **TEST RUN banner gap too small.** `.test-run-banner` had no bottom margin so the page title was glued to the alert. Added `margin-bottom: 22px` and bumped padding to `12px 16px`.
+- **Admin top-row alignment + ∞ icon size.** TEST RUN, ∞ LOOP, and PAY/PER GB/PER HOUR controls now share `font-family: var(--font-display)`, `font-size:11px`, `font-weight:700`, `letter-spacing:0.5px`, and `height:34px`. ∞ glyph bumped from `font-size:14px` → `20px` (with `font-weight:400`) so it visually balances the "LOOP" label. Pricing wrapper switched to `align-items:stretch` and child segments use `display:inline-flex; align-items:center` so all three controls end at the same right edge.
+
+## 2026-04-25 — Strip ETA + "Started …s ago" from public /live
+- Removed `#cbMeta` ("Batch #N · Started …s ago" / "waiting for admin to start testing…") and `#cbEta` ("ETA ~Xm Ys") from the public Current Batch panel in `live.html`. Both DOM elements deleted; `cbRender()` no longer computes elapsed/meta/eta. CSS rules `.cb-meta` / `.cb-eta` left in place (no longer referenced; harmless). Public-only — admin Current Batch panel untouched.
+
+## 2026-04-25 — Agent CLI + /live Tested tile fix
+- **Built end-to-end agentic CLI driver.** `bin/commands/agent.js` + `bin/lib/http.js`. One subcommand router with 54 endpoints registered, each self-describing via `agent map`. Auth: `--token`, `$SENTINEL_AUDIT_TOKEN`, or `$ADMIN_TOKEN` (Bearer). CSRF-friendly: every non-GET sets `X-Admin-Request: 1`. Target: `--base-url`, `$SENTINEL_AUDIT_URL`, or `--port` (default `http://localhost:3001`).
+  - Discovery: `sentinel-audit agent map --pretty`, `sentinel-audit agent --help`.
+  - Audit lifecycle: `start [--test-run] [--pricing-mode hours|gigabytes] [--plan-id] [--sub-id] [--sub-granter]`, `stop`, `resume`, `rescan`, `clear`.
+  - Retest: `retest-skips`, `retest-fails`, `auto-retest`.
+  - Reads: `state`, `stats`, `results`, `plans`, `subscriptions`, `sub-plans`, `failure-analysis`, `transport-cache`, `chain-nodes`, `chain-status`.
+  - Public reads: `pub-nodes`, `pub-node <addr>`, `pub-node-errors <addr>`, `pub-bandwidth <addr>`, `pub-errors`, `pub-countries`, `pub-stats`, `pub-runs`, `pub-run-current`, `pub-run-last`, `pub-batches`, `pub-batch <id>`, `pub-logs`, `pub-live-state`, `pub-test-status`.
+  - Run history: `runs`, `run-get <n>`, `run-save`, `run-load <n>`.
+  - Toggles: `broadcast` / `broadcast-toggle`, `economy`, `sdk-get` / `sdk-set --sdk js|tkd`, `dns-get` / `dns-set --dns ... --enabled true|false`.
+  - Streaming: `events --watch 30` and `pub-events --watch 30` — taps SSE to stderr, returns aggregate JSON on stdout.
+  - Wired into `bin/cli.js` `COMMAND_GROUPS.Agent`. `node bin/cli.js agent map` returns 54 endpoints.
+- **Fixed /live "0 / 1048 nodes tested" stuck counter.** When `/live` joined mid-run via `init` and missed earlier `result`/`batch:node:result` SSE events, both the Tested tile and Current Batch panel showed `0 / N` while admin had progress. Root: tile relied on `arr.length` and panel on `_cb.tested`, both incremented purely from streamed events.
+  - Fix in `live.html`: `renderLiveStats()` now uses `_liveState.testedNodes` as the authoritative `processed` source when available (falls back to `arr.length`); `cbRender()` uses `_liveState.testedNodes` for `tested`, `_liveState.passed10` for passed, `_liveState.failedNodes` for failed (each fall back to local `_cb.*`); `state` SSE handler now also calls `cbRender()` so the panel refreshes on every server state push. `state.testedNodes/failedNodes/passed10` were already in `PUBLIC_STATE_KEYS` — they were arriving but unused.
+
 ## 2026-04-25 — Single-mode refactor + Economy deprecation
 - **Dual-mode system dropped.** The dev/bundled/public mode cookie, `requireMode()` middleware, mode overlay UI, `_currentMode`, `_applyModeUI`, `selectMode`, and `switchMode` are all gone. There is now one mode and no mode-switching anywhere in the stack.
-- **One database.** `audit-dry.db` is gone. All runs — live and dry — write to `audit.db`. Dry runs get `mode='dry'` on the run row so they remain visually distinguishable in the admin table.
+- **One database.** `audit-dry.db` is gone. All runs — live and test — write to `audit.db`. Test runs get `mode='test'` on the run row so they remain visually distinguishable in the admin table.
 - **`state.broadcastLive` added.** Server-side boolean that controls whether public surfaces (`public.html`, `/live`, `/api/public/events`, `/api/public/runs/current`) show the live in-flight audit or the last-completed snapshot.
   - `POST /api/broadcast` (adminOnly) — flips the toggle. No body required.
   - `GET /api/broadcast` — returns `{ broadcastLive: boolean }`. Open.
   - When `false`: public SSE is silent, public sees last-completed snapshot.
   - When `true`: public SSE fan-out becomes active, `/live` upgrades from snapshot view to live progress view.
-- **TEST RUN preserved as `?dryRun=1`.** Pass `dryRun: true` in body or `?dryRun=1` on `POST /api/start`. Pipeline skips plan membership, online scan, chain ops, payments. Every node row: `actualMbps: null, errorCode: 'TEST_RUN_SKIP'`. Run row: `mode='dry'` in `audit.db`. Not a separate mode — just a parameter.
+- **TEST RUN now `?testRun=1`.** Pass `testRun: true` in body or `?testRun=1` on `POST /api/start`. Pipeline skips plan membership, online scan, chain ops, payments. Every node row: `actualMbps: null, errorCode: 'TEST_RUN_SKIP'`. Run row: `mode='test'` in `audit.db`. Not a separate mode — just a parameter.
 - **Removed endpoints:** `POST /api/admin/public-test/start`, `POST /api/admin/public-test/stop`, `GET /api/admin/public-test/status`, `POST /api/public/test/start`, `POST /api/public/test/stop`, `GET /api/public/test/status`.
 - **Economy mode fully deprecated** (removed earlier this same session — no economy-mode code paths remain).
 - **Failure-log UX still intact (hard rule).** Per-row copy button (`.row-copy-btn`, glyph `⎘`, `copyRowFailure`), admin drawer "Copy Failure Logs" (`#copyFailureLogsBtn`) + "Download .txt" button — all wired and untouched by this refactor.
