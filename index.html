@@ -569,7 +569,6 @@
       <button class="btn btn-rescan" id="btnRescan" onclick="rescanNodes()" title="Re-fetch node list from chain to verify current total">Rescan</button>
       <button class="btn btn-start" id="btnRetestFails" onclick="retestFails()" style="background:var(--accent-red);color:#fff">Retest Failed</button>
       <button class="btn btn-stop" id="btnStop" disabled onclick="stopAudit()">Stop</button>
-      <button class="btn btn-outline" id="btnEconomy" onclick="toggleEconomy()">Economy</button>
       <div style="margin-left:auto; display:flex; gap:10px; align-items:center">
         <select id="planSelect" style="display:none">
           <option value="">Select Plan...</option>
@@ -892,8 +891,6 @@
         btnStop.textContent = 'Stop Test';
         btnStop.classList.remove('loading');
       }
-
-      if (state.economyMode != null) updateEconomyBtn(state.economyMode);
 
       // Sync SDK toggle with server state (don't override user's click)
       if (state.activeSDK && state.activeSDK !== activeSDK) {
@@ -1235,34 +1232,6 @@
       if (body.children.length > 500) body.removeChild(body.firstChild);
     }
 
-    async function toggleEconomy() {
-      try {
-        const res = await fetch('/api/economy', { method: 'POST' });
-        const data = await res.json();
-        updateEconomyBtn(data.economyMode);
-      } catch {}
-    }
-
-    function updateEconomyBtn(on) {
-      const btn = document.getElementById('btnEconomy');
-      if (on) {
-        btn.style.background = 'rgba(0,200,83,0.15)';
-        btn.style.borderColor = 'var(--accent-green)';
-        btn.style.color = 'var(--accent-green)';
-        btn.textContent = '♻ Economy ON';
-      } else {
-        btn.style.background = 'transparent';
-        btn.style.borderColor = 'rgba(255,255,255,0.15)';
-        btn.style.color = '#888';
-        btn.textContent = '♻ Economy';
-      }
-    }
-
-    // Sync economy state on page load
-    fetch('/api/state').then(r => r.json()).then(d => {
-      if (d.state?.economyMode != null) updateEconomyBtn(d.state.economyMode);
-    }).catch(() => {});
-
     // ─── Test Run Management ────────────────────────────────────────────────
     async function loadRunsList() {
       try {
@@ -1505,11 +1474,6 @@
           <div style="margin-bottom:18px">
             <div style="color:#888;font-weight:600;font-size:14px;margin-bottom:4px">Stop Test</div>
             Gracefully stops the current scan after the active node finishes. Results are saved. You can Resume later.
-          </div>
-
-          <div style="margin-bottom:18px">
-            <div style="color:#888;font-weight:600;font-size:14px;margin-bottom:4px">Economy Mode</div>
-            Caps the number of nodes tested to what the wallet can afford. Prevents running out of P2P mid-scan.
           </div>
 
           <div style="margin-bottom:18px">

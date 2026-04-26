@@ -104,8 +104,6 @@ const ENDPOINTS = [
   { sub: 'retest-fails',    method: 'POST', path: '/api/retest-fails',                auth: true,  desc: 'Retest only failed nodes' },
   { sub: 'auto-retest',     method: 'POST', path: '/api/auto-retest',                 auth: true,  desc: 'Trigger background auto-retest sweep' },
   { sub: 'clear',           method: 'POST', path: '/api/clear',                       auth: true,  desc: 'Clear current results buffer' },
-  { sub: 'economy',         method: 'POST', path: '/api/economy',                     auth: true,  desc: 'Toggle economy mode',
-    bodyFromFlags: () => ({}) },
 
   // Plans & subscriptions
   { sub: 'plans',           method: 'GET',  path: '/api/plans',                       auth: true,  desc: 'List wallet plans' },
