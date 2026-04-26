@@ -16,7 +16,7 @@ import { MNEMONIC, DENOM, GAS_PRICE, PORT, LCD_ENDPOINTS, PROJECT_ROOT, DNS_PRES
 import { cachedWalletSetup, createFreshClient } from './core/wallet.js';
 import { ensureLcd, getActiveLcd, cleanupRpc, getAllNodes } from './core/chain.js';
 import { nodeStatusV3 } from './protocol/v3protocol.js';
-import { createState, runAudit, runRetestSkips, runPlanTest, runSubPlanTest, getResults, saveResults, setActiveRunDir, setActiveDbRunId } from './audit/pipeline.js';
+import { createState, runAudit, runRetestSkips, runPlanTest, runSubPlanTest, getResults, saveResults, setActiveRunDir, setActiveDbRunId, triggerPipelineStop } from './audit/pipeline.js';
 import {
   insertRun, updateRunOnFinish,
   insertResult, insertErrorLog,
@@ -202,11 +202,27 @@ function broadcast(type, data = {}) {
   for (const evt of BATCH_EVENTS) {
     continuous.on(evt, (data) => broadcast(evt, data || {}));
   }
+
+  // Forward per-node log/state/result/progress from inside the continuous
+  // pipeline so the live dashboard mirrors the admin dashboard 1:1 during
+  // continuous-loop runs (not only direct /api/start runs).
+  const LIVE_EVENTS = ['log', 'state', 'result', 'progress'];
+  for (const evt of LIVE_EVENTS) {
+    continuous.on(evt, (data) => broadcast(evt, data || {}));
+  }
 }
 
 // ─── State ──────────────────────────────────────────────────────────────────
 const state = createState();
-state.broadcastLive = false;
+
+// Persist Broadcast Live across restarts so the operator's choice survives
+// process bounces — without this, every restart silently flips public /live
+// back to "paused" even though the admin UI still shows BROADCAST ON.
+const BROADCAST_PREF_FILE = path.join(__dirname, 'results', '.broadcast-live');
+try { state.broadcastLive = _rfs(BROADCAST_PREF_FILE, 'utf8').trim() === '1'; } catch { state.broadcastLive = false; }
+function persistBroadcastPref() {
+  try { _wfs(BROADCAST_PREF_FILE, state.broadcastLive ? '1' : '0'); } catch {}
+}
 
 // Persist SDK choice to disk so it survives restarts
 const SDK_PREF_FILE = path.join(__dirname, 'results', '.sdk-preference');
@@ -574,6 +590,10 @@ app.get('/api/public/runs/current', attachAdminFlag, rlPublicRead, (req, res) =>
       passed: batch.passed,
       failed: batch.failed,
       mode: batch.mode,
+      // Mirror the in-memory run mode so /live renders the same badge as admin
+      // before any SSE state event arrives. runPlanId is null unless plan mode.
+      runMode: state.runMode || null,
+      runPlanId: state.runPlanId || null,
       nodes,
     });
   } catch (err) {
@@ -862,9 +882,81 @@ const PUBLIC_EVENT_WHITELIST = new Set([
   // Live operator log lines — needed so /live shows real-time activity.
   // sanitizeForPublic already truncates evt.msg to 400 chars.
   'log',
+  // Full state + per-node result events — /live mirrors the admin dashboard
+  // counters and per-row results 1:1 when broadcastLive is on.
+  'state',
+  'result',
+  'progress',
 ]);
+
+// Keep only the counters / progress fields a public viewer needs.
+// Strips wallet, balance*, spent*, MNEMONIC-derived data, errorMessage internals.
+const PUBLIC_STATE_KEYS = [
+  'status',
+  'totalNodes',
+  'testedNodes',
+  'failedNodes',
+  'skippedNodes',
+  'passed10',
+  'passed15',
+  'passedBaseline',
+  'baselineMbps',
+  'baselineHistory',
+  'nodeSpeedHistory',
+  'currentNode',
+  'currentType',
+  'currentLocation',
+  'startedAt',
+  'completedAt',
+  'activeRunNumber',
+  'testRun',
+  'continuousLoop',
+  'pricingMode',
+  // Surfaces the active mode + plan id so /live can render the same
+  // "Plan #N / P2P / Test Run" badge the admin shows.
+  'runMode',
+  'runPlanId',
+];
+function sanitizePublicState(s) {
+  if (!s || typeof s !== 'object') return {};
+  const out = {};
+  for (const k of PUBLIC_STATE_KEYS) if (s[k] !== undefined) out[k] = s[k];
+  return out;
+}
+// Mirror of admin's per-node result row, minus operator-internal fields.
+function sanitizePublicResult(r) {
+  if (!r || typeof r !== 'object') return null;
+  return {
+    address: r.address,
+    moniker: r.moniker,
+    serviceType: r.type ?? r.serviceType,
+    countryCode: r.countryCode,
+    city: r.city,
+    actualMbps: r.actualMbps,
+    advertisedMbps: r.advertisedMbps,
+    peers: r.peers,
+    maxPeers: r.maxPeers,
+    errorCode: r.errorCode,
+    error: r.error ? String(r.error).slice(0, 200) : null,
+    skipped: r.skipped === true ? true : undefined,
+    inPlan: r.inPlan === true ? true : undefined,
+    testedAt: r.testedAt,
+    baselineAtTest: r.baselineAtTest,
+    dynamicThreshold: r.dynamicThreshold,
+    pass10mbps: r.pass10mbps,
+    latencyMs: r.latencyMs,
+    handshakeMs: r.handshakeMs,
+    sessionMs: r.sessionMs,
+  };
+}
 function sanitizeForPublic(evt) {
   const safe = { type: evt.type };
+  // Nested state/result payloads (admin emits broadcast('state', { state }) / broadcast('result', { result }))
+  if (evt.state && typeof evt.state === 'object') safe.state = sanitizePublicState(evt.state);
+  if (evt.result && typeof evt.result === 'object') {
+    const sr = sanitizePublicResult(evt.result);
+    if (sr) safe.result = sr;
+  }
   if (evt.iteration != null)   safe.iteration   = evt.iteration;
   if (evt.mode != null)        safe.mode        = evt.mode;
   if (evt.passed != null)      safe.passed      = evt.passed;
@@ -920,6 +1012,12 @@ app.get('/api/public/events', attachAdminFlag, rlPublicSse, (req, res) => {
       activeBatchMode = ab.batch.mode;
     }
   } catch (_) {}
+  // Sanitized snapshot of in-memory state and per-node results so /live paints
+  // the full dashboard on connect/refresh — fully identical to admin (minus
+  // operator-internal fields). Empty when broadcastLive is off.
+  const liveOn = !!state.broadcastLive;
+  const initState = liveOn ? sanitizePublicState(state) : {};
+  const initResults = liveOn ? getResults().map(sanitizePublicResult).filter(Boolean) : [];
   send({
     type: 'init',
     status: { running: s.running, iteration: s.iteration, mode: s.mode, startedAt: s.startedAt, uptime: s.uptime },
@@ -928,8 +1026,10 @@ app.get('/api/public/events', attachAdminFlag, rlPublicSse, (req, res) => {
     batchMode: activeBatchMode,
     // Persisted log backlog so /live shows full history on refresh, not a blank panel.
     // logBuffer is populated from results/audit-*.log on server boot and updated live.
-    logs: state.broadcastLive ? logBuffer.slice() : [],
-    broadcastLive: !!state.broadcastLive,
+    logs: liveOn ? logBuffer.slice() : [],
+    state: initState,
+    results: initResults,
+    broadcastLive: liveOn,
   });
   const handler = (data) => {
     if (!state.broadcastLive) return;
@@ -954,6 +1054,23 @@ app.get('/api/public/events', attachAdminFlag, rlPublicSse, (req, res) => {
 app.get('/api/public/logs', attachAdminFlag, rlPublicRead, (req, res) => {
   if (!state.broadcastLive) return res.json({ logs: [], broadcastLive: false });
   res.json({ logs: logBuffer.slice(), broadcastLive: true });
+});
+
+/**
+ * GET /api/public/live-state
+ * Sanitized snapshot of state + results so /live can rehydrate after refresh
+ * even before SSE init lands. Mirrors admin /api/state + /api/results minus
+ * operator-internal fields. Empty when broadcastLive is off.
+ */
+app.get('/api/public/live-state', attachAdminFlag, rlPublicRead, (req, res) => {
+  if (!state.broadcastLive) {
+    return res.json({ broadcastLive: false, state: {}, results: [] });
+  }
+  res.json({
+    broadcastLive: true,
+    state: sanitizePublicState(state),
+    results: getResults().map(sanitizePublicResult).filter(Boolean),
+  });
 });
 
 /**
@@ -1036,6 +1153,7 @@ app.post('/api/public/test/stop', attachAdminFlag, (req, res) => {
 // ─── Broadcast Live toggle ───────────────────────────────────────────────────
 app.post('/api/broadcast', adminOnly, (req, res) => {
   state.broadcastLive = !state.broadcastLive;
+  persistBroadcastPref();
   res.json({ broadcastLive: state.broadcastLive });
 });
 
@@ -1112,6 +1230,10 @@ function startFreshRun(label, { mode = 'p2p', plan_id = null } = {}) {
   state.retryCount = 0;
   state.estimatedTotalCost = '0 P2P';
   state.spentUdvpn = 0;
+  // Surface the active mode so the UI can render a clear "what's running" badge:
+  // 'subscription' (sub-plan), 'p2p', 'test'. Plan id is null unless mode === 'subscription'.
+  state.runMode = mode;
+  state.runPlanId = plan_id || null;
 
   try { _wfs(STATE_SNAPSHOT_FILE, '{}', 'utf8'); } catch { }
 
@@ -1144,7 +1266,10 @@ function startFreshRun(label, { mode = 'p2p', plan_id = null } = {}) {
 
 // Start NEW test (saves current, clears, starts fresh).
 app.post('/api/start', adminOnly, async (req, res) => {
-  const dryRun = !!(req.body?.dryRun || req.query.dryRun);
+  // Accept testRun (current) or dryRun (one-release backward-compat alias — remove next release).
+  const testRun = !!(req.body?.testRun || req.query.testRun || req.body?.dryRun || req.query.dryRun);
+  const infiniteLoop = !!(req.body?.infiniteLoop || req.query.infiniteLoop);
+  const pricingMode = (req.body?.pricingMode === 'hours' || req.query.pricingMode === 'hours') ? 'hours' : 'gigabytes';
 
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (continuous.status().running) {
@@ -1158,23 +1283,49 @@ app.post('/api/start', adminOnly, async (req, res) => {
       await new Promise(r => setTimeout(r, 100));
     }
   }
-  if (!dryRun && !MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
+  if (!testRun && !MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
 
-  const runMode = dryRun ? 'dry' : 'p2p';
-  const { newNum } = startFreshRun(`Test #${getNextRunNumber()}`, { mode: runMode });
+  state.continuousLoop = infiniteLoop;
+  state.testRun = testRun;
+  state.pricingMode = pricingMode;
+  const runMode = testRun ? 'test' : 'p2p';
+  state.runMode = runMode;
+  state.runPlanId = null;
+  state.runSubscriptionId = null;
+  state.runGranter = null;
+  const { newNum: firstNum } = startFreshRun(`Test #${getNextRunNumber()}`, { mode: runMode });
 
   const SDK_LABELS = { js: 'Blue JS', csharp: 'Blue C#', tkd: 'TKD JS' };
   const label = `${SDK_LABELS[state.activeSDK] || state.activeSDK} SDK, ${process.platform === 'win32' ? 'Windows' : process.platform}`;
-  broadcast('log', { msg: `🚀 Starting Test #${newNum} (${label})${dryRun ? ' [TEST RUN]' : ''}` });
-  res.json({ ok: true, testNumber: newNum, dryRun });
-  runAudit(false, state, broadcast, null, { dryRun }).then(() => {
-    saveCurrentRun(`Test #${newNum}`);
-    broadcast('log', { msg: `💾 Test #${newNum} complete and saved` });
-  }).catch(err => {
-    state.status = 'error';
-    state.errorMessage = err.message;
+  const modeTag = testRun ? 'Test Run (sample data)' : 'P2P (all online nodes)';
+  broadcast('log', { msg: `🚀 Starting Test #${firstNum} — Mode: ${modeTag} | ${label}${infiniteLoop ? ' | ∞ LOOP' : ''} | Pricing: ${pricingMode === 'hours' ? 'Per Hour' : 'Per GB'}` });
+  res.json({ ok: true, testNumber: firstNum, testRun, infiniteLoop, pricingMode });
+  broadcast('state', { state });
+
+  (async () => {
+    let curNum = firstNum;
+    // First pass + any further passes if continuousLoop stays true.
+    while (true) {
+      try {
+        await runAudit(false, state, broadcast, null, { testRun, pricingMode });
+        saveCurrentRun(`Test #${curNum}`);
+        broadcast('log', { msg: `💾 Test #${curNum} complete and saved` });
+      } catch (err) {
+        state.status = 'error';
+        state.errorMessage = err.message;
+        broadcast('state', { state });
+        break;
+      }
+      if (!state.continuousLoop || state.stopRequested) break;
+      // Re-snapshot the chain and start a fresh run.
+      curNum = getNextRunNumber();
+      startFreshRun(`Test #${curNum}`, { mode: runMode });
+      broadcast('log', { msg: `♾  Loop continues — starting Test #${curNum}` });
+      broadcast('state', { state });
+    }
+    state.continuousLoop = false;
     broadcast('state', { state });
-  });
+  })();
 });
 
 // Resume CURRENT test from where it left off (skips already-tested nodes).
@@ -1200,20 +1351,67 @@ app.post('/api/resume', adminOnly, async (req, res) => {
   try { _mkd(resumeRunDir, { recursive: true }); } catch { }
   setActiveRunDir(resumeRunDir);
 
-  broadcast('log', { msg: `▶ Resuming Test #${state.activeRunNumber} from node ${results.length + 1} (${results.length} already tested, SDK: ${state.activeSDK.toUpperCase()})` });
-  res.json({ ok: true, testNumber: state.activeRunNumber, resumeFrom: results.length });
-  runAudit(true, state, broadcast).then(() => {
-    saveCurrentRun(`Test #${state.activeRunNumber}`);
-    broadcast('log', { msg: `💾 Test #${state.activeRunNumber} saved` });
-  }).catch(err => {
-    state.status = 'error';
-    state.errorMessage = err.message;
-    broadcast('state', { state });
-  });
+  const runMode = state.runMode || 'p2p';
+  const modeTag = runMode === 'subscription' ? `Sub. Plan ${state.runPlanId}` : (runMode === 'test' ? 'Test Run' : 'P2P');
+  broadcast('log', { msg: `▶ Resuming Test #${state.activeRunNumber} (${modeTag}) from node ${results.length + 1} (${results.length} already tested, SDK: ${state.activeSDK.toUpperCase()})` });
+  res.json({ ok: true, testNumber: state.activeRunNumber, resumeFrom: results.length, runMode });
+
+  if (runMode === 'subscription') {
+    if (!state.runPlanId || !state.runSubscriptionId || !state.runGranter) {
+      state.status = 'error';
+      state.errorMessage = 'Cannot resume subscription run — missing plan context. Start a new test.';
+      broadcast('state', { state });
+      return;
+    }
+    runSubPlanTest(state.runPlanId, state.runSubscriptionId, state.runGranter, state, broadcast, { resume: true }).then(() => {
+      saveCurrentRun(`Test #${state.activeRunNumber} — Sub. Plan ${state.runPlanId}`);
+      broadcast('log', { msg: `💾 Test #${state.activeRunNumber} saved` });
+    }).catch(err => {
+      state.status = 'error';
+      state.errorMessage = err.message;
+      broadcast('state', { state });
+    });
+  } else {
+    runAudit(true, state, broadcast, null, { testRun: !!state.testRun, pricingMode: state.pricingMode }).then(() => {
+      saveCurrentRun(`Test #${state.activeRunNumber}`);
+      broadcast('log', { msg: `💾 Test #${state.activeRunNumber} saved` });
+    }).catch(err => {
+      state.status = 'error';
+      state.errorMessage = err.message;
+      broadcast('state', { state });
+    });
+  }
 });
 
 app.post('/api/stop', adminOnly, (req, res) => {
+  // Set stop flags first so any wakeup from the kills below sees them.
   state.stopRequested = true;
+  state.continuousLoop = false;
+  try { continuous.stop(); } catch {}
+
+  // Wake every in-flight pipeline `await sleep(...)` immediately so the per-node
+  // loop drops back to its `if (state.stopRequested) break` check on the next tick.
+  // Without this the longest pending sleep (e.g. balance-poll 5min) holds up Stop.
+  try { triggerPipelineStop(); } catch {}
+
+  // Snap the UI to stopped immediately — the pipeline still has to finish unwinding,
+  // but the user gets feedback the moment they click Stop.
+  state.status = 'stopped';
+  broadcast('log', { msg: '⏹ Stop — force-terminating in-flight test.' });
+  broadcast('state', { state });
+
+  // Force-stop in-flight node test: kill V2Ray (causes waitForPort/speedtest to fail
+  // immediately), then run WG cleanup. Without this, Stop waits up to ~20s for the
+  // current node's session/handshake/speedtest timers to expire.
+  (async () => {
+    try {
+      const { killAllV2Ray } = await import('./platforms/windows/v2ray.js');
+      killAllV2Ray();
+    } catch {}
+    try { emergencyCleanupSync(); } catch {}
+    broadcast('state', { state });
+  })();
+
   res.json({ ok: true });
 });
 
@@ -1318,20 +1516,42 @@ app.post('/api/test-sub-plan', adminOnly, async (req, res) => {
   if (!planId) return res.status(400).json({ error: 'planId required' });
   if (!subscriptionId) return res.status(400).json({ error: 'subscriptionId required' });
   if (!granter) return res.status(400).json({ error: 'granter (sent1...) required' });
+  const infiniteLoop = !!(req.body?.infiniteLoop || req.query.infiniteLoop);
 
   const { newNum } = startFreshRun(`Sub. Plan ${planId}`, { mode: 'subscription', plan_id: String(planId) });
+  state.continuousLoop = infiniteLoop;
+  state.runMode = 'subscription';
+  state.runPlanId = String(planId);
+  state.runSubscriptionId = String(subscriptionId);
+  state.runGranter = String(granter);
+  state.testRun = false;
   broadcast('state', { state, results: getResults() });
-  broadcast('log', { msg: `🚀 Starting Test #${newNum} — Sub. Plan ${planId} (fee-granted, wallet pays zero gas)` });
-  res.json({ ok: true, testNumber: newNum, planId, subscriptionId, granter });
+  broadcast('log', { msg: `🚀 Starting Test #${newNum} — Mode: Plan #${planId} (subscription-allocated sessions, plan-scoped node set)${infiniteLoop ? ' | ∞ LOOP' : ''}` });
+  res.json({ ok: true, testNumber: newNum, planId, subscriptionId, granter, infiniteLoop });
 
-  runSubPlanTest(String(planId), String(subscriptionId), String(granter), state, broadcast).then(() => {
-    saveCurrentRun(`Test #${newNum} — Sub. Plan ${planId}`);
-    broadcast('log', { msg: `💾 Test #${newNum} complete and saved` });
-  }).catch(err => {
-    state.status = 'error';
-    state.errorMessage = err.message;
+  (async () => {
+    let curNum = newNum;
+    while (true) {
+      try {
+        await runSubPlanTest(String(planId), String(subscriptionId), String(granter), state, broadcast);
+        saveCurrentRun(`Test #${curNum} — Sub. Plan ${planId}`);
+        broadcast('log', { msg: `💾 Test #${curNum} complete and saved` });
+      } catch (err) {
+        state.status = 'error';
+        state.errorMessage = err.message;
+        broadcast('state', { state });
+        break;
+      }
+      if (!state.continuousLoop || state.stopRequested) break;
+      curNum = getNextRunNumber();
+      startFreshRun(`Sub. Plan ${planId}`, { mode: 'subscription', plan_id: String(planId) });
+      state.continuousLoop = true;
+      broadcast('log', { msg: `♾  Loop continues — starting Test #${curNum} (Plan #${planId})` });
+      broadcast('state', { state });
+    }
+    state.continuousLoop = false;
     broadcast('state', { state });
-  });
+  })();
 });
 
 app.post('/api/clear', adminOnly, (req, res) => {

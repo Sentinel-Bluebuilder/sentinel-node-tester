@@ -54,17 +54,17 @@ admin.html  ──POST /api/broadcast──►  state.broadcastLive = true/false
 One database: `audit.db`. All runs — live and dry — write to it.
 
 - Normal audit run: `mode='live'` (or absent/null for legacy rows).
-- Dry-run (`?dryRun=1` on `/api/start`): `mode='dry'`. Every node row gets `actualMbps: null, errorCode: 'TEST_RUN_SKIP'`. Visually distinguishable in the admin table but stored in the same file.
+- Test-run (`?testRun=1` on `/api/start`): `mode='test'`. Every node row gets `actualMbps: null, errorCode: 'TEST_RUN_SKIP'`. Visually distinguishable in the admin table but stored in the same file.
 - `audit-dry.db` no longer exists.
 
-## TEST RUN (Dry Run)
+## TEST RUN (Test Run)
 
 TEST RUN is not a mode — it is an optional parameter on the normal start endpoint.
 
-- `POST /api/start` with `dryRun: true` in body, or `POST /api/start?dryRun=1`.
+- `POST /api/start` with `testRun: true` in body, or `POST /api/start?testRun=1`.
 - Pipeline skips: plan membership check, online scan, chain operations, payments.
 - Every node row: `actualMbps: null, errorCode: 'TEST_RUN_SKIP'`.
-- Run row: `mode='dry'` in `audit.db`.
+- Run row: `mode='test'` in `audit.db`.
 - Useful for verifying the pipeline plumbing and UI without spending DVPN.
 
 ## SSE Event Contract
@@ -97,5 +97,5 @@ No wallet, plan ID, or fee-grant internals are forwarded on the public SSE strea
 - Mode overlay UI in `admin.html`.
 - `POST /api/admin/public-test/start`, `POST /api/admin/public-test/stop`, `GET /api/admin/public-test/status`.
 - `POST /api/public/test/start`, `POST /api/public/test/stop`, `GET /api/public/test/status`.
-- `audit-dry.db` — superseded by the `mode='dry'` column in `audit.db`.
+- `audit-dry.db` — superseded by the `mode='test'` column in `audit.db`.
 - Economy mode (deprecated earlier in the same session).
