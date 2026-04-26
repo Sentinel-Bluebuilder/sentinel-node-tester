@@ -1660,6 +1660,20 @@
       return Math.floor(d / 86400000) + 'd ago';
     }
 
+    function fmtUtc(ts) {
+      if (!ts) return '';
+      const n = Number(ts);
+      const ms = Number.isFinite(n) ? (n < 1e12 ? n * 1000 : n) : new Date(ts).getTime();
+      if (!Number.isFinite(ms)) return '';
+      const d = new Date(ms);
+      const yyyy = d.getUTCFullYear();
+      const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+      const dd   = String(d.getUTCDate()).padStart(2, '0');
+      const hh   = String(d.getUTCHours()).padStart(2, '0');
+      const mi   = String(d.getUTCMinutes()).padStart(2, '0');
+      return `${yyyy}-${mm}-${dd} ${hh}:${mi} UTC`;
+    }
+
     function escHtml(s) {
       if (s == null) return '';
       return String(s)
@@ -1969,7 +1983,8 @@
         renderPage();
         populateCountries(allNodes);
         updateFilterChips();
-        document.getElementById('lastUpdatedLabel').textContent = 'Updated ' + new Date().toLocaleTimeString();
+        const _latest = (_batchList && _batchList[0] && _batchList[0].started_at) || Date.now();
+        document.getElementById('lastUpdatedLabel').textContent = 'Snapshot ' + fmtUtc(_latest);
       } catch (err) {
         setTableMessage(`Failed to load: ${err.message}`, true);
       }
@@ -2844,7 +2859,10 @@
         filterAndSort();
         renderPage();
         updateFilterChips();
-        document.getElementById('lastUpdatedLabel').textContent = 'Snapshot from batch #' + batchId;
+        const _bts = data?.batch?.started_at || null;
+        document.getElementById('lastUpdatedLabel').textContent = _bts
+          ? 'Snapshot ' + fmtUtc(_bts)
+          : 'Snapshot from batch #' + batchId;
       } catch (err) {
         setTableMessage('Failed to load batch: ' + escHtml(err.message), true);
       }
@@ -3023,10 +3041,12 @@
       b.classList.toggle('active', parseInt(b.dataset.win, 10) === passWindow);
     });
     startStatsRefresh();
-    loadBatchList();
     connectSSE();
 
-    loadNodes();
+    (async () => {
+      await loadBatchList();
+      loadNodes();
+    })();
   </script>
 
   <!-- Copy toast — single reused node -->

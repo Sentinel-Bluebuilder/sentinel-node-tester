@@ -108,7 +108,6 @@ export interface AuditState {
   errorMessage: string | null;
   stopRequested: boolean;
   lowBalanceWarning: boolean;
-  economyMode: boolean;
   pauseReason: string | null;
   /** Present during retest mode */
   retestMode?: boolean;

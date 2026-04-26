@@ -145,7 +145,6 @@ async function run() {
   assert(state.testedNodes === 0, 'initial testedNodes=0');
   assert(state.failedNodes === 0, 'initial failedNodes=0');
   assert(state.stopRequested === false, 'initial stopRequested=false');
-  assert(state.economyMode === false, 'initial economyMode=false');
   assert(state.baselineMbps === null, 'initial baselineMbps=null');
 
   // ─── 9. Sleep Utility ─────────────────────────────────────────────────

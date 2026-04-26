@@ -78,7 +78,6 @@
  * @property {string|null} errorMessage
  * @property {boolean} stopRequested
  * @property {boolean} lowBalanceWarning
- * @property {boolean} economyMode
  * @property {string|null} pauseReason - Why audit is paused (VPN interference, etc.)
  */
 

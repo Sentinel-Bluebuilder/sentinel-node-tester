@@ -1415,11 +1415,6 @@ app.post('/api/stop', adminOnly, (req, res) => {
   res.json({ ok: true });
 });
 
-// DEPRECATED 2026-04-25: Economy mode removed. Endpoint kept as 410 Gone for any old client.
-app.post('/api/economy', adminOnly, (req, res) => {
-  res.status(410).json({ error: 'ECONOMY_MODE_DEPRECATED' });
-});
-
 app.post('/api/retest-skips', adminOnly, async (req, res) => {
   if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
