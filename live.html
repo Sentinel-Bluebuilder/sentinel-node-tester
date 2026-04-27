@@ -302,7 +302,23 @@
 
     .table-wrap { overflow-y: auto; flex: 1 1 auto; min-height: 0; padding: 0 8px 8px 8px; margin-top: 8px; }
 
-    table { width: 100%; border-collapse: separate; border-spacing: 0 4px; }
+    table { width: 100%; border-collapse: separate; border-spacing: 0 4px; table-layout: fixed; }
+    td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    td.td-num, th.th-num { font-variant-numeric: tabular-nums; text-align: right; }
+    td.td-moniker { max-width: 180px; }
+    td.td-error { max-width: 240px; }
+
+    .pager .btn-paginate {
+      background: var(--bg-input);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .pager .btn-paginate:disabled { opacity: 0.4; cursor: not-allowed; }
+    .pager .btn-paginate:not(:disabled):hover { border-color: var(--border-hover); }
 
     th {
       text-align: left;
@@ -496,7 +512,7 @@
       position: absolute; right: -6px; bottom: -6px; z-index: 2;
       width: 46px; height: 46px; border-radius: 50%;
       background: var(--yellow);
-      color: #000;
+      color: var(--bg);
       display: flex; align-items: center; justify-content: center;
       border: 3px solid var(--bg);
       box-shadow: 0 0 0 0 rgba(255, 200, 0, 0.45);
@@ -742,6 +758,11 @@
             </thead>
             <tbody id="resultsBody"></tbody>
           </table>
+          <div id="liveResultsPager" class="pager" style="display:none;align-items:center;justify-content:flex-end;gap:8px;padding:8px 12px;border-top:1px solid var(--border)">
+            <button class="btn-paginate" id="liveResultsPrev" type="button">← Prev</button>
+            <span id="liveResultsPageInfo" style="color:var(--text-dim);font-size:11px"></span>
+            <button class="btn-paginate" id="liveResultsNext" type="button">Next →</button>
+          </div>
         </div>
       </div>
 
@@ -822,6 +843,10 @@
       // Paint cached snapshot first so a refresh shows data instantly,
       // then resolve broadcast state and reconcile with server.
       rehydrateFromCache();
+      const _liveResultsPrev = document.getElementById('liveResultsPrev');
+      const _liveResultsNext = document.getElementById('liveResultsNext');
+      if (_liveResultsPrev) _liveResultsPrev.addEventListener('click', () => liveGoPage(-1));
+      if (_liveResultsNext) _liveResultsNext.addEventListener('click', () => liveGoPage(1));
       renderTable();
       renderLiveStats();
       // Resolve broadcast state BEFORE loading the current batch — otherwise
@@ -950,7 +975,8 @@
     // ─── State ───
     let resultsArr = [];
     let activeFilter = 'all';
-    const MAX_ROWS = 500;
+    const LIVE_PAGE_SIZE = 50;
+    let _livePage = 1;
     const MAX_LOG  = 400;
 
     // ─── Helpers ───
@@ -958,6 +984,19 @@
       return String(s == null ? '' : s)
         .replace(/&/g, '&amp;').replace(/</g, '&lt;')
         .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    function fmtUtc(ts) {
+      if (!ts) return '';
+      const n = Number(ts);
+      const ms = Number.isFinite(n) ? (n < 1e12 ? n * 1000 : n) : new Date(ts).getTime();
+      if (!Number.isFinite(ms)) return '';
+      const d = new Date(ms);
+      const yyyy = d.getUTCFullYear();
+      const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+      const dd   = String(d.getUTCDate()).padStart(2, '0');
+      const hh   = String(d.getUTCHours()).padStart(2, '0');
+      const mi   = String(d.getUTCMinutes()).padStart(2, '0');
+      return `${yyyy}-${mm}-${dd} ${hh}:${mi} UTC`;
     }
     function shortAddr(a) {
       if (!a) return '--';
@@ -1004,6 +1043,7 @@
     // ─── Filter ───
     function setFilter(f) {
       activeFilter = f;
+      _livePage = 1;
       for (const id of ['filterAll','filterPass','filterFail','filterSlow','filterWg','filterV2']) {
         const el = document.getElementById(id);
         if (el) {
@@ -1031,30 +1071,66 @@
     // ─── Table render ───
     function renderTable() {
       const tbody = document.getElementById('resultsBody');
+      const wrap = tbody.closest('.table-wrap');
+      const prevScroll = wrap ? wrap.scrollTop : 0;
       tbody.innerHTML = '';
-      const filtered = applyFilter(resultsArr);
-      if (filtered.length === 0) {
+      const filtered = applyFilter(resultsArr).slice().reverse();
+      const total = filtered.length;
+      const totalPages = Math.max(1, Math.ceil(total / LIVE_PAGE_SIZE));
+      if (_livePage > totalPages) _livePage = totalPages;
+      const start = (_livePage - 1) * LIVE_PAGE_SIZE;
+      const slice = filtered.slice(start, start + LIVE_PAGE_SIZE);
+      if (total === 0) {
         tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:36px;color:var(--text-dim);font-size:12px;background:transparent">No results match current filter.</td></tr>';
       } else {
-        filtered.slice(-MAX_ROWS).reverse().forEach(r => appendRowHtml(r, tbody));
+        slice.forEach(r => appendRowHtml(r, tbody));
       }
       const label = activeFilter === 'all'
         ? resultsArr.length + ' Entries'
         : filtered.length + '/' + resultsArr.length + ' (' + activeFilter.toUpperCase() + ')';
       document.getElementById('resultsCountLabel').textContent = label;
+      renderLivePager(total, totalPages);
+      if (wrap) wrap.scrollTop = prevScroll;
+    }
+
+    function renderLivePager(total, totalPages) {
+      const pager = document.getElementById('liveResultsPager');
+      if (!pager) return;
+      if (totalPages <= 1) { pager.style.display = 'none'; return; }
+      pager.style.display = 'flex';
+      const startIdx = (_livePage - 1) * LIVE_PAGE_SIZE + 1;
+      const endIdx   = Math.min(_livePage * LIVE_PAGE_SIZE, total);
+      document.getElementById('liveResultsPageInfo').textContent =
+        `Page ${_livePage} of ${totalPages} — ${startIdx}–${endIdx} of ${total}`;
+      document.getElementById('liveResultsPrev').disabled = _livePage <= 1;
+      document.getElementById('liveResultsNext').disabled = _livePage >= totalPages;
+    }
+
+    function liveGoPage(delta) {
+      const filtered = applyFilter(resultsArr);
+      const totalPages = Math.max(1, Math.ceil(filtered.length / LIVE_PAGE_SIZE));
+      const next = Math.min(totalPages, Math.max(1, _livePage + delta));
+      if (next === _livePage) return;
+      _livePage = next;
+      renderTable();
     }
 
     function addSingleRow(r) {
-      const tbody = document.getElementById('resultsBody');
-      // Clear placeholder row if present
-      const placeholder = tbody.querySelector('tr td[colspan]');
-      if (placeholder) tbody.innerHTML = '';
-      for (const row of tbody.querySelectorAll('tr')) {
-        if (row.dataset.addr === r.address) { row.remove(); break; }
+      // Re-render current page only when the affected row falls on the visible page;
+      // otherwise just bump the count label.
+      const filtered = applyFilter(resultsArr).slice().reverse();
+      const idxInFiltered = filtered.findIndex(x => x.address === r.address);
+      const onVisiblePage = idxInFiltered >= 0
+        && idxInFiltered >= (_livePage - 1) * LIVE_PAGE_SIZE
+        && idxInFiltered <  _livePage      * LIVE_PAGE_SIZE;
+      if (onVisiblePage) {
+        renderTable();
+      } else {
+        document.getElementById('resultsCountLabel').textContent = resultsArr.length + ' Entries';
+        const total = filtered.length;
+        const totalPages = Math.max(1, Math.ceil(total / LIVE_PAGE_SIZE));
+        renderLivePager(total, totalPages);
       }
-      appendRowHtml(r, tbody, true);
-      document.getElementById('resultsCountLabel').textContent = resultsArr.length + ' Entries';
-      if (tbody.children.length > MAX_ROWS) tbody.removeChild(tbody.lastChild);
     }
 
     function appendRowHtml(r, tbody, prepend = false) {
@@ -1116,13 +1192,13 @@
 
       tr.innerHTML = `
         <td>${proto} ${transportHtml}</td>
-        <td style="font-weight:500">${escHtml(monikerText)}</td>
+        <td class="td-moniker" style="font-weight:500" title="${escHtml(monikerText)}">${escHtml(monikerText)}</td>
         <td style="font-family:var(--font-mono);font-size:11px;color:var(--text-secondary)">${addr}</td>
         <td>${countryCol}</td>
         <td style="color:var(--text-dim)">${cityCol}</td>
-        <td style="text-align:center">${peersHtml}</td>
-        <td style="text-align:right;color:var(--text);font-weight:600">${act}</td>
-        <td style="text-align:right;color:var(--text-secondary)">${blAt}</td>
+        <td class="td-num" style="text-align:center">${peersHtml}</td>
+        <td class="td-num" style="color:var(--text);font-weight:600">${act}</td>
+        <td class="td-num" style="color:var(--text-secondary)">${blAt}</td>
         <td style="text-align:center">${badge}</td>
         <td style="text-align:center">${copyCell}</td>
       `;
@@ -1396,14 +1472,14 @@
 
       // Detect TEST RUN: state.testRun flag (immediate), any row marked
       // TEST_RUN_SKIP, OR no real-processed rows yet but at least one skipped.
-      const isDryRun = !!(_liveState && _liveState.testRun) ||
+      const isTestRun = !!(_liveState && _liveState.testRun) ||
                        arr.some(r => r.errorCode === 'TEST_RUN_SKIP') ||
                        (arr.length > 0 && realProcessed === 0 &&
                         arr.some(r => r.skipped));
       const testRunBadge = document.getElementById('testRunBadge');
-      if (testRunBadge) testRunBadge.style.display = isDryRun ? '' : 'none';
+      if (testRunBadge) testRunBadge.style.display = isTestRun ? '' : 'none';
       const testRunBanner = document.getElementById('testRunBanner');
-      if (testRunBanner) testRunBanner.classList.toggle('is-visible', isDryRun);
+      if (testRunBanner) testRunBanner.classList.toggle('is-visible', isTestRun);
 
       // Tested — always shows real progress, even during a TEST RUN.
       if (snap > 0) {
@@ -1422,7 +1498,7 @@
       const DASH = '—';
 
       // Total Failed
-      if (isDryRun) {
+      if (isTestRun) {
         set('lsTotalFailed', DASH);
         set('lsTotalFailedPct', 'not tested');
       } else {
@@ -1432,7 +1508,7 @@
       }
 
       // Pass 10 Mbps SLA
-      if (isDryRun) {
+      if (isTestRun) {
         set('lsPassedSLA', DASH);
         set('lsPassedSLAPct', 'not tested');
       } else {
@@ -1442,7 +1518,7 @@
       }
 
       // Dead Plan Nodes
-      if (isDryRun) {
+      if (isTestRun) {
         set('lsDeadPlan', DASH);
         set('lsDeadPlanPct', 'not tested');
       } else {
@@ -1463,7 +1539,7 @@
       set('lsNotOnlineSub', trulyOffline === 1 ? '1 node offline' : `${trulyOffline} nodes offline`);
 
       // Pass Rate
-      if (isDryRun) {
+      if (isTestRun) {
         set('lsPassRate', DASH);
       } else {
         const connRate = realProcessed > 0 ? (connected / realProcessed * 100).toFixed(1) : '0';
@@ -1967,6 +2043,7 @@
       }
     }
 
+    let _sseEverConnected = false;
     function connectSSE() {
       if (!_broadcastLive) return;
       if (_sse) { try { _sse.close(); } catch (_) {} }
@@ -1978,7 +2055,15 @@
           if (!d || !d.type) return;
           try { handleEvent(d); } catch (_) {}
         };
-        _sse.onopen = () => { _sseRetry = 1000; };
+        _sse.onopen = () => {
+          _sseRetry = 1000;
+          // On reconnect, re-fetch current batch via REST so the table doesn't
+          // sit on stale data until the next live event arrives.
+          if (_sseEverConnected) {
+            try { loadCurrentBatch(); } catch (_) {}
+          }
+          _sseEverConnected = true;
+        };
         _sse.onerror = () => {
           try { _sse.close(); } catch (_) {}
           _sse = null;
@@ -2112,7 +2197,7 @@
           'Stage:      ' + (er.stage || '—'),
           'Error Code: ' + (er.error_code || '—'),
           'Message:    ' + (er.error_message || '—'),
-          'Captured:   ' + (er.captured_at || '—'),
+          'Captured:   ' + (er.captured_at ? fmtUtc(er.captured_at) : '—'),
           '',
         ];
         if (er.log_snippet) { lines.push('Log Snippet:'); lines.push(er.log_snippet); }
@@ -2173,7 +2258,7 @@
         }
         const er = errs[0];
         const eh = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
-        const captured = er.captured_at ? new Date(typeof er.captured_at === 'number' ? er.captured_at : Number(er.captured_at) || er.captured_at).toLocaleString() : '—';
+        const captured = er.captured_at ? fmtUtc(er.captured_at) : '—';
         const row = (label, value) => `
           <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
             <div style="color:var(--text-muted);font-size:12px">${label}</div>

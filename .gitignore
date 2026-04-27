@@ -37,6 +37,8 @@ SentinelAudit.exe
 # Backup files
 *.bak
 *.backup
+*.local-backup
+agent-map.json
 
 # Editor & OS
 .vscode/

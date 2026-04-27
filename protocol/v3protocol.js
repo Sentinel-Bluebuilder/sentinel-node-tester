@@ -34,4 +34,4 @@ export {
   buildMsgEndSession,
   buildMsgStartSubscription,
   buildMsgSubStartSession,
-} from 'sentinel-dvpn-sdk';
+} from 'blue-js-sdk';

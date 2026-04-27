@@ -17,7 +17,7 @@
  */
 
 import { getAllNodes, queryNodeStatusDirect, cleanupRpc } from './core/chain.js';
-import { cachedWalletSetup, createFreshClient, buildV3Registry } from './core/wallet.js';
+import { cachedWalletSetup, createFreshClient } from './core/wallet.js';
 import { findExistingSession, submitBatchPayment, clearPaidNodes, buildSessionMap } from './core/session.js';
 import { testNode } from './audit/node-test.js';
 import { testWithRetry } from './audit/retry.js';

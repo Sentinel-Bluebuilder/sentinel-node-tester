@@ -10,7 +10,7 @@ import {
   SentinelError, ValidationError, NodeError, ChainError as SdkChainError,
   TunnelError as SdkTunnelError, SecurityError,
   ErrorCodes, ERROR_SEVERITY, isRetryable, userMessage,
-} from 'sentinel-dvpn-sdk';
+} from 'blue-js-sdk';
 
 // Re-export SDK error utilities for consumers
 export { ErrorCodes, ERROR_SEVERITY, isRetryable, userMessage, SentinelError, ValidationError, NodeError, SecurityError };

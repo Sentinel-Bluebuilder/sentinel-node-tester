@@ -171,6 +171,16 @@ function saveStateSnapshot() {
       baselineMbps: state.baselineMbps,
       totalNodes: state.totalNodes,
       status: state.status,
+      // Run-mode context — without this, /api/resume after a process bounce
+      // silently demotes a subscription run to P2P (the C-1 family of bugs).
+      runMode: state.runMode,
+      testRun: state.testRun,
+      runPlanId: state.runPlanId,
+      runSubscriptionId: state.runSubscriptionId,
+      runGranter: state.runGranter,
+      pricingMode: state.pricingMode,
+      activeSDK: state.activeSDK,
+      continuousLoop: state.continuousLoop,
     }), 'utf8');
   } catch { }
 }
@@ -370,7 +380,17 @@ function rehydrateState(results) {
       if (snap.startedAt) state.startedAt = snap.startedAt;
       if (snap.baselineMbps) state.baselineMbps = snap.baselineMbps;
       if (snap.totalNodes) state.totalNodes = snap.totalNodes;
-      console.log(`State snapshot restored: baseline=${snap.baselineHistory?.length || 0} readings, speeds=${snap.nodeSpeedHistory?.length || 0} nodes, total=${state.totalNodes}`);
+      // Restore run-mode context so /api/resume after a process bounce can
+      // route to the correct pipeline (P2P vs subscription vs test).
+      if (snap.runMode) state.runMode = snap.runMode;
+      if (snap.testRun != null) state.testRun = snap.testRun;
+      if (snap.runPlanId) state.runPlanId = snap.runPlanId;
+      if (snap.runSubscriptionId) state.runSubscriptionId = snap.runSubscriptionId;
+      if (snap.runGranter) state.runGranter = snap.runGranter;
+      if (snap.pricingMode) state.pricingMode = snap.pricingMode;
+      if (snap.activeSDK) state.activeSDK = snap.activeSDK;
+      if (snap.continuousLoop != null) state.continuousLoop = snap.continuousLoop;
+      console.log(`State snapshot restored: baseline=${snap.baselineHistory?.length || 0} readings, speeds=${snap.nodeSpeedHistory?.length || 0} nodes, total=${state.totalNodes}, runMode=${state.runMode || 'none'}`);
     } catch { }
 
     // Resume the active test — DON'T create a new one on restart
@@ -1170,11 +1190,20 @@ app.get('/api/events', adminOnly, rlAdminSse, (req, res) => {
   res.flushHeaders();
   const results = getResults();
   const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
-  const { walletAddress, balance, balanceUdvpn, spentUdvpn, ...stateForSse } = state;
+  // Strip wallet + balance internals AND runGranter (subscription granter
+  // address — operator-internal, never needs to leave the server).
+  const { walletAddress, balance, balanceUdvpn, spentUdvpn, runGranter, ...stateForSse } = state;
   send({ type: 'init', state: stateForSse, results, logs: logBuffer.slice() });
   const ADMIN_BLOCK = /^(loop:|iteration:|batch:)/;
   const handler = (data) => {
     if (data && typeof data.type === 'string' && ADMIN_BLOCK.test(data.type)) return;
+    // Strip runGranter from any state payload before sending — even the admin
+    // browser doesn't need the granter address; it's purely server-internal.
+    if (data && data.type === 'state' && data.state && typeof data.state === 'object') {
+      const { runGranter, ...safeState } = data.state;
+      send({ ...data, state: safeState });
+      return;
+    }
     send(data);
   };
   emitter.on('update', handler);
@@ -1266,8 +1295,7 @@ function startFreshRun(label, { mode = 'p2p', plan_id = null } = {}) {
 
 // Start NEW test (saves current, clears, starts fresh).
 app.post('/api/start', adminOnly, async (req, res) => {
-  // Accept testRun (current) or dryRun (one-release backward-compat alias — remove next release).
-  const testRun = !!(req.body?.testRun || req.query.testRun || req.body?.dryRun || req.query.dryRun);
+  const testRun = !!(req.body?.testRun || req.query.testRun);
   const infiniteLoop = !!(req.body?.infiniteLoop || req.query.infiniteLoop);
   const pricingMode = (req.body?.pricingMode === 'hours' || req.query.pricingMode === 'hours') ? 'hours' : 'gigabytes';
 
@@ -1351,7 +1379,17 @@ app.post('/api/resume', adminOnly, async (req, res) => {
   try { _mkd(resumeRunDir, { recursive: true }); } catch { }
   setActiveRunDir(resumeRunDir);
 
-  const runMode = state.runMode || 'p2p';
+  // Refuse to silently demote an unknown-mode resume to P2P. If the snapshot
+  // didn't preserve runMode (older runs pre-snapshot-v2) the operator must
+  // start a fresh test so we don't pay-per-node on a subscription chain or
+  // accidentally TEST_RUN_SKIP a real audit.
+  if (!state.runMode) {
+    return res.status(409).json({
+      error: 'NO_RUN_MODE',
+      message: 'Cannot resume — run mode is unknown (snapshot did not preserve mode). Start a new test instead.',
+    });
+  }
+  const runMode = state.runMode;
   const modeTag = runMode === 'subscription' ? `Sub. Plan ${state.runPlanId}` : (runMode === 'test' ? 'Test Run' : 'P2P');
   broadcast('log', { msg: `▶ Resuming Test #${state.activeRunNumber} (${modeTag}) from node ${results.length + 1} (${results.length} already tested, SDK: ${state.activeSDK.toUpperCase()})` });
   res.json({ ok: true, testNumber: state.activeRunNumber, resumeFrom: results.length, runMode });
@@ -1787,18 +1825,27 @@ app.post('/api/runs/load/:num', adminOnly, (req, res) => {
 app.post('/api/sdk', adminOnly, (req, res) => {
   const { sdk } = req.body;
   const SDK_LABELS = { js: 'Blue JS', csharp: 'Blue C#', tkd: 'TKD JS (Official)' };
-  if (SDK_LABELS[sdk]) {
-    const changed = state.activeSDK !== sdk;
-    state.activeSDK = sdk;
-    try { _wfs(SDK_PREF_FILE, sdk, 'utf8'); } catch {}
-    if (changed) {
-      broadcast('state', { state });
-      broadcast('log', { msg: `SDK switched to ${SDK_LABELS[sdk]}` });
-    }
-    res.json({ ok: true, sdk });
-  } else {
-    res.status(400).json({ error: 'Invalid SDK. Use "js", "csharp", or "tkd"' });
+  if (!SDK_LABELS[sdk]) {
+    return res.status(400).json({ error: 'Invalid SDK. Use "js", "csharp", or "tkd"' });
   }
+  // Refuse SDK swaps mid-run — the pipeline reads state.activeSDK on every
+  // node, so a switch would silently split a single audit across two SDK
+  // implementations and contaminate the result-row sdk tag. Stop the run
+  // first, then switch.
+  if (state.status === 'running' || state.status === 'paused' || continuous.status().running) {
+    return res.status(409).json({
+      error: 'RUN_ACTIVE',
+      message: 'Cannot switch SDK while an audit is running or paused. Stop first.',
+    });
+  }
+  const changed = state.activeSDK !== sdk;
+  state.activeSDK = sdk;
+  try { _wfs(SDK_PREF_FILE, sdk, 'utf8'); } catch {}
+  if (changed) {
+    broadcast('state', { state });
+    broadcast('log', { msg: `SDK switched to ${SDK_LABELS[sdk]}` });
+  }
+  res.json({ ok: true, sdk });
 });
 
 app.get('/api/sdk', adminOnly, (req, res) => {
@@ -1887,69 +1934,6 @@ app.post('/api/dns', adminOnly, (req, res) => {
   res.status(400).json({ error: 'Provide preset (default|hns|cloudflare|google) or servers array' });
 });
 
-// ─── Dictator Mode ──────────────────────────────────────────────────────────
-app.get('/dictator', adminOnly, (req, res) => res.sendFile(path.join(__dirname, 'dictator.html')));
-
-app.get('/api/dictator', adminOnly, (req, res) => {
-  const results = getResults();
-  const countryMap = {};
-  for (const r of results) {
-    const country = r.country || 'Unknown';
-    if (!countryMap[country]) {
-      countryMap[country] = {
-        country,
-        total: 0,
-        tested: 0,
-        googleYes: 0,
-        googleNo: 0,
-        googleUnknown: 0,
-        googleLatencySum: 0,
-        googleLatencyCount: 0,
-        nodes: [],
-      };
-    }
-    const c = countryMap[country];
-    c.total++;
-    if (r.actualMbps != null) c.tested++;
-    if (r.googleAccessible === true) {
-      c.googleYes++;
-      if (r.googleLatencyMs != null) {
-        c.googleLatencySum += r.googleLatencyMs;
-        c.googleLatencyCount++;
-      }
-    } else if (r.googleAccessible === false) {
-      c.googleNo++;
-    } else {
-      c.googleUnknown++;
-    }
-    c.nodes.push({
-      address: r.address,
-      moniker: r.moniker,
-      city: r.city,
-      googleAccessible: r.googleAccessible,
-      googleLatencyMs: r.googleLatencyMs,
-      actualMbps: r.actualMbps,
-      type: r.type,
-      error: r.error || null,
-    });
-  }
-  const countries = Object.values(countryMap)
-    .map(c => ({
-      country: c.country,
-      total: c.total,
-      tested: c.tested,
-      googleYes: c.googleYes,
-      googleNo: c.googleNo,
-      googleUnknown: c.googleUnknown,
-      avgGoogleLatencyMs: c.googleLatencyCount > 0
-        ? Math.round(c.googleLatencySum / c.googleLatencyCount)
-        : null,
-      nodes: c.nodes,
-    }))
-    .sort((a, b) => a.country.localeCompare(b.country));
-  res.json({ sdk: state.activeSDK, countries, generatedAt: new Date().toISOString() });
-});
-
 // ─── Health ─────────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
@@ -1957,8 +1941,7 @@ app.get('/health', (req, res) => {
 
 // ─── Server Startup ─────────────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nSentinel Node Audit Dashboard → http://localhost:${PORT}`);
-  console.log(`Dictator Mode → http://localhost:${PORT}/dictator\n`);
+  console.log(`\nSentinel Node Audit Dashboard → http://localhost:${PORT}\n`);
   if (!IS_ADMIN) {
     console.warn('⚠  NOT running as Administrator — WireGuard tests will be skipped.');
   } else {

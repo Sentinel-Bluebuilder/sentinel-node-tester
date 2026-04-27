@@ -116,6 +116,22 @@ export interface AuditState {
   retestPassed?: number;
   retestFailed?: number;
   activeSDK?: string;
+  /** Active run mode (persisted across restart). */
+  runMode?: 'p2p' | 'subscription' | 'test' | null;
+  /** Skip-only TEST RUN demo flag (persisted). */
+  testRun?: boolean;
+  /** Plan ID when runMode='p2p'. */
+  runPlanId?: string | number | null;
+  /** Subscription ID when runMode='subscription'. */
+  runSubscriptionId?: string | number | null;
+  /** Fee-grant granter address. Admin-only — never broadcast over the public SSE channel. */
+  runGranter?: string | null;
+  /** Active pricing strategy. */
+  pricingMode?: string | null;
+  /** True when a continuous loop run is active. */
+  continuousLoop?: boolean;
+  /** When true, public SSE forwards live events; when false, public sees last-completed snapshot only. */
+  broadcastLive?: boolean;
 }
 
 /** Session map entry for a node. */
@@ -269,9 +285,9 @@ export class SpeedTestError extends AuditError {
   constructor(message: string, diag?: DiagnosticData);
 }
 
-// Re-exported from sentinel-dvpn-sdk
-export { SentinelError, ValidationError, NodeError, SecurityError } from 'sentinel-dvpn-sdk';
-export { ErrorCodes, ERROR_SEVERITY, isRetryable, userMessage } from 'sentinel-dvpn-sdk';
+// Re-exported from blue-js-sdk
+export { SentinelError, ValidationError, NodeError, SecurityError } from 'blue-js-sdk';
+export { ErrorCodes, ERROR_SEVERITY, isRetryable, userMessage } from 'blue-js-sdk';
 
 // ─── Audit Pipeline ─────────────────────────────────────────────────────────
 

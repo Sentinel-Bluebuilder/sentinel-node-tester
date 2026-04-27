@@ -14,7 +14,7 @@ import {
 } from '../core/constants.js';
 import { cachedWalletSetup, createFreshClient, signAndBroadcastRetry } from '../core/wallet.js';
 import { getAllNodes, fetchPlanMembership, ensureLcd, getActiveLcd, getRpcClient, rpcFetchAllNodesForPlanPaginated } from '../core/chain.js';
-import { rpcQueryNode } from 'sentinel-dvpn-sdk';
+import { rpcQueryNode } from 'blue-js-sdk';
 import {
   submitBatchPayment, waitForBatchSessions, waitForSessionActive,
   clearPoisonedSessions, clearPaidNodes, clearAllCredentials, invalidateSessionCache, parseNodePriceUdvpn,
@@ -26,15 +26,14 @@ import { speedtestDirect, sleep as _rawSleep, resolveCfHost } from '../protocol/
 // Every sleep in the pipeline races against a module-scope stop signal.
 // When `triggerPipelineStop()` is called (from /api/stop), every pending
 // sleep resolves instantly so the loop drops back to its `if (state.stopRequested) break`
-// check on the next tick — cutting Stop latency from "until next timer fires"
-// (up to 5 minutes for sleep(5*60_000)) to single-digit ms.
+// check on the next tick.
 const _stopWaiters = new Set();
 let _pipelineStopFlag = false;
 function sleep(ms) {
   if (_pipelineStopFlag) return Promise.resolve();
   return new Promise((resolve) => {
-    let timer = setTimeout(() => { _stopWaiters.delete(resolve); resolve(); }, ms);
-    const wake = () => { try { clearTimeout(timer); } catch {} resolve(); };
+    let timer = setTimeout(() => { _stopWaiters.delete(wake); resolve(); }, ms);
+    const wake = () => { try { clearTimeout(timer); } catch {} _stopWaiters.delete(wake); resolve(); };
     _stopWaiters.add(wake);
   });
 }
@@ -46,22 +45,7 @@ export function triggerPipelineStop() {
 export function resetPipelineStop() {
   _pipelineStopFlag = false;
 }
-// Race any awaitable against the stop signal. The promise rejects with a
-// `_stopRequested` marker the per-node loop already catches and breaks on.
-function raceStop(promise) {
-  return new Promise((resolve, reject) => {
-    if (_pipelineStopFlag) {
-      const e = new Error('Stop requested'); e._stopRequested = true; return reject(e);
-    }
-    let done = false;
-    const wake = () => { if (done) return; done = true; _stopWaiters.delete(wake); const e = new Error('Stop requested'); e._stopRequested = true; reject(e); };
-    _stopWaiters.add(wake);
-    promise.then(
-      (v) => { if (done) return; done = true; _stopWaiters.delete(wake); resolve(v); },
-      (e) => { if (done) return; done = true; _stopWaiters.delete(wake); reject(e); },
-    );
-  });
-}
+
 // Platform-aware imports — Windows has full implementation, others get stubs
 let WG_AVAILABLE, IS_ADMIN, emergencyCleanupSync, uninstallWgTunnel, checkV2Ray;
 if (process.platform === 'win32') {
@@ -80,9 +64,7 @@ import { checkAndPauseIfInterference, classifyFailure } from '../protocol/diagno
 import { loadTransportCache, getCacheStats, saveTransportCache } from '../core/transport-cache.js';
 import { testNode } from './node-test.js';
 import { testWithRetry } from './retry.js';
-import { insertResult as _dbInsertResult, insertErrorLog as _dbInsertErrorLog,
-         insertBatch as _dbInsertBatch, insertBatchResult as _dbInsertBatchResult,
-         updateBatchOnFinish as _dbUpdateBatchOnFinish } from '../core/db.js';
+import { insertResult as _dbInsertResult, insertErrorLog as _dbInsertErrorLog } from '../core/db.js';
 
 // ─── Internet Health Check & Auto-Resume ─────────────────────────────────────
 const INTERNET_CHECK_TARGETS = ['https://www.google.com', 'https://1.1.1.1', 'https://www.cloudflare.com'];
@@ -280,13 +262,6 @@ export function createState() {
     stopRequested: false,
     lowBalanceWarning: false,
     pauseReason: null,
-    testRun: false,
-    continuousLoop: false,
-    pricingMode: 'gigabytes',
-    runMode: null,
-    runPlanId: null,
-    runSubscriptionId: null,
-    runGranter: null,
   };
 }
 
@@ -384,7 +359,6 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   state.retestFailed = null;
 
   state.testRun = !!opts.testRun;
-  state.pricingMode = (opts.pricingMode === 'hours') ? 'hours' : 'gigabytes';
 
   clearPoisonedSessions();
   clearPaidNodes();
@@ -520,27 +494,6 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   }
 
   state.totalNodes = (resume ? results.length : 0) + viableNodes.length;
-
-  // ── Batch row: drives /api/public/runs/current → /live livestream ──────
-  // Without this, getActiveBatch() never sees the in-flight run and /live
-  // keeps showing the previous (finished) batch. Created on every fresh run
-  // (not on resume — the previous batch row stays open until completion).
-  let _currentBatchId = null;
-  if (!resume) {
-    try {
-      const snapshotAddrs = viableNodes.map(({ node }) => node.address).filter(Boolean);
-      _currentBatchId = _dbInsertBatch({
-        started_at: Date.now(),
-        snapshot_size: viableNodes.length,
-        mode: state.testRun ? 'test' : 'p2p',
-        snapshot_addresses: snapshotAddrs,
-      });
-      state.activeBatchId = _currentBatchId;
-    } catch (batchErr) {
-      broadcast('log', { msg: `[batch] insert failed: ${batchErr.message}` });
-    }
-  }
-
   const estCostUdvpn = viableNodes.reduce(
     (sum, { node }) => sum + parseNodePriceUdvpn(node.gigabyte_prices) * GIGS, 0
   );
@@ -691,7 +644,6 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
         if (result.pass10mbps) state.passed10++;
         if (result.passBaseline) state.passedBaseline++;
         upsertResult(result); // success — no snippet needed
-        if (_currentBatchId) { try { _dbInsertBatchResult(_currentBatchId, { ...result, testedAt: Date.now() }); } catch {} }
         saveResults();
         broadcast('result', { result, state });
         if (result.actualMbps != null) {
@@ -755,7 +707,6 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
         const failResult = buildFailResult(node, status, state, errMsg, error?.diag || {});
         state.failedNodes++;
         upsertResult(failResult, _logSnippet);
-        if (_currentBatchId) { try { _dbInsertBatchResult(_currentBatchId, { ...failResult, testedAt: Date.now() }); } catch {} }
         saveResults();
         broadcast('result', { result: failResult, state });
         const retryLabel = retried > 0 ? ` (${retried} retries)` : '';
@@ -928,18 +879,6 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   state.currentNode = null;
   broadcast('state', { state });
   const finalFailed = results.filter(r => r.actualMbps == null && r.error).length;
-  if (_currentBatchId) {
-    try {
-      _dbUpdateBatchOnFinish(_currentBatchId, {
-        finished_at: Date.now(),
-        passed: state.testedNodes,
-        failed: finalFailed,
-      });
-    } catch (finishErr) {
-      broadcast('log', { msg: `[batch] finalize failed: ${finishErr.message}` });
-    }
-    state.activeBatchId = null;
-  }
   broadcast('log', { msg: `✅ Audit complete. Tested ${state.testedNodes}, Failed ${finalFailed}. ${state.retryCount} retries total.` });
   broadcast('log', { msg: `🧠 Transport cache: ${finalCache.nodesCached} nodes learned for next scan.` });
 }
@@ -1442,17 +1381,13 @@ export async function runPlanTest(planId, state, broadcast) {
  * This mirrors how Android/iOS consumer apps ship — the end user never holds
  * P2P, the plan operator covers all on-chain fees via a pre-granted feegrant.
  */
-export async function runSubPlanTest(planId, subscriptionId, granterAddr, state, broadcast, opts = {}) {
-  resetPipelineStop();
-  const resume = !!opts.resume;
+export async function runSubPlanTest(planId, subscriptionId, granterAddr, state, broadcast) {
   state.status = 'running';
   state.startedAt = new Date().toISOString();
   state.errorMessage = null;
-  if (!resume) {
-    state.totalNodes = 0;
-    state.testedNodes = 0;
-    state.failedNodes = 0;
-  }
+  state.totalNodes = 0;
+  state.testedNodes = 0;
+  state.failedNodes = 0;
   state.retryCount = 0;
   recomputeCounters(state);
   clearPoisonedSessions();
@@ -1498,14 +1433,7 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
     // Surface allowance details in log for operator debugging
     const allowanceType = allowance['@type'] || allowance.type_url || null;
     const spendLimit = allowance.spend_limit || allowance.allowance?.spend_limit || null;
-    const typeShort = allowanceType ? allowanceType.split('.').pop().replace(/^\//, '') : 'unknown';
-    let limitLabel = 'unlimited';
-    if (Array.isArray(spendLimit) && spendLimit.length) {
-      limitLabel = spendLimit
-        .map(c => `${(parseInt(c.amount || '0', 10) / 1_000_000).toFixed(2)} ${(c.denom || '').replace(/^u/, '').toUpperCase() || 'DVPN'}`)
-        .join(', ');
-    }
-    broadcast('log', { msg: `  ✓ Fee grant verified — ${typeShort}, limit ${limitLabel}` });
+    broadcast('log', { msg: `  ✓ Fee grant verified — type=${allowanceType || 'unknown'} limit=${JSON.stringify(spendLimit) || 'none'}` });
   } catch (err) {
     // If the query itself throws (network error), abort rather than silently proceeding —
     // we cannot know whether the grant exists, and every session TX would fail.
@@ -1586,16 +1514,8 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
   }
 
   broadcast('log', { msg: `  Scanning plan nodes for online status...` });
-  let onlineNodes = await scanNodesParallel(planNodes, 20, broadcast, state);
+  const onlineNodes = await scanNodesParallel(planNodes, 20, broadcast, state);
   broadcast('log', { msg: `  ${onlineNodes.length}/${planNodes.length} plan nodes are online` });
-
-  // Resume mode: filter already-tested addresses
-  if (resume) {
-    const testedAddrs = new Set(results.map(r => r.address));
-    const before = onlineNodes.length;
-    onlineNodes = onlineNodes.filter(({ node }) => !testedAddrs.has(node.address));
-    broadcast('log', { msg: `Resume: skipping ${before - onlineNodes.length} already-tested, ${onlineNodes.length} remaining.` });
-  }
 
   if (onlineNodes.length === 0) {
     state.status = 'done';
@@ -1604,7 +1524,7 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
     return;
   }
 
-  state.totalNodes = (resume ? results.length : 0) + onlineNodes.length;
+  state.totalNodes = onlineNodes.length;
   broadcast('state', { state });
 
   broadcast('log', { msg: `📡 Running baseline...` });

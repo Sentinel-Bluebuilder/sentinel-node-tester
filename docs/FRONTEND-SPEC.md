@@ -757,8 +757,6 @@ Integrator equivalent:
 | GET | `/api/sdk` | Get SDK | Not used by frontend | `{ sdk }` |
 | GET | `/api/dns` | Get DNS config | DNS startup loader | `{ servers, presets }` |
 | POST | `/api/dns` | Set DNS | setDNS() | `{ ok, servers, preset }` |
-| GET | `/dictator` | Dictator page | Link in header | HTML |
-| GET | `/api/dictator` | Dictator data | Not used by main frontend | `{ sdk, countries, ... }` |
 | GET | `/health` | Health check | Not used by frontend | `{ status, uptime }` |
 
 ---
@@ -944,9 +942,7 @@ Integrator equivalent:
 
 5. **Low balance warning** -- `state.lowBalanceWarning` is set by server but never shown in frontend.
 
-6. **Dictator Mode link** -- EXISTS in header but leads to separate `dictator.html` (not part of main dashboard code review).
-
-7. **Moniker display** -- Result rows show truncated address, not moniker. The moniker field exists in results but is unused in the table.
+6. **Moniker display** -- Result rows show truncated address, not moniker. The moniker field exists in results but is unused in the table.
 
 ---
 
@@ -963,7 +959,6 @@ These exist in server.js but have no corresponding frontend function:
 | `POST /api/auto-retest` | Server-side filtered retest | Frontend uses client-side filtered retest-fails |
 | `GET /api/runs/:num` | Get run details without loading | Frontend loads runs directly |
 | `GET /api/sdk` | Get current SDK | Frontend syncs via SSE state |
-| `GET /api/dictator` | Dictator data | Used by dictator.html, not main dashboard |
 | `GET /health` | Health check | For monitoring, not UI |
 
 ---

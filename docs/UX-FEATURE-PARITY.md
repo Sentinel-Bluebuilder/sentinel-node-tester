@@ -16,7 +16,6 @@ Some features only apply to the standalone CLI/Browser tester. When embedded in 
 | Mnemonic in .env | ✓ Required | ✗ App manages auth | App handles credentials |
 | SentinelAudit.vbs | ✓ Required | ✗ App has own launcher | App handles elevation |
 | Port 3001 | ✓ Default | Configurable or embedded | May conflict with app |
-| Dictator Mode link | ✓ Optional | ✗ Remove | App-specific feature |
 | Economy mode | ✓ Optional | ✓ Keep | Users want to limit spending |
 | Plan Test | ✓ Optional | Only if app uses plans | Depends on app type |
 

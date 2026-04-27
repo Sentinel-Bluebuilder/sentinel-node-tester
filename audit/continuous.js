@@ -323,7 +323,9 @@ async function _resolveSnapshot() {
  * Main loop body — runs until stopRequested or unrecoverable error.
  */
 async function _runLoop() {
-  _ctrl.running = true;
+  // _ctrl.running is set synchronously in start() before this is fire-and-forget
+  // invoked, so a second start() call cannot race past the `if (_ctrl.running)`
+  // guard while we're still on the microtask queue.
   _ctrl.stopRequested = false;
   _ctrl.startedAt = Date.now();
   _ctrl.iteration = 0;
@@ -349,9 +351,19 @@ async function _runLoop() {
         mode: _ctrl.mode,
       });
 
-      // Fresh pipeline state per iteration so counters reset cleanly
+      // Fresh pipeline state per iteration so counters reset cleanly.
+      // Inherit SDK / pricingMode / runMode from _ctrl so per-node failure
+      // rows record the correct sdk and pipeline branches the right way —
+      // without this, every continuous-loop result fell back to sdk:'js'.
       const loopState = createState();
       loopState.stopRequested = false;
+      if (_ctrl.activeSDK)   loopState.activeSDK   = _ctrl.activeSDK;
+      if (_ctrl.pricingMode) loopState.pricingMode = _ctrl.pricingMode;
+      loopState.runMode             = _ctrl.mode || 'p2p';
+      loopState.runPlanId           = _ctrl.planId || null;
+      loopState.runSubscriptionId   = _ctrl.subscriptionId || null;
+      loopState.runGranter          = _ctrl.subscriptionGranter || null;
+      loopState.testRun             = !!_ctrl.testRun;
 
       let currentBatchId = 0;
       let frozenNodes = null;
@@ -666,6 +678,13 @@ export async function start(opts = {}) {
   _ctrl.minDelayMs         = minDelayMs;
   _ctrl.lastError          = null;
   _ctrl.iteration          = 0;
+  _ctrl.activeSDK          = opts.activeSDK || _ctrl.activeSDK || 'js';
+  _ctrl.pricingMode        = opts.pricingMode || _ctrl.pricingMode || null;
+  _ctrl.testRun            = !!opts.testRun;
+  // Mark running synchronously BEFORE the fire-and-forget so a second
+  // start() call cannot slip through the `if (_ctrl.running)` guard while
+  // _runLoop is still on the microtask queue (the C-2 race window).
+  _ctrl.running            = true;
 
   _emitScoped('loop:started', {
     mode,

@@ -21,7 +21,7 @@ import {
   flushSpeedTestDnsCache,
   compareSpeedTests,
   SPEEDTEST_DEFAULTS,
-} from 'sentinel-dvpn-sdk';
+} from 'blue-js-sdk';
 
 // Re-export SDK functions
 export { speedtestDirect, speedtestViaSocks5, resolveSpeedtestIPs, flushSpeedTestDnsCache, compareSpeedTests, SPEEDTEST_DEFAULTS };

@@ -472,7 +472,7 @@ testWithRetry(testFn, broadcast, state, nodeAddr):
 ## Dashboard UI (index.html)
 
 ### Layout Sections
-1. **Header:** Logo, Windows badge, SDK toggle (JS/C#), DNS dropdown, Dictator Mode link
+1. **Header:** Logo, Windows badge, SDK toggle (JS/C#), DNS dropdown
 2. **Stats grid:** Total, Tested, Remaining, Pass Rate, >10Mbps, Balance
 3. **Controls:** New Test, Resume, Rescan, Retest Failed, Stop, Economy, Plan Test, Reset
 4. **Speed history:** Last 10 speeds as color-coded pills (green ≥15, yellow ≥5, red <5)
