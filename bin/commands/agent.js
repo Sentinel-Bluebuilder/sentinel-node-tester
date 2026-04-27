@@ -42,6 +42,7 @@ export const flags = [
   { flag: '--test-run',        description: 'Use TEST RUN mode for /api/start' },
   { flag: '--pricing-mode <m>',description: 'gigabytes | hours (default gigabytes)' },
   { flag: '--addr <a>',        description: 'Node address (sentnode1...) for node, retest, etc.' },
+  { flag: '--remote-url <u>',  description: 'Node remote URL (https://host:port) for chain-status' },
   { flag: '--country <cc>',    description: 'Country filter (audit, retest)' },
   { flag: '--limit <n>',       description: 'Result limit (errors, results)' },
   { flag: '--num <n>',         description: 'Run number (runs/save, runs/load)' },
@@ -61,6 +62,7 @@ const ENDPOINTS = [
   { sub: 'state',           method: 'GET',  path: '/api/state',                       auth: true,  desc: 'Full server runtime state' },
   { sub: 'sdk-versions',    method: 'GET',  path: '/api/sdk-versions',                auth: true,  desc: 'Installed SDK versions' },
   { sub: 'sdk-verify',      method: 'GET',  path: '/api/sdk-verify',                  auth: true,  desc: 'Byte-for-byte SDK verification' },
+  { sub: 'sdk-verify-key',  method: 'GET',  path: '/api/sdk-verify/:key',             auth: true,  desc: 'SDK file content by verification key',  params: ['key'] },
   { sub: 'cross-sdk',       method: 'GET',  path: '/api/cross-sdk',                   auth: true,  desc: 'Cross-SDK comparison data' },
   { sub: 'failure-analysis',method: 'GET',  path: '/api/failure-analysis',            auth: true,  desc: 'Failure breakdown' },
   { sub: 'transport-cache', method: 'GET',  path: '/api/transport-cache',             auth: true,  desc: 'Inspect transport cache (wg/v2ray)' },
@@ -81,6 +83,9 @@ const ENDPOINTS = [
   { sub: 'pub-logs',        method: 'GET',  path: '/api/public/logs',                 auth: false, desc: 'Public broadcast log buffer' },
   { sub: 'pub-live-state',  method: 'GET',  path: '/api/public/live-state',           auth: false, desc: 'Cold-refresh hydration for /live' },
   { sub: 'pub-test-status', method: 'GET',  path: '/api/public/test/status',          auth: false, desc: 'Public test status probe' },
+  { sub: 'pub-test-start',  method: 'POST', path: '/api/public/test/start',           auth: false, desc: 'Start gated public test (requires ALLOW_PUBLIC_TEST=true)',
+    bodyFromFlags: (f) => ({ mode: f['--mode'] === 'subscription' ? 'subscription' : 'p2p' }) },
+  { sub: 'pub-test-stop',   method: 'POST', path: '/api/public/test/stop',            auth: false, desc: 'Stop gated public test (requires ALLOW_PUBLIC_TEST=true)' },
 
   // Broadcast toggle
   { sub: 'broadcast',       method: 'GET',  path: '/api/broadcast',                   auth: false, desc: 'Read current broadcastLive value' },
@@ -117,7 +122,11 @@ const ENDPOINTS = [
 
   // Chain queries
   { sub: 'chain-nodes',     method: 'GET',  path: '/api/chain/nodes',                 auth: true,  desc: 'Direct chain node fetch' },
-  { sub: 'chain-status',    method: 'GET',  path: '/api/chain/node-status',           auth: true,  desc: 'Per-node status snapshot' },
+  { sub: 'chain-status',    method: 'GET',  path: '/api/chain/node-status',           auth: true,  desc: 'Per-node status snapshot (requires --remote-url https://host:port)',
+    queryFromFlags: (f) => {
+      const url = f['--remote-url'] || f['--remoteUrl'];
+      return url ? { remoteUrl: url } : {};
+    } },
 
   // Run history
   { sub: 'runs',            method: 'GET',  path: '/api/runs',                        auth: true,  desc: 'List saved audit runs' },
@@ -152,11 +161,23 @@ function findEndpoint(sub) {
   return ENDPOINTS.find(e => e.sub === sub);
 }
 
-function fillPath(rawPath, params, positional) {
+// Map :paramName → fallback flag name when positional is omitted
+const PARAM_FLAG_FALLBACK = {
+  addr: '--addr',
+  num:  '--num',
+};
+
+function fillPath(rawPath, params, positional, flags) {
   if (!params || !params.length) return rawPath;
   let p = rawPath;
   for (let i = 0; i < params.length; i++) {
-    const tok = positional[i];
+    let tok = positional[i];
+    if (!tok && flags) {
+      const fallbackFlag = PARAM_FLAG_FALLBACK[params[i]];
+      if (fallbackFlag && typeof flags[fallbackFlag] === 'string') {
+        tok = flags[fallbackFlag];
+      }
+    }
     if (!tok) {
       throw new Error(`Missing positional argument for :${params[i]} in ${rawPath}`);
     }
@@ -285,12 +306,13 @@ export async function run({ positional, flags: f }) {
   }
 
   const tail = positional.slice(1);
-  const path = fillPath(ep.path, ep.params, tail);
+  const path = fillPath(ep.path, ep.params, tail, f);
 
   // Build query / body
   const query = {};
   if (f['--limit']) query.limit = f['--limit'];
   if (f['--country']) query.country = f['--country'];
+  if (ep.queryFromFlags) Object.assign(query, ep.queryFromFlags(f) || {});
 
   let body;
   if (ep.method !== 'GET' && ep.method !== 'HEAD') {

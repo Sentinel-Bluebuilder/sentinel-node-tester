@@ -1471,7 +1471,7 @@
           <button class="chip"            id="chipWg"     data-svc="wg">WireGuard</button>
           <button class="chip"            id="chipV2"     data-svc="v2">V2Ray</button>
         </div>
-        <select id="sortSelect" class="filter-select" style="min-width:170px">
+        <select id="sortSelect" class="filter-select" aria-label="Sort nodes by" style="min-width:170px">
           <option value="mbps_desc">Latest Mbps ↓</option>
           <option value="mbps_asc">Latest Mbps ↑</option>
           <option value="pass_desc">Pass rate ↓</option>
@@ -1567,7 +1567,7 @@
     'use strict';
 
     // ─── Constants ───
-    const PAGE_SIZE   = 10000;
+    const PAGE_SIZE   = 50;
     const DEBOUNCE_MS = 250;
     const REFRESH_MS  = 30000;
 
@@ -1983,8 +1983,13 @@
         renderPage();
         populateCountries(allNodes);
         updateFilterChips();
-        const _latest = (_batchList && _batchList[0] && _batchList[0].started_at) || Date.now();
-        document.getElementById('lastUpdatedLabel').textContent = 'Snapshot ' + fmtUtc(_latest);
+        // Don't fabricate a timestamp from Date.now() when no batch has been
+        // recorded yet — render an em-dash instead so visitors aren't misled
+        // into thinking the empty result set was "just snapshotted".
+        const _latest = (_batchList && _batchList[0] && _batchList[0].started_at) || null;
+        document.getElementById('lastUpdatedLabel').textContent = _latest
+          ? 'Snapshot ' + fmtUtc(_latest)
+          : 'Snapshot —';
       } catch (err) {
         setTableMessage(`Failed to load: ${err.message}`, true);
       }
@@ -2054,8 +2059,14 @@
         return;
       }
 
-      const page = filteredNodes.slice(currentOffset, currentOffset + PAGE_SIZE);
+      // Clamp currentOffset so SSE-driven re-renders don't leave a stale empty page
+      if (currentOffset >= total) currentOffset = Math.max(0, (Math.ceil(total / PAGE_SIZE) - 1) * PAGE_SIZE);
+
       const tbody = document.getElementById('nodesBody');
+      const tableWrap = tbody.closest('.table-container, .results-container, div');
+      const prevScroll = tableWrap ? tableWrap.scrollTop : 0;
+
+      const page = filteredNodes.slice(currentOffset, currentOffset + PAGE_SIZE);
       tbody.innerHTML = '';
       const frag = document.createDocumentFragment();
 
@@ -2127,6 +2138,9 @@
       } else {
         paginationEl.style.display = 'none';
       }
+
+      // Restore scroll position so SSE-driven re-renders don't yank the user back to top
+      if (tableWrap) tableWrap.scrollTop = prevScroll;
     }
 
     // ─── Sort ───
@@ -2167,7 +2181,7 @@
           'Stage:      ' + (er.stage || '—'),
           'Error Code: ' + (er.error_code || '—'),
           'Message:    ' + (er.error_message || '—'),
-          'Captured:   ' + (er.captured_at || '—'),
+          'Captured:   ' + (er.captured_at ? fmtUtc(er.captured_at) : '—'),
           '',
         ];
         if (er.log_snippet) {
@@ -2228,7 +2242,7 @@
         }
         const er = errs[0];
         const eh = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
-        const captured = er.captured_at ? new Date(typeof er.captured_at === 'number' ? er.captured_at : Number(er.captured_at) || er.captured_at).toLocaleString() : '—';
+        const captured = er.captured_at ? fmtUtc(er.captured_at) : '—';
         const row = (label, value) => `
           <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
             <div style="color:var(--text-muted);font-size:12px">${label}</div>
@@ -2439,7 +2453,7 @@
             </div>
             <div class="error-detail-row">
               <span class="error-detail-label">When</span>
-              <span class="error-detail-val">${ts ? new Date(ts).toLocaleString() : '—'}</span>
+              <span class="error-detail-val">${ts ? fmtUtc(ts) : '—'}</span>
             </div>
             ${snippet
               ? `<div class="error-snippet">${escHtml(snippet)}</div>`
@@ -2459,7 +2473,7 @@
         // Copy button
         item.querySelector('.error-copy-btn').addEventListener('click', (ev) => {
           ev.stopPropagation();
-          const compact = `${errCode} | ${ts ? new Date(ts).toISOString() : '?'} | ${errMsg}`;
+          const compact = `${errCode} | ${ts ? fmtUtc(ts) : '?'} | ${errMsg}`;
           const btn = ev.currentTarget;
           navigator.clipboard.writeText(compact).then(() => {
             btn.textContent = '✓ Copied';
@@ -3008,6 +3022,7 @@
       }
     }
 
+    let _sseEverConnected = false;
     function connectSSE() {
       if (_sse) { try { _sse.close(); } catch (_) {} }
       try {
@@ -3021,7 +3036,18 @@
           try { handlePublicEvent(d); } catch (_) {}
         };
 
-        _sse.onopen  = () => { _sseRetry = 1000; };
+        _sse.onopen  = () => {
+          _sseRetry = 1000;
+          // On reconnect (not initial connect), re-seed via REST so we don't
+          // show stale batch list / node data while waiting for the next event.
+          if (_sseEverConnected) {
+            (async () => {
+              try { await loadBatchList(); } catch (_) {}
+              try { loadNodes(); } catch (_) {}
+            })();
+          }
+          _sseEverConnected = true;
+        };
         _sse.onerror = () => {
           try { _sse.close(); } catch (_) {}
           _sse = null;

@@ -15,6 +15,7 @@ import {
   LCD_ENDPOINTS as SDK_LCD_ENDPOINTS,
   createRpcQueryClientWithFallback,
   rpcQueryNode,
+  rpcQueryNodes,
   rpcQueryNodesForPlan,
   rpcQueryPlan,
   rpcQuerySubscriptionsForAccount,
@@ -23,7 +24,7 @@ import {
   queryFeeGrant,
   broadcastWithFeeGrant as sdkBroadcastWithFeeGrant,
   disconnectRpc,
-} from 'sentinel-dvpn-sdk';
+} from 'blue-js-sdk';
 
 // ─── LCD Endpoint Management ────────────────────────────────────────────────
 const LCD_LIST = SDK_LCD_ENDPOINTS.map(e => e.url);
@@ -85,43 +86,15 @@ export function cleanupRpc() {
 // ─── Node List (RPC primary, LCD fallback) ─────────────────────────────────
 
 /**
- * Fetch all active nodes via RPC with raw ABCI pagination.
- * The chain caps ABCI queries at 100 per page, so we loop with next_key.
+ * Wrapper around SDK's rpcQueryNodes with broadcast logging.
  * Returns null if RPC is unavailable (signals LCD fallback).
  */
 async function rpcFetchAllNodes(broadcast) {
   const client = await getRpcClient();
-  if (!client) return null; // signal LCD fallback
-  return rpcFetchAllNodesPaginated(client, broadcast);
-}
-
-/**
- * Raw ABCI paginated fetch for all active nodes.
- * Loops with next_key until all pages are fetched.
- *
- * Cosmos PageRequest proto fields:
- *   1 = key (bytes), 2 = offset (uint64), 3 = limit (uint64),
- *   4 = count_total (bool), 5 = reverse (bool)
- * NOTE: The SDK's encodePagination has a bug — it puts limit at field 2 (offset).
- * We use correct field numbers here.
- */
-async function rpcFetchAllNodesPaginated(client, broadcast) {
-  // Sentinel v3 chain truncates at `limit` without emitting `next_key`.
-  // A single large request returns the full set (chain has its own hard ceiling).
-  const PAGE_SIZE = 10000;
+  if (!client) return null;
   try {
-    const pagination = encodeRpcVarintField(3, PAGE_SIZE); // limit at field 3
-    const request = concatBytes([
-      encodeRpcVarintField(1, 1),                // status = active
-      encodeRpcEmbedded(2, pagination),           // pagination
-    ]);
-    const result = await client.queryClient.queryAbci(
-      '/sentinel.node.v3.QueryService/QueryNodes',
-      request,
-    );
-    const fields = decodeRpcProto(new Uint8Array(result.value));
-    const nodes = (fields[1] || []).map(entry => decodeRpcNode(decodeRpcProto(entry.value)));
-    if (broadcast) broadcast('log', { msg: `  RPC: ${nodes.length} nodes fetched (limit=${PAGE_SIZE})` });
+    const nodes = await rpcQueryNodes(client, { status: 1, limit: 10000 });
+    if (broadcast) broadcast('log', { msg: `  RPC: ${nodes.length} nodes fetched` });
     return nodes;
   } catch (err) {
     if (broadcast) broadcast('log', { msg: `  RPC fetch failed: ${err.message}` });
@@ -130,37 +103,18 @@ async function rpcFetchAllNodesPaginated(client, broadcast) {
 }
 
 /**
- * Fetch ALL nodes linked to a plan via RPC with raw ABCI pagination.
- * Chain caps ABCI queries at 100 per page; we loop with next_key until done.
- *
- * QueryNodesForPlanRequest proto:
- *   1 = id (uint64 plan id), 2 = status (enum), 3 = pagination (PageRequest)
- * PageRequest fields: 1=key, 2=offset, 3=limit, 4=count_total, 5=reverse
+ * Wrapper around SDK's rpcQueryNodesForPlan with broadcast logging.
+ * Returns [] on failure (caller falls back to LCD).
  *
  * @param {{ queryClient }} client
  * @param {number|string|bigint} planId
  * @param {(channel:string, data:any)=>void} [broadcast]
- * @returns {Promise<Array<object>>} — empty array on failure
+ * @returns {Promise<Array<object>>}
  */
 export async function rpcFetchAllNodesForPlanPaginated(client, planId, broadcast) {
-  // Sentinel v3 chain truncates at `limit` without emitting `next_key`.
-  // A single large request returns the full set (observed: plan 36 → 803 nodes
-  // with limit=1000 but only 100 with limit=100, and no next_key either time).
-  const PAGE_SIZE = 10000;
   try {
-    const pagination = encodeRpcVarintField(3, PAGE_SIZE); // limit at field 3
-    const request = concatBytes([
-      encodeRpcVarintField(1, BigInt(planId)), // plan id
-      encodeRpcVarintField(2, 1),              // status = active
-      encodeRpcEmbedded(3, pagination),        // pagination
-    ]);
-    const result = await client.queryClient.queryAbci(
-      '/sentinel.node.v3.QueryService/QueryNodesForPlan',
-      request,
-    );
-    const fields = decodeRpcProto(new Uint8Array(result.value));
-    const nodes = (fields[1] || []).map(entry => decodeRpcNode(decodeRpcProto(entry.value)));
-    if (broadcast) broadcast('log', { msg: `  RPC plan ${planId}: ${nodes.length} nodes (limit=${PAGE_SIZE})` });
+    const nodes = await rpcQueryNodesForPlan(client, BigInt(planId), { status: 1, limit: 10000 });
+    if (broadcast) broadcast('log', { msg: `  RPC plan ${planId}: ${nodes.length} nodes` });
     return nodes;
   } catch (err) {
     if (broadcast) broadcast('log', { msg: `  RPC plan ${planId} fetch failed: ${err.message}` });
@@ -169,7 +123,8 @@ export async function rpcFetchAllNodesForPlanPaginated(client, planId, broadcast
 }
 
 // ─── Minimal Protobuf Helpers (for raw ABCI pagination) ────────────────────
-// Exported so session.js can reuse for RPC session queries.
+// Used by discoverPlans, queryPlanOwnerSent, queryFeeGrantRpcFirst, session.js,
+// and the scripts/probe-*.mjs tooling.
 
 export function encodeRpcVarint(value) {
   let n = BigInt(value);
@@ -256,24 +211,6 @@ export function decodeRpcProto(buf) {
 
 export function decodeRpcString(data) {
   return new TextDecoder().decode(data);
-}
-
-function decodeRpcPrice(fields) {
-  return {
-    denom: fields[1]?.[0] ? decodeRpcString(fields[1][0].value) : '',
-    base_value: fields[2]?.[0] ? decodeRpcString(fields[2][0].value) : '0',
-    quote_value: fields[3]?.[0] ? decodeRpcString(fields[3][0].value) : '0',
-  };
-}
-
-function decodeRpcNode(fields) {
-  return {
-    address: fields[1]?.[0] ? decodeRpcString(fields[1][0].value) : '',
-    gigabyte_prices: (fields[2] || []).map(f => decodeRpcPrice(decodeRpcProto(f.value))),
-    hourly_prices: (fields[3] || []).map(f => decodeRpcPrice(decodeRpcProto(f.value))),
-    remote_addrs: (fields[4] || []).map(f => decodeRpcString(f.value)),
-    status: fields[6]?.[0] ? Number(fields[6][0].value) : 0,
-  };
 }
 
 // ─── Node List (RPC primary → LCD fallback) ────────────────────────────────

@@ -23,9 +23,12 @@ export const LOW_BALANCE_WARN = 500_000; // 0.5 P2P
 export const PORT = parseInt(process.env.PORT || '3001', 10);
 
 // ─── DNS Configuration ──────────────────────────────────────────────────────
-// Default: HNS (Handshake) — decentralized DNS, 0.01% error rate across 9,298 tests
+// Default: HNS (Handshake) — decentralized DNS, 0.01% error rate across 9,298 tests.
+// SDK uses key `handshake`; tester uses `hns` historically — both keys resolve to the same servers.
+const _hns = ['198.51.100.1', '198.51.100.1'];
 export const DNS_PRESETS = {
-  hns:        ['198.51.100.1', '198.51.100.1'],
+  hns:        _hns,
+  handshake:  _hns,
   google:     ['8.8.8.8', '8.8.4.4'],
   cloudflare: ['1.1.1.1', '1.0.0.1'],
   quad9:      ['9.9.9.9', '149.112.112.112'],
@@ -36,7 +39,7 @@ if (ACTIVE_DNS.length === 0) ACTIVE_DNS = DNS_PRESETS.hns;
 export function setActiveDns(servers) { ACTIVE_DNS = servers; }
 
 // ─── Protocol Message Types (from SDK — single source of truth) ─────────────
-import { MSG_TYPES } from 'sentinel-dvpn-sdk';
+import { MSG_TYPES } from 'blue-js-sdk';
 export { MSG_TYPES };
 export const V3_MSG_TYPE = MSG_TYPES.START_SESSION;
 export const V3_SUB_TYPE = MSG_TYPES.START_SUBSCRIPTION;

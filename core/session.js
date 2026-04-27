@@ -7,46 +7,44 @@
  * credential cache (local disk), session map (audit TTL), dedup guard.
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { DENOM, GIGS, CREDS_FILE, SESSION_MAP_TTL, V3_MSG_TYPE } from './constants.js';
+import { DENOM, GIGS, SESSION_MAP_TTL, V3_MSG_TYPE } from './constants.js';
 import { signAndBroadcastRetry, assertIsDeliverTxSuccess } from './wallet.js';
-import {
-  getActiveLcd, getRpcClient,
-  encodeRpcVarint, encodeRpcVarintField, encodeRpcBytes, encodeRpcEmbedded,
-  concatBytes, decodeRpcProto, decodeRpcString,
-} from './chain.js';
+import { getActiveLcd, getRpcClient } from './chain.js';
 import { sleep } from '../protocol/speedtest.js';
 import {
   extractAllSessionIds as sdkExtractAllSessionIds,
-  markSessionPoisoned as sdkMarkPoisoned,
-  isSessionPoisoned as sdkIsPoisoned,
-  querySessions as sdkQuerySessions,
-  querySessionAllocation as sdkQueryAllocation,
-} from 'sentinel-dvpn-sdk';
+  rpcQuerySessionsForAccount,
+  rpcQuerySession as sdkRpcQuerySession,
+  saveCredentials as sdkSaveCredentials,
+  loadCredentials as sdkLoadCredentials,
+  clearCredentials as sdkClearCredentials,
+  clearAllCredentials as sdkClearAllCredentials,
+} from 'blue-js-sdk';
 
-// ─── Session Credential Cache (disk-persistent) ─────────────────────────────
-let credentialCache = {};
-if (existsSync(CREDS_FILE)) {
-  try { credentialCache = JSON.parse(readFileSync(CREDS_FILE, 'utf8')); } catch { credentialCache = {}; }
-}
+// ─── Session Credential Cache (SDK encrypted store: ~/.sentinel-sdk/) ──────
+// Tester API stays { saveCredential, getCredential, clearCredential, clearAllCredentials }
+// — call sites pass a flat object containing `sessionId` + credential fields. We unpack
+// sessionId here and delegate to SDK's encrypted, pruned, sessionId-keyed credential store.
 
 export function saveCredential(nodeAddr, data) {
-  credentialCache[nodeAddr] = { ...data, savedAt: new Date().toISOString() };
-  writeFileSync(CREDS_FILE, JSON.stringify(credentialCache, null, 2), 'utf8');
+  const { sessionId, ...creds } = data || {};
+  sdkSaveCredentials(nodeAddr, String(sessionId || ''), creds);
 }
 
 export function getCredential(nodeAddr) {
-  return credentialCache[nodeAddr] || null;
+  const stored = sdkLoadCredentials(nodeAddr);
+  if (!stored) return null;
+  // Caller-side accesses .sessionId / .type / .uuid / .wgPrivateKey / etc. flat.
+  // SDK already returns flat shape with sessionId at top level — pass through.
+  return stored;
 }
 
 export function clearCredential(nodeAddr) {
-  delete credentialCache[nodeAddr];
-  writeFileSync(CREDS_FILE, JSON.stringify(credentialCache, null, 2), 'utf8');
+  sdkClearCredentials(nodeAddr);
 }
 
 export function clearAllCredentials() {
-  credentialCache = {};
-  writeFileSync(CREDS_FILE, '{}', 'utf8');
+  sdkClearAllCredentials();
 }
 
 // ─── Session Reuse Map ──────────────────────────────────────────────────────
@@ -92,93 +90,18 @@ export function addToSessionMap(nodeAddr, sessionId) {
   sessionMap.set(nodeAddr, { sessionId, maxBytes: GIGS * 1_000_000_000, usedBytes: 0 });
 }
 
-// ─── RPC Session Decoder ────────────────────────────────────────────────────
-// BaseSession proto fields (sentinel.session.v3.BaseSession):
-//   1=id(uint64), 2=acc_address(string), 3=node_address(string),
-//   4=download_bytes(string), 5=upload_bytes(string), 6=max_bytes(string),
-//   7=duration, 8=max_duration, 9=status(enum), 10=inactive_at, 11=start_at, 12=status_at
-// Session wrappers: field 1 = base_session (embedded)
+// ─── RPC Session Fetch (delegates to SDK) ──────────────────────────────────
+// SDK's rpcQuerySessionsForAccount handles ABCI encoding + Any-unwrapping +
+// BaseSession decoding. Sentinel v3 truncates at `limit` without emitting
+// next_key, so a single large request returns the full set.
 
-function decodeRpcBaseSession(buf) {
-  const f = decodeRpcProto(buf);
-  return {
-    id: f[1]?.[0] ? f[1][0].value : 0n,
-    acc_address: f[2]?.[0] ? decodeRpcString(f[2][0].value) : '',
-    node_address: f[3]?.[0] ? decodeRpcString(f[3][0].value) : '',
-    download_bytes: f[4]?.[0] ? decodeRpcString(f[4][0].value) : '0',
-    upload_bytes: f[5]?.[0] ? decodeRpcString(f[5][0].value) : '0',
-    max_bytes: f[6]?.[0] ? decodeRpcString(f[6][0].value) : '0',
-    status: f[9]?.[0] ? Number(f[9][0].value) : 0,
-  };
-}
-
-function decodeRpcSession(anyBuf) {
-  // Unwrap google.protobuf.Any: field 1 = type_url, field 2 = value
-  const anyFields = decodeRpcProto(anyBuf);
-  const innerBuf = anyFields[2]?.[0]?.value;
-  if (!innerBuf) return null;
-  // Session wrapper: field 1 = base_session (embedded)
-  const sessionFields = decodeRpcProto(innerBuf);
-  if (!sessionFields[1]?.[0]) return null;
-  return decodeRpcBaseSession(sessionFields[1][0].value);
-}
-
-/**
- * Fetch sessions for account via RPC (ABCI query) with pagination.
- * Returns array of decoded session objects, or null if RPC unavailable.
- */
 async function rpcFetchAllSessions(walletAddress) {
   const client = await getRpcClient();
   if (!client) return null;
-
-  const allSessions = [];
-  let nextKeyBytes = null;
-  let page = 0;
-  const PAGE_SIZE = 100;
-  const MAX_PAGES = 20;
-
   try {
-    do {
-      const paginationParts = [];
-      if (nextKeyBytes) {
-        paginationParts.push(encodeRpcBytes(1, nextKeyBytes));
-      }
-      paginationParts.push(encodeRpcVarintField(3, PAGE_SIZE));
-
-      const request = concatBytes([
-        encodeRpcBytes(1, new TextEncoder().encode(walletAddress)), // address (string = field 1)
-        encodeRpcEmbedded(2, concatBytes(paginationParts)),         // pagination
-      ]);
-
-      const result = await client.queryClient.queryAbci(
-        '/sentinel.session.v3.QueryService/QuerySessionsForAccount',
-        request,
-      );
-      const resp = new Uint8Array(result.value);
-      if (resp.length <= 2) break; // empty pagination-only response
-
-      const fields = decodeRpcProto(resp);
-
-      // Field 1 = repeated google.protobuf.Any (sessions)
-      const sessions = (fields[1] || []).map(entry => decodeRpcSession(entry.value)).filter(Boolean);
-      allSessions.push(...sessions);
-      page++;
-
-      // Extract pagination response (field 2) for next_key
-      nextKeyBytes = null;
-      if (fields[2]?.[0]) {
-        const pagResp = decodeRpcProto(fields[2][0].value);
-        if (pagResp[1]?.[0]?.value?.length > 0) {
-          nextKeyBytes = pagResp[1][0].value;
-        }
-      }
-
-      if (sessions.length < PAGE_SIZE) break;
-    } while (nextKeyBytes && page < MAX_PAGES);
-
-    return allSessions;
+    return await rpcQuerySessionsForAccount(client, walletAddress, { limit: 2000 });
   } catch {
-    return null; // signal LCD fallback
+    return null;
   }
 }
 
@@ -468,24 +391,14 @@ export async function waitForBatchSessions(nodeAddrs, walletAddr, maxWaitMs = 20
 }
 
 /**
- * Query a single session by ID via RPC.
- * Returns decoded base session or null.
+ * Query a single session by ID via RPC. Delegates to SDK.
+ * Returns decoded session object or null.
  */
 async function rpcQuerySession(sessionId) {
   const client = await getRpcClient();
   if (!client) return null;
   try {
-    const request = encodeRpcVarintField(1, Number(sessionId));
-    const result = await client.queryClient.queryAbci(
-      '/sentinel.session.v3.QueryService/QuerySession',
-      request,
-    );
-    const resp = new Uint8Array(result.value);
-    if (resp.length <= 2) return null;
-    const fields = decodeRpcProto(resp);
-    // Field 1 = google.protobuf.Any (session)
-    if (!fields[1]?.[0]) return null;
-    return decodeRpcSession(fields[1][0].value);
+    return await sdkRpcQuerySession(client, sessionId);
   } catch {
     return null;
   }

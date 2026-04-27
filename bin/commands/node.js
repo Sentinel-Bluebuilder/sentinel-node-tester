@@ -9,7 +9,7 @@ import {
   getRpcClient,
   ensureLcd,
 } from '../../core/chain.js';
-import { rpcQueryNode } from 'sentinel-dvpn-sdk';
+import { rpcQueryNode } from 'blue-js-sdk';
 
 // ─── Metadata ────────────────────────────────────────────────────────────────
 

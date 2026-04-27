@@ -24,6 +24,11 @@ const ALIASES = {
 const VALUE_FLAGS = new Set([
   '--lcd', '--sdk', '--port', '--wallet', '--output',
   '--limit', '--max', '--country', '--timeout', '--out',
+  // agent driver flags
+  '--base-url', '--token', '--watch',
+  '--plan-id', '--sub-id', '--sub-granter',
+  '--pricing-mode', '--addr', '--remote-url', '--num', '--mode',
+  '--dns', '--enabled',
 ]);
 
 // ─── Parser ───────────────────────────────────────────────────────────────────

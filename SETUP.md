@@ -130,9 +130,8 @@ This will:
 ## 9. Verify
 
 1. Open http://localhost:3001 -- you should see the dashboard with your wallet address and P2P balance
-2. Open http://localhost:3001/dictator -- Dictator Mode loads (empty until first audit)
-3. Click **Start Audit** -- the live log should show node discovery, then batch payments, then individual node tests
-4. Check `results/results.json` after a few nodes complete -- should contain test result objects
+2. Click **Start Audit** -- the live log should show node discovery, then batch payments, then individual node tests
+3. Check `results/results.json` after a few nodes complete -- should contain test result objects
 
 ### Health check
 

@@ -85,8 +85,9 @@ TEST RUN is an optional skip-only demo — it is NOT a separate mode and it does
 - DONE 2026-04-23: Port search to `public.html` (#20).
 - DONE 2026-04-23: Build `/live` page + route (Option B).
 - DONE 2026-04-25: Collapsed dual-mode (dev/bundled/public) → single mode + `broadcastLive` toggle. Removed mode cookie, `requireMode` middleware, `_currentMode`, `_applyModeUI`, `selectMode`, `switchMode`, mode overlay, public-test endpoints. Added `POST /GET /api/broadcast`.
-- DONE 2026-04-25: Consolidated `audit-dry.db` into `audit.db`. TEST RUN is now `?testRun=1` on `/api/start`, writes `mode='test'` rows to the single DB.
-- DONE 2026-04-25: TEST RUN parity — runs the real pipeline end-to-end, short-circuits per-node after price discovery with `errorCode='TEST_RUN_SKIP'`. Stripped all `public-test:*` SSE prefixes, `_pipelinePublicMode`, three `/api/admin/public-test/*` endpoints, `DRY_RUN_SKIP`, `dry-run:log`, `#dryRunLoop`. Broadcast Live toggle moved to top action cluster.
+- DONE 2026-04-25: Consolidated the legacy `audit-test.db` into `audit.db`. TEST RUN is now `?testRun=1` on `/api/start`, writes `mode='test'` rows to the single DB.
+- DONE 2026-04-25: TEST RUN parity — runs the real pipeline end-to-end, short-circuits per-node after price discovery with `errorCode='TEST_RUN_SKIP'`. Stripped all `public-test:*` SSE prefixes, `_pipelinePublicMode`, three `/api/admin/public-test/*` endpoints, `TEST_RUN_SKIP` legacy code path, `test-run:log`, `#testRunLoop`. Broadcast Live toggle moved to top action cluster.
+- DONE 2026-04-26: Renamed every `dry`/`dryRun`/`dry-run`/`DRY_RUN` identifier in the project to the `test`/`testRun`/`test-run`/`TEST_RUN` family. There is no `dry` vocabulary anywhere in the tester. The flag is `state.testRun`, the API param is `testRun` / `?testRun=1`, the UI vars are `isTestRun`. The GitHub canonical version of `audit/pipeline.js` and `audit/node-test.js` is updated to match.
 - DONE: Theme toggle on `public.html` (#22) — `#btnTheme` + `toggleTheme()` already wired.
 
 ## Don't
@@ -95,3 +96,11 @@ TEST RUN is an optional skip-only demo — it is NOT a separate mode and it does
 - Don't commit `.env` or `MNEMONIC=...`.
 - Don't `taskkill /F /IM node.exe` — kills Claude Code's own runtime.
 - Don't hide or remove the per-row failure copy button — the failure-log UX is a MUST, not a polish item.
+- **DON'T FUCK WITH TEST RUN.** Never modify TEST RUN code paths. The canonical implementation lives on GitHub at `Sentinel-Autonomybuilder/sentinel-node-tester` — that is the source of truth. This includes:
+  - The `if (state.testRun)` short-circuit in `audit/node-test.js` (the block that returns early with `errorCode: 'TEST_RUN_SKIP'` after price discovery).
+  - The TEST RUN branching in `audit/pipeline.js` (anything gated on `state.testRun`, including the batch-payment skip and `state.testRun = ...` assignment).
+  - The `testRun` flag plumbing through `POST /api/start` (body `testRun: true` and query `?testRun=1`) in `server.js`.
+  - The `mode='test'` row write in `core/db.js`.
+  - Any helper that exists solely to support TEST RUN (skip flags, `TEST_RUN_SKIP` error code, test-run UI badges, etc.).
+  - The vocabulary is `test`/`testRun`/`test-run`/`TEST_RUN` ONLY — never reintroduce `dry`/`dryRun`/`dry-run`/`DRY_RUN` anywhere in the project.
+  If a parity refactor, SDK upgrade, or "cleanup" seems to require touching TEST RUN — STOP. Ask the user first. Do not refactor, rename, "consolidate", "simplify", or otherwise modify these paths under any pretext. If you find local divergence from the GitHub canonical version, the local version is wrong; restore from GitHub. Treat TEST RUN as immutable.

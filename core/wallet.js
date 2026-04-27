@@ -15,9 +15,10 @@ import {
   buildRegistry,
   broadcast as sdkBroadcast,
   createSafeBroadcaster,
+  clearWalletCache,
   RPC_ENDPOINTS as SDK_RPC_ENDPOINTS,
   SDK_VERSION,
-} from 'sentinel-dvpn-sdk';
+} from 'blue-js-sdk';
 import { RPC_ENDPOINTS as LOCAL_RPC_ENDPOINTS, GAS_PRICE as GAS_PRICE_STR } from './constants.js';
 
 // Use SDK RPC endpoints (5 endpoints), fall back to local constants
@@ -82,6 +83,7 @@ export async function getOrReconnectClient() {
 export async function forceReconnect() {
   if (_managedClient) { try { _managedClient.disconnect(); } catch { } }
   _managedClient = null;
+  clearWalletCache();
   _activeRpcIdx = (_activeRpcIdx + 1) % RPC_LIST.length;
   return getOrReconnectClient();
 }

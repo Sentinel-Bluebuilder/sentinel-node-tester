@@ -10,7 +10,20 @@
 
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import path from 'path';
+import { recordTransportResult } from 'blue-js-sdk';
 import { RESULTS_DIR } from './constants.js';
+
+// SDK rate-key format mirrors connection/tunnel.js _transportRateKey:
+// network=='grpc' or security=='tls' get suffix 'tls' (or special 'grpc/none'),
+// otherwise just the network. Tester records protocol-aware key locally and
+// dual-writes a normalized key into the SDK rate cache so embedded SDK calls
+// benefit from tester's broad-coverage observations.
+function sdkTransportKey(network, security) {
+  if (!network) return null;
+  if (security === 'tls') return `${network}/tls`;
+  if (network === 'grpc') return 'grpc/none';
+  return network;
+}
 
 // ─── Cache File ──────────────────────────────────────────────────────────────
 const CACHE_FILE = path.join(RESULTS_DIR, 'transport-cache.json');
@@ -68,6 +81,11 @@ export function recordTransportSuccess(nodeAddr, transport) {
   cache.globalStats[key].attempts++;
   cache.globalStats[key].rate = cache.globalStats[key].successes / cache.globalStats[key].attempts;
 
+  // Dual-write into SDK's getDynamicRate cache so embedded SDK code paths
+  // (setupV2Ray transport ordering) benefit from tester observations.
+  const sdkKey = sdkTransportKey(network, security);
+  if (sdkKey) try { recordTransportResult(sdkKey, true); } catch { }
+
   dirty = true;
 }
 
@@ -86,6 +104,9 @@ export function recordTransportFailure(transport) {
   }
   cache.globalStats[key].attempts++;
   cache.globalStats[key].rate = cache.globalStats[key].successes / cache.globalStats[key].attempts;
+
+  const sdkKey = sdkTransportKey(network, security);
+  if (sdkKey) try { recordTransportResult(sdkKey, false); } catch { }
 
   dirty = true;
 }

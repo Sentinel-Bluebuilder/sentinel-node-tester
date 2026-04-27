@@ -1013,8 +1013,7 @@ export function searchErrors({ q = null, stage = null, limit = 100, offset = 0 }
       el.error_message,
       el.log_snippet,
       el.captured_at,
-      r.run_id,
-      r.iteration
+      r.run_id
     FROM error_logs el
     INNER JOIN results r ON el.result_id = r.id
     ${where}

@@ -1,7 +1,7 @@
 /**
  * Sentinel Node Tester — SDK Verification
  *
- * Verifies that the installed copies of `sentinel-dvpn-sdk` (Blue JS) and
+ * Verifies that the installed copies of `blue-js-sdk` (Blue JS) and
  * `@sentinel-official/sentinel-js-sdk` (TKD) match the published GitHub
  * source at their current tag.
  *
@@ -34,7 +34,7 @@ import { Readable } from 'stream';
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 const TRACKED_SDKS = [
-  { key: 'blue-js',       pkg: 'sentinel-dvpn-sdk' },
+  { key: 'blue-js',       pkg: 'blue-js-sdk' },
   { key: 'tkd-js',        pkg: '@sentinel-official/sentinel-js-sdk' },
 ];
 

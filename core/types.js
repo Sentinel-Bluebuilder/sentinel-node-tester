@@ -79,6 +79,15 @@
  * @property {boolean} stopRequested
  * @property {boolean} lowBalanceWarning
  * @property {string|null} pauseReason - Why audit is paused (VPN interference, etc.)
+ * @property {'p2p'|'subscription'|'test'|null} runMode - Active run mode (persisted)
+ * @property {boolean} testRun - Skip-only TEST RUN demo flag (persisted)
+ * @property {string|number|null} runPlanId - Plan ID when runMode='p2p'
+ * @property {string|number|null} runSubscriptionId - Subscription ID when runMode='subscription'
+ * @property {string|null} runGranter - Fee-grant granter address (admin-only; never broadcast over public SSE)
+ * @property {string|null} pricingMode - Active pricing strategy
+ * @property {string|null} activeSDK - Active SDK identifier
+ * @property {boolean} continuousLoop - True when a continuous loop run is active
+ * @property {boolean} broadcastLive - When true, public SSE forwards live events; when false, public sees last-completed snapshot only
  */
 
 export {};

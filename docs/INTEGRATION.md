@@ -191,7 +191,7 @@ es.addEventListener('state', e => {
 
 ```
 ┌─ Header ──────────────────────────────────────────────────────┐
-│ [Logo] SENTINEL AUDIT  [JS|C#] [DNS▼] [Dictator Mode]        │
+│ [Logo] SENTINEL AUDIT  [JS|C#] [DNS▼]                        │
 ├─ Stats ───────────────────────────────────────────────────────┤
 │ Total: 1002 | Tested: 975 | Remaining: 27 | Rate: 97.2%      │
 │ [New Test] [Resume] [Rescan] [Retest Failed] [Stop] [Economy] │
