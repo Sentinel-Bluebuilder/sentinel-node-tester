@@ -219,6 +219,7 @@ function _sanitizeBatchNodeResult(result, batchId) {
     // Renamed from `type` to avoid clobbering the SSE dispatch type in broadcast().
     serviceType: result.type      || null,
     actualMbps:  result.actualMbps ?? null,
+    baselineMbps: result.baselineAtTest ?? null,
     peers:       result.peers     ?? null,
     maxPeers:    result.maxPeers  ?? null,
     error:       result.error     ? String(result.error).slice(0, 200) : null,
@@ -282,7 +283,7 @@ async function _runOnePass(loopState, batchId, frozenNodes = null) {
         try { db.insertBatchResult(batchId, payload); }
         catch (err) { console.error(`[continuous] insertBatchResult failed (batch ${batchId}, ${payload?.address}): ${err.message}`); }
       }
-    }).catch(() => {});
+    }).catch(err => console.error(`[continuous] _getDb failed (batch ${batchId}): ${err?.message || err}`));
   }
 
   // Use injected mock runner if provided (test path), otherwise resolve real pipeline.

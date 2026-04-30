@@ -13,7 +13,7 @@ import {
   V3_SUB_TYPE, V3_SUB_SESSION_TYPE,
 } from '../core/constants.js';
 import { gigsRT, batchSizeRT, autoCancelRT, onchainEnabledRT, onchainBatchSizeRT, onchainRegionRT } from '../core/settings.js';
-import { resultToRecord, encodeBatch, commitBatch as commitOnchainBatch } from '../core/onchain-report.js';
+import { resultToRecord, packBatch, commitBatch as commitOnchainBatch } from '../core/onchain-report.js';
 
 // Runtime aliases — read once per audit start so a single run uses a stable
 // value, but each new run picks up the latest operator-configured setting.
@@ -205,17 +205,26 @@ async function _flushOnchainBatch(force = false) {
   if (!r || !r.enabled) return;
   if (r.buffer.length === 0) return;
   if (!force && r.buffer.length < r.batchSize) return;
-  const batch = r.buffer.splice(0, Math.min(r.buffer.length, 6));
+  // Greedy pack: encoder fits as many records as the 256-char memo allows
+  // (typically 4–6 depending on address/value lengths), then we splice exactly
+  // that many off the buffer so leftovers go in the next TX.
+  const ctx = { region: r.region, baselineMbps: r.baselineMbps, startedAt: r.startedAt };
+  let memo, packed;
   try {
-    const encoded = encodeBatch(
-      { region: r.region, baselineMbps: r.baselineMbps, startedAt: r.startedAt },
-      batch,
-    );
-    const res = await commitOnchainBatch(r.client, r.signerAddress, encoded, r.broadcast);
+    ({ memo, packed } = packBatch(ctx, r.buffer));
+  } catch (e) {
+    r.broadcast('log', { msg: `⚠ On-chain pack failed (non-fatal, dropping 1 record): ${e.message}` });
+    r.buffer.shift();
+    return;
+  }
+  const batch = r.buffer.splice(0, packed);
+  try {
+    const res = await commitOnchainBatch(r.client, r.signerAddress, memo, r.broadcast);
     r.committed += batch.length;
     r.lastTxhash = res.txhash;
-    const url = res.txhash ? `https://p2pscan.com/transactions/${res.txhash}` : '';
-    r.broadcast('log', { msg: `📡 On-chain report posted: ${batch.length} nodes, ${res.memoBytes}B @h${res.height} → ${url}` });
+    const url = res.txhash ? `https://p2pscan.com/transaction/${res.txhash}` : '';
+    const okCount = batch.filter(b => b.ok).length;
+    r.broadcast('log', { msg: `📡 On-chain report posted: ${batch.length} nodes (${okCount} ok), ${res.memoBytes} chars @h${res.height} → ${url}` });
   } catch (e) {
     r.broadcast('log', { msg: `⚠ On-chain report failed (non-fatal): ${e.message}` });
   }
@@ -229,7 +238,7 @@ function _bufferOnchainRecord(result) {
   r.buffer.push(rec);
   if (r.buffer.length >= r.batchSize) {
     // Fire and forget — must not block the audit loop.
-    _flushOnchainBatch(false).catch(() => {});
+    _flushOnchainBatch(false).catch(err => console.error(`[pipeline] _flushOnchainBatch failed: ${err?.message || err}`));
   }
 }
 
@@ -302,22 +311,25 @@ function upsertResult(result, logSnippet = null) {
   if (_activeDbRunId != null) {
     try {
       const resultId = _dbInsertResult(_activeDbRunId, result);
-      // For failed tests, also write a detailed error_log row.
-      if (result.actualMbps == null && result.error && resultId) {
+      // For ANY failed test (no speed measured OR error/errorCode set), write a
+      // detailed error_log row. The popup contract from CLAUDE.md says every
+      // failure MUST have a copyable log — never fall through silently.
+      const isFailed = result.actualMbps == null || !!result.error || !!result.errorCode;
+      if (isFailed && resultId) {
         try {
           // Derive stage from the error text (mirrors deriveStage in db.js)
-          const err = result.error || '';
+          const err = result.error || result.errorCode || 'unknown failure';
           let stage = 'other';
           if (/insufficient|no udvpn pricing|no pricing/i.test(err)) stage = 'wallet';
-          else if (/rpc|abci query|broadcast|tx failed|sign|code: 1\d\d/i.test(err)) stage = 'rpc';
+          else if (/rpc|abci query|broadcast|tx failed|sign|code: 1\d\d|sequence/i.test(err)) stage = 'rpc';
           else if (/handshake|address mismatch|already exists|409|does not exist/i.test(err)) stage = 'handshake';
-          else if (/session|sessionid|waitforsession/i.test(err)) stage = 'session';
+          else if (/session|sessionid|waitforsession|sub-plan-session/i.test(err)) stage = 'session';
           else if (/speed|socks5|mbps|tunnel|throughput/i.test(err)) stage = 'speedtest';
           _dbInsertErrorLog({
             result_id:     Number(resultId),
             stage,
             error_code:    result.errorCode || 'UNKNOWN',
-            error_message: err.slice(0, 2048),
+            error_message: String(err).slice(0, 2048),
             log_snippet:   _sanitizeSnippet(logSnippet),
           });
         } catch (elErr) {
@@ -357,6 +369,7 @@ export function createState() {
     balanceUdvpn: 0,
     estimatedTotalCost: null,
     spentUdvpn: 0,
+    refundedUdvpn: 0,
     startedAt: null,
     completedAt: null,
     errorMessage: null,
@@ -959,6 +972,34 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
       } catch (cancelErr) {
         broadcast('log', { msg: `  ⚠ Batch cancel raised: ${_sanitizeSnippet(cancelErr.message)}. Continuing.` });
       }
+      // ─── Refund reconciliation ───────────────────────────────────────────
+      // Sentinel emits the actual refund (deposit minus consumed_bytes) AFTER
+      // the inactive_pending settlement window — not in the cancel TX. Rather
+      // than parse chain block events, we just compare the wallet's real
+      // balance to what we expected after this batch's payments. Any positive
+      // delta is a refund landing back in the wallet; we credit it to
+      // refundedUdvpn AND decrement spentUdvpn so the dashboard's "spend"
+      // figure is the user-visible NET (gross paid − refunded). We poll once
+      // here per batch; settlements that arrive after the batch loop ends are
+      // picked up on the next batch's reconciliation, the next run's start
+      // balance read, or the idle 2-min refresher in server.js.
+      try {
+        await sleep(2000); // small grace so cancel TX commits before we read
+        const freshBalRes = await client.getBalance(account.address, DENOM);
+        const realBal = parseInt(freshBalRes?.amount || '0', 10);
+        const expectedBal = Math.max(0, state.balanceUdvpn - state.spentUdvpn);
+        const delta = realBal - expectedBal;
+        if (delta > 0) {
+          state.refundedUdvpn = (state.refundedUdvpn || 0) + delta;
+          state.spentUdvpn = Math.max(0, state.spentUdvpn - delta);
+          state.balance = `${(realBal / 1_000_000).toFixed(4)} P2P`;
+          state.estimatedTotalCost = `${(state.spentUdvpn / 1_000_000).toFixed(4)} P2P`;
+          broadcast('log', { msg: `  ↩ Refund credited: ${(delta / 1_000_000).toFixed(4)} P2P (cumulative refunded: ${(state.refundedUdvpn / 1_000_000).toFixed(4)} P2P; net spend: ${(state.spentUdvpn / 1_000_000).toFixed(4)} P2P)` });
+          broadcast('state', { state });
+        }
+      } catch (recErr) {
+        broadcast('log', { msg: `  ⚠ Refund reconciliation skipped: ${_sanitizeSnippet(recErr.message)}` });
+      }
     }
   }
 
@@ -1314,6 +1355,11 @@ export async function runPlanTest(planId, state, broadcast) {
   state.totalNodes = 0;
   state.testedNodes = 0;
   state.failedNodes = 0;
+  state.passed15 = 0;
+  state.passed10 = 0;
+  state.passedBaseline = 0;
+  state.nodeSpeedHistory = [];
+  state.baselineHistory = [];
   state.retryCount = 0;
   recomputeCounters(state);
   clearPoisonedSessions();
@@ -1451,11 +1497,24 @@ export async function runPlanTest(planId, state, broadcast) {
   broadcast('state', { state });
 
   broadcast('log', { msg: `📡 Running baseline...` });
-  try {
-    const bl = await speedtestDirect();
-    state.baselineMbps = bl.mbps;
-    broadcast('log', { msg: `  Baseline: ${bl.mbps} Mbps` });
-  } catch (e) { broadcast('log', { msg: `  Baseline failed: ${_sanitizeSnippet(e.message)}` }); }
+  {
+    const _priorBaseline = state.baselineMbps;
+    for (let blAttempt = 0; blAttempt < 2; blAttempt++) {
+      try {
+        const bl = await speedtestDirect();
+        state.baselineMbps = bl.mbps;
+        broadcast('log', { msg: `  Baseline: ${bl.mbps} Mbps` });
+        break;
+      } catch (e) {
+        const isLast = blAttempt === 1;
+        broadcast('log', { msg: `  Baseline ${isLast ? 'failed twice' : 'failed, retrying'}: ${_sanitizeSnippet(e.message)}` });
+        if (isLast && _priorBaseline != null) {
+          state.baselineMbps = _priorBaseline;
+          broadcast('log', { msg: `  Baseline: reusing prior value ${_priorBaseline} Mbps` });
+        }
+      }
+    }
+  }
 
   _initOnchainReporter(account, client, state, broadcast);
 
@@ -1621,6 +1680,11 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
     state.totalNodes = 0;
     state.testedNodes = 0;
     state.failedNodes = 0;
+    state.passed15 = 0;
+    state.passed10 = 0;
+    state.passedBaseline = 0;
+    state.nodeSpeedHistory = [];
+    state.baselineHistory = [];
   }
   state.retryCount = 0;
   recomputeCounters(state);
@@ -1804,11 +1868,24 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
   broadcast('state', { state });
 
   broadcast('log', { msg: `📡 Running baseline...` });
-  try {
-    const bl = await speedtestDirect();
-    state.baselineMbps = bl.mbps;
-    broadcast('log', { msg: `  Baseline: ${bl.mbps} Mbps` });
-  } catch (e) { broadcast('log', { msg: `  Baseline failed: ${_sanitizeSnippet(e.message)}` }); }
+  {
+    const _priorBaseline = state.baselineMbps;
+    for (let blAttempt = 0; blAttempt < 2; blAttempt++) {
+      try {
+        const bl = await speedtestDirect();
+        state.baselineMbps = bl.mbps;
+        broadcast('log', { msg: `  Baseline: ${bl.mbps} Mbps` });
+        break;
+      } catch (e) {
+        const isLast = blAttempt === 1;
+        broadcast('log', { msg: `  Baseline ${isLast ? 'failed twice' : 'failed, retrying'}: ${_sanitizeSnippet(e.message)}` });
+        if (isLast && _priorBaseline != null) {
+          state.baselineMbps = _priorBaseline;
+          broadcast('log', { msg: `  Baseline: reusing prior value ${_priorBaseline} Mbps` });
+        }
+      }
+    }
+  }
 
   _initOnchainReporter(account, client, state, broadcast);
 
@@ -1848,7 +1925,7 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
         state.spentUdvpn += 200000;
       } else {
         _spBroadcast('log', { msg: `  Starting session (fee-granted by ${granterAddr.slice(0, 12)}…)` });
-        sessResult = await broadcastWithFeeGrant(client, account.address, [sessMsg], granterAddr);
+        sessResult = await broadcastWithFeeGrant(client, account.address, [sessMsg], granterAddr, '', _spBroadcast);
         if (sessResult.code !== 0) {
           throw new Error(`Session tx failed code=${sessResult.code}: ${sessResult.rawLog}`);
         }

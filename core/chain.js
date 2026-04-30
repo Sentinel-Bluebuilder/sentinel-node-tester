@@ -25,6 +25,7 @@ import {
   broadcastWithFeeGrant as sdkBroadcastWithFeeGrant,
   disconnectRpc,
 } from 'blue-js-sdk';
+import { broadcastSerialized, forceReconnect } from './wallet.js';
 
 // ─── LCD Endpoint Management ────────────────────────────────────────────────
 const LCD_LIST = SDK_LCD_ENDPOINTS.map(e => e.url);
@@ -69,7 +70,8 @@ export async function getRpcClient() {
     _rpcClient = result;
     _rpcUrl = result.url;
     return result;
-  } catch {
+  } catch (e) {
+    console.error('[chain] getRpcClient failed (all RPC endpoints exhausted):', e?.message || e);
     return null;
   }
 }
@@ -77,7 +79,8 @@ export async function getRpcClient() {
 /** Disconnect and clear the cached RPC client */
 export function cleanupRpc() {
   if (_rpcClient) {
-    try { disconnectRpc(); } catch { }
+    try { disconnectRpc(); }
+    catch (e) { console.error('[chain] disconnectRpc failed:', e?.message || e); }
     _rpcClient = null;
     _rpcUrl = null;
   }
@@ -905,12 +908,42 @@ export async function querySubscriberPlansEnriched(walletAddress) {
 }
 
 // ─── Sub. Plan mode: fee-granted broadcast wrapper ──────────────────────────
-/**
- * Broadcast a message list where `granterAddress` pays gas instead of `signerAddress`.
- * Thin pass-through to the SDK — kept here so pipeline imports stay consistent.
- */
-export async function broadcastWithFeeGrant(client, signerAddress, msgs, granterAddress, memo = '') {
-  return sdkBroadcastWithFeeGrant(client, signerAddress, msgs, granterAddress, memo);
+// Cosmos accounts have a single sequence counter. The SDK's broadcastWithFeeGrant
+// calls client.signAndBroadcast directly, bypassing core/wallet.js's broadcast
+// mutex. When a sub-plan run fires session TXs back-to-back (or concurrently
+// with an SNTR1 self-send / payment TX), both broadcasts grab the same sequence
+// and the second one fails with code 32 "expected N+1, got N".
+//
+// Wrap the SDK call in (a) the SAME serialization mutex used by signAndBroadcast
+// (`broadcastSerialized` from core/wallet.js), and (b) a sequence-mismatch retry
+// loop. Sharing the mutex is critical — separate mutexes still race.
+export async function broadcastWithFeeGrant(client, signerAddress, msgs, granterAddress, memo = '', broadcast) {
+  const maxRetries = 3;
+  return broadcastSerialized(async () => {
+    let activeClient = client;
+    let lastErr;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await sdkBroadcastWithFeeGrant(activeClient, signerAddress, msgs, granterAddress, memo);
+      } catch (err) {
+        lastErr = err;
+        const isSeq = /sequence mismatch/i.test(err.message || '') || err.code === 32;
+        if (attempt < maxRetries && isSeq) {
+          if (broadcast) broadcast('log', { msg: `  ⚡ Sequence mismatch on fee-granted TX — reconnecting (${attempt + 1}/${maxRetries})...` });
+          // Force a fresh signing client so its cached sequence is re-fetched
+          // from chain. This is what the SDK's createSafeBroadcaster does on
+          // sequence errors — the bare signAndBroadcast path doesn't, so we do it here.
+          try { activeClient = await forceReconnect(); } catch (e) {
+            if (broadcast) broadcast('log', { msg: `  ⚠ Reconnect failed: ${e.message}` });
+          }
+          await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastErr;
+  });
 }
 
 // ─── Fee Grant: RPC-first query ───────────────────────────────────────────────

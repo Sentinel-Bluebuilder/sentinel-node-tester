@@ -374,14 +374,24 @@
       background: transparent;
       color: var(--text-dim);
       border: 1px solid var(--border);
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
     }
     .btn-onchain-toggle:hover:not(:disabled) { border-color: var(--border-hover); color: var(--text); }
-    .btn-onchain-toggle.is-on {
-      background: var(--accent-green);
-      color: var(--bg);
-      border-color: var(--accent-green);
+    .btn-onchain-toggle .status-dot {
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--red);
+      box-shadow: 0 0 6px rgba(239, 68, 68, 0.7);
+      flex-shrink: 0;
     }
-    .btn-onchain-toggle.is-on:hover:not(:disabled) { opacity: 0.85; }
+    .btn-onchain-toggle.is-on .status-dot {
+      background: var(--accent-green, #22c55e);
+      box-shadow: 0 0 6px rgba(34, 197, 94, 0.85);
+    }
 
     .btn:disabled { opacity: 0.3; cursor: not-allowed; transform: none; }
 
@@ -519,9 +529,9 @@
       font-weight: 600;
     }
 
-    .h-pill-good { background: rgba(0,200,83,0.1); color: var(--accent-green); border: 1px solid rgba(0,200,83,0.2); }
+    .h-pill-good { background: var(--green-dim); color: var(--green-bright); border: 1px solid var(--green-dim); }
     .h-pill-mid  { background: var(--bg-card); color: var(--text-dim); border: 1px solid var(--border); }
-    .h-pill-bad  { background: rgba(255,23,68,0.08); color: var(--accent-red); border: 1px solid rgba(255,23,68,0.2); }
+    .h-pill-bad  { background: var(--red-dim); color: var(--red-bright); border: 1px solid var(--red-dim); }
     .h-pill-empty { color: var(--text-dim); font-size: 11px; font-style: italic; }
 
     /* Data layout */
@@ -640,11 +650,19 @@
     .badge-plan { background: var(--accent-dim); color: var(--text); padding: 2px 6px; border-radius: 4px; font-size: 9px; font-weight: 700; border: 1px solid var(--border-hover); margin-left: 4px; }
 
     /* Logs */
-    .log-container { display: flex; flex-direction: column; overflow: hidden; }
+    .log-container {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-height: 0;
+      flex: 1 1 auto;
+    }
 
     .logs {
+      flex: 1 1 auto;
+      min-height: 320px;
+      max-height: calc(100vh - 240px);
       overflow-y: auto;
-      max-height: 400px;
       padding: 12px;
       display: flex;
       flex-direction: column;
@@ -781,6 +799,11 @@
         <div class="header-stat-value" style="color:var(--text-muted)" id="estCost">--</div>
       </div>
       <div class="header-divider"></div>
+      <div class="header-stat">
+        <div class="header-stat-label">Refunded</div>
+        <div class="header-stat-value" style="color:var(--green)" id="refundedAmt">--</div>
+      </div>
+      <div class="header-divider"></div>
       <button id="btnTheme" class="theme-toggle-btn" onclick="toggleTheme()" title="Toggle light/dark theme" aria-label="Toggle theme">
         <svg id="themeIconDark" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
         <svg id="themeIconLight" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>
@@ -842,6 +865,13 @@
       <button class="btn btn-stop" id="btnStop" disabled onclick="stopAudit()">Stop</button>
       <div style="margin-left:auto; display:flex; gap:10px; align-items:center">
         <button class="btn btn-onchain-toggle" id="btnOnchainToggle" onclick="openOnchainPopup()" title="Open on-chain reporting settings — toggle on/off, configure batch size & region, view recent reports.">On-Chain Reporting</button>
+        <button class="btn-help" id="btnOnchainHistory" onclick="showOnchainHistoryPopup()" title="On-chain reporting history — every report TX broadcast by this tester wallet" aria-label="On-chain reporting history" style="display:inline-flex;align-items:center;justify-content:center">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 12a9 9 0 1 0 3-6.7L3 8"/>
+            <path d="M3 3v5h5"/>
+            <path d="M12 7v5l3 2"/>
+          </svg>
+        </button>
         <button class="btn-help" onclick="showInfoPopup()" title="Dashboard guide">?</button>
       </div>
       <!-- Hidden DOM stubs: mode/pricing/loop UI moved into the New Test chooser popup.
@@ -1296,8 +1326,12 @@
             detail = '';
             color = 'var(--green)';
           } else {
+            const pricing = state.pricingMode;
+            const suffix = pricing === 'hours'
+              ? ' : Testing All Nodes - Paying Per Hour'
+              : ' : Testing All Nodes - Paying Per GB';
             label = 'P2P';
-            detail = 'all online nodes, per-session payments from this wallet';
+            detail = 'All online nodes — direct peer-to-peer payments per session' + suffix;
             color = 'var(--accent-bright, var(--accent))';
           }
           modeBadge.style.display = '';
@@ -1378,6 +1412,12 @@
       }
 
       if (state.estimatedTotalCost) document.getElementById('estCost').textContent = state.estimatedTotalCost;
+
+      const refEl = document.getElementById('refundedAmt');
+      if (refEl) {
+        const refUd = Number(state.refundedUdvpn || 0);
+        refEl.textContent = refUd > 0 ? (refUd / 1_000_000).toFixed(4) + ' P2P' : '--';
+      }
 
       // Avg baseline in header
       const bl = state.baselineMbps;
@@ -1536,8 +1576,11 @@
       blEl.innerHTML = hist.length === 0
         ? '<span class="h-pill h-pill-empty">No readings yet</span>'
         : hist.map(e => {
-            const c = e.mbps >= 30 ? 'h-pill-good' : e.mbps >= 10 ? 'h-pill-mid' : 'h-pill-bad';
-            return `<span class="h-pill ${c}" title="${e.ts}">${e.mbps.toFixed(1)}</span>`;
+            const mbps = Number(typeof e === 'number' ? e : e?.mbps);
+            if (!Number.isFinite(mbps)) return '';
+            const c = mbps >= 30 ? 'h-pill-good' : mbps >= 10 ? 'h-pill-mid' : 'h-pill-bad';
+            const ts = (e && e.ts) ? String(e.ts) : '';
+            return `<span class="h-pill ${c}" title="${ts}">${mbps.toFixed(1)}</span>`;
           }).join('');
 
       const nsEl = document.getElementById('nodeSpeedHistoryPills');
@@ -1545,8 +1588,11 @@
       nsEl.innerHTML = ns.length === 0
         ? '<span class="h-pill h-pill-empty">No readings yet</span>'
         : ns.map(e => {
-            const c = e.mbps >= 15 ? 'h-pill-good' : e.mbps >= 5 ? 'h-pill-mid' : 'h-pill-bad';
-            return `<span class="h-pill ${c}" title="${e.addr} @ ${e.ts}">${e.mbps.toFixed(1)}</span>`;
+            const mbps = Number(typeof e === 'number' ? e : e?.mbps);
+            if (!Number.isFinite(mbps)) return '';
+            const c = mbps >= 15 ? 'h-pill-good' : mbps >= 5 ? 'h-pill-mid' : 'h-pill-bad';
+            const title = (e && (e.addr || e.ts)) ? `${e.addr || ''} @ ${e.ts || ''}` : '';
+            return `<span class="h-pill ${c}" title="${title}">${mbps.toFixed(1)}</span>`;
           }).join('');
     }
 
@@ -1654,8 +1700,12 @@
         : '';
       const countryCol = flag ? `${flag} ${escHtml(cc.toUpperCase())}` : escHtml(r.country || '—');
       const cityCol = escHtml(r.city || '—');
-      const bottleneck = r.ispBottleneck ? ' <span title="ISP bottleneck" style="color:var(--yellow);cursor:help">⚡</span>' : '';
-      const act = r.actualMbps != null ? r.actualMbps.toFixed(2) + ' Mbps' + bottleneck : '--';
+      const bottleneckIcon = r.ispBottleneck
+        ? '<span title="ISP bottleneck" style="color:var(--yellow);cursor:help">⚡</span>'
+        : '';
+      const act = r.actualMbps != null
+        ? `<span style="display:inline-flex;align-items:baseline;justify-content:flex-end;gap:4px"><span>${r.actualMbps.toFixed(2)} Mbps</span><span style="display:inline-block;width:14px;text-align:left">${bottleneckIcon}</span></span>`
+        : '--';
       const blAt = r.baselineAtTest != null ? r.baselineAtTest.toFixed(2) + ' Mbps' : '--';
 
       let peersHtml = '--';
@@ -1875,10 +1925,14 @@
       const btn = document.getElementById('btnOnchainToggle');
       if (!btn) return;
       btn.classList.toggle('is-on', !!isOn);
-      btn.textContent = isOn ? 'On-Chain Reporting: ON' : 'On-Chain Reporting';
+      const label = isOn ? 'On-Chain Reporting: ON' : 'On-Chain Reporting: OFF';
+      btn.innerHTML = '<span class="status-dot" aria-hidden="true"></span><span class="label"></span>';
+      btn.querySelector('.label').textContent = label;
+      btn.setAttribute('aria-pressed', isOn ? 'true' : 'false');
     }
     fetch('/api/settings').then(r => r.json()).then(d => {
-      _renderOnchainToggle(!!(d && d.onchainEnabled));
+      const s = (d && d.settings) || d || {};
+      _renderOnchainToggle(!!s.onchainEnabled);
     }).catch(() => {});
     async function toggleOnchainReporting() {
       const btn = document.getElementById('btnOnchainToggle');
@@ -1886,7 +1940,8 @@
       btn.disabled = true;
       try {
         const cur = await fetch('/api/settings').then(r => r.json()).catch(() => ({}));
-        const next = !cur.onchainEnabled;
+        const curS = (cur && cur.settings) || cur || {};
+        const next = !curS.onchainEnabled;
         const res = await fetch('/api/settings', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Admin-Request': '1' },
@@ -2082,45 +2137,6 @@
             </span>
           </label>
 
-          <div style="margin-top:6px;padding-top:14px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:14px">
-            <div>
-              <div style="font-size:13px;font-weight:700;letter-spacing:0.5px">On-Chain Reporting</div>
-              <div style="font-size:11px;color:var(--text-muted);font-weight:400;margin-top:3px">
-                Periodically commits compact binary node-test reports to the Sentinel chain via TX memo (self-send, magic prefix <code style="color:var(--accent)">SNTR1</code>). Any consumer can ingest performance + concurrency data via RPC <code style="color:var(--accent)">tx_search</code>.
-              </div>
-            </div>
-
-            <label style="display:flex;align-items:flex-start;gap:8px;padding:10px;border:1px solid var(--border);border-radius:6px;cursor:pointer">
-              <input id="setOnchainEnabled" type="checkbox" ${s.onchainEnabled ? 'checked' : ''} style="accent-color:var(--accent);margin-top:2px;cursor:pointer"/>
-              <span style="display:flex;flex-direction:column;gap:3px">
-                <span style="font-weight:700;letter-spacing:0.4px">Enable on-chain reporting</span>
-                <span style="color:var(--text-muted);font-weight:400;font-size:11px">Off by default. When on, the tester self-sends 1 udvpn with an encoded batch every <code style="color:var(--accent)">N</code> nodes. Each TX costs ~200,000 udvpn gas.</span>
-              </span>
-            </label>
-
-            <label style="display:flex;flex-direction:column;gap:4px">
-              <span style="font-weight:700;letter-spacing:0.4px">Nodes per report
-                <span style="color:var(--text-muted);font-weight:400">(1–6, default ${_esc(d.onchainBatchSize ?? 6)})</span></span>
-              <input id="setOnchainBatchSize" type="number" min="1" max="6" step="1" value="${_esc(s.onchainBatchSize ?? 6)}"
-                style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font:inherit;font-size:12px"/>
-              <span style="color:var(--text-muted);font-weight:400;font-size:11px">Capped at 6: Sentinel's chain enforces a 256-character TX memo limit. 6 records = 244 base64 chars; 7 would overflow and the chain rejects with code 12.</span>
-            </label>
-
-            <label style="display:flex;flex-direction:column;gap:4px">
-              <span style="font-weight:700;letter-spacing:0.4px">Region (ISO-3166)
-                <span style="color:var(--text-muted);font-weight:400">(2-letter; blank = auto)</span></span>
-              <input id="setOnchainRegion" type="text" maxlength="2" value="${_esc(s.onchainRegion ?? '')}" placeholder="e.g. US"
-                style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font:inherit;font-size:12px;text-transform:uppercase"/>
-              <span style="color:var(--text-muted);font-weight:400;font-size:11px">Identifies the tester's vantage point in each report header. Consumers use this + baseline Mbps to contextualize per-node speeds.</span>
-            </label>
-
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
-              <div style="font-size:11px;color:var(--text-muted)">Recent reports</div>
-              <button id="onchainRefreshBtn" type="button" style="background:transparent;color:var(--text-dim);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font:inherit;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer">REFRESH</button>
-            </div>
-            <div id="onchainReportsList" style="max-height:180px;overflow:auto;font-size:11px;color:var(--text-dim);border:1px solid var(--border);border-radius:6px;padding:8px;background:var(--bg-input)">— click REFRESH to load —</div>
-          </div>
-
           <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
             <button id="p2pSettingsReset" type="button" style="background:transparent;color:var(--text-dim);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font:inherit;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer">RESET DEFAULTS</button>
             <button id="p2pSettingsSave" type="button" style="background:var(--accent);color:var(--bg-card-solid);border:0;border-radius:6px;padding:6px 14px;font:inherit;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer">SAVE</button>
@@ -2144,9 +2160,6 @@
         panel.querySelector('#setBatch').value = d.batchSize ?? 5;
         panel.querySelector('#setMaxPrice').value = d.maxPriceUdvpn ?? 0;
         panel.querySelector('#setAutoCancel').checked = !!d.autoCancelAfterTest;
-        panel.querySelector('#setOnchainEnabled').checked = !!d.onchainEnabled;
-        panel.querySelector('#setOnchainBatchSize').value = d.onchainBatchSize ?? 6;
-        panel.querySelector('#setOnchainRegion').value = d.onchainRegion ?? '';
         setMsg('Defaults loaded — click SAVE to persist.', false);
       });
 
@@ -2156,9 +2169,6 @@
           batchSize: parseInt(panel.querySelector('#setBatch').value, 10),
           maxPriceUdvpn: parseInt(panel.querySelector('#setMaxPrice').value, 10),
           autoCancelAfterTest: !!panel.querySelector('#setAutoCancel').checked,
-          onchainEnabled: !!panel.querySelector('#setOnchainEnabled').checked,
-          onchainBatchSize: parseInt(panel.querySelector('#setOnchainBatchSize').value, 10),
-          onchainRegion: String(panel.querySelector('#setOnchainRegion').value || '').trim().toUpperCase(),
         };
         try {
           const res = await fetch('/api/settings', {
@@ -2173,38 +2183,9 @@
           panel.querySelector('#setBatch').value = ns.batchSize;
           panel.querySelector('#setMaxPrice').value = ns.maxPriceUdvpn;
           panel.querySelector('#setAutoCancel').checked = !!ns.autoCancelAfterTest;
-          panel.querySelector('#setOnchainEnabled').checked = !!ns.onchainEnabled;
-          panel.querySelector('#setOnchainBatchSize').value = ns.onchainBatchSize;
-          panel.querySelector('#setOnchainRegion').value = ns.onchainRegion || '';
           setMsg('Saved. Effective on next audit run start.', false);
         } catch (err) {
           setMsg('Save failed: ' + (err && err.message ? err.message : err), true);
-        }
-      });
-
-      panel.querySelector('#onchainRefreshBtn').addEventListener('click', async () => {
-        const list = panel.querySelector('#onchainReportsList');
-        list.textContent = 'loading…';
-        try {
-          const r = await fetch('/api/onchain-reports?limit=10');
-          if (!r.ok) throw new Error('HTTP ' + r.status);
-          const data = await r.json();
-          if (!data.reports || data.reports.length === 0) {
-            list.textContent = 'No reports found for ' + (data.address || 'this wallet') + '.';
-            return;
-          }
-          list.innerHTML = data.reports.map(rep => {
-            const p = rep.payload || {};
-            const okCount = (p.records || []).filter(x => x.ok).length;
-            const tx = rep.txhash || '';
-            const link = tx ? `<a href="https://p2pscan.com/transactions/${_esc(tx)}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">${_esc(tx)} ↗</a>` : '—';
-            return `<div style="padding:6px 0;border-bottom:1px dashed var(--border)">
-              <div style="color:var(--text)"><b>h${_esc(rep.height)}</b> · ${_esc(p.region || '—')} · baseline ${_esc(p.baselineMbps)}Mbps · ${_esc(p.count)} nodes (${okCount} ok)</div>
-              <div style="font-size:10px;color:var(--text-muted);font-family:monospace;word-break:break-all">${link}</div>
-            </div>`;
-          }).join('');
-        } catch (err) {
-          list.textContent = 'Load failed: ' + (err && err.message ? err.message : err);
         }
       });
     }
@@ -2356,7 +2337,7 @@
             const p = rep.payload || {};
             const okCount = (p.records || []).filter(x => x.ok).length;
             const tx = rep.txhash || '';
-            const link = tx ? `<a href="https://p2pscan.com/transactions/${_esc(tx)}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">${_esc(tx)} ↗</a>` : '—';
+            const link = tx ? `<a href="https://p2pscan.com/transaction/${_esc(tx)}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">${_esc(tx)} ↗</a>` : '—';
             return `<div style="padding:6px 0;border-bottom:1px dashed var(--border)">
               <div style="color:var(--text)"><b>h${_esc(rep.height)}</b> · ${_esc(p.region || '—')} · baseline ${_esc(p.baselineMbps)}Mbps · ${_esc(p.count)} nodes (${okCount} ok)</div>
               <div style="font-size:10px;color:var(--text-muted);font-family:monospace;word-break:break-all">${link}</div>
@@ -2372,6 +2353,164 @@
         }
       });
     }
+
+    // ─── On-Chain Reporting — full history popup ──────────────────────────
+    async function showOnchainHistoryPopup() {
+      const existing = document.getElementById('onchainHistoryBackdrop');
+      if (existing) existing.remove();
+
+      const _esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+
+      const backdrop = document.createElement('div');
+      backdrop.id = 'onchainHistoryBackdrop';
+      backdrop.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9998;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);';
+
+      const panel = document.createElement('div');
+      panel.style.cssText = 'background:var(--bg-card-solid);border:1px solid var(--border-hover);border-radius:10px;padding:24px;max-width:1100px;width:94%;max-height:88vh;overflow:auto;color:var(--text);font-family:var(--font-display);';
+
+      const close = () => backdrop.remove();
+      const onKey = (e) => { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } };
+      document.addEventListener('keydown', onKey);
+
+      panel.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding-bottom:14px;border-bottom:1px solid var(--border);margin-bottom:18px">
+          <div style="display:flex;flex-direction:column;gap:4px">
+            <div style="font-size:18px;font-weight:700;letter-spacing:0.6px;line-height:1.2">On-Chain Reporting — History</div>
+            <div style="font-size:11px;color:var(--text-muted);font-weight:400;letter-spacing:0.3px">Every report TX broadcast by this tester wallet · queried via RPC <code style="color:var(--accent)">tx_search</code> · <span id="ocHistAddr" style="color:var(--text-dim)">—</span></div>
+          </div>
+          <button id="onchainHistoryClose" style="background:transparent;border:0;color:var(--text-dim);font-size:22px;cursor:pointer;line-height:1;padding:0 4px">×</button>
+        </div>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px;flex-wrap:wrap">
+          <div style="display:flex;align-items:center;gap:10px;font-size:11px;color:var(--text-dim);letter-spacing:0.4px">
+            <label for="ocHistLimit" style="text-transform:uppercase;font-weight:700;letter-spacing:1px">Limit</label>
+            <select id="ocHistLimit" style="background:var(--bg-card-solid);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font:inherit;font-size:11px;cursor:pointer">
+              <option value="10">10</option>
+              <option value="25" selected>25</option>
+              <option value="50">50</option>
+            </select>
+            <span id="ocHistCount" style="margin-left:6px;color:var(--text-muted)"></span>
+          </div>
+          <button id="ocHistRefresh" type="button" style="background:transparent;color:var(--text-dim);border:1px solid var(--border);border-radius:6px;padding:6px 14px;font:inherit;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer">REFRESH</button>
+        </div>
+
+        <div id="ocHistList" style="border:1px solid var(--border);border-radius:8px;background:var(--bg-input);min-height:120px;max-height:60vh;overflow:auto">
+          <div style="padding:24px;text-align:center;color:var(--text-muted);font-size:12px">Loading…</div>
+        </div>
+
+        <div style="font-size:10px;color:var(--text-muted);margin-top:14px;line-height:1.6;letter-spacing:0.2px">
+          Each row is one self-send TX with a <code style="color:var(--accent)">SNTR1</code>-prefixed memo carrying up to 6 node-test records. Click the txhash to open p2pscan.
+        </div>
+      `;
+
+      backdrop.appendChild(panel);
+      document.body.appendChild(backdrop);
+
+      const list = panel.querySelector('#ocHistList');
+      const refreshBtn = panel.querySelector('#ocHistRefresh');
+      const limitSel = panel.querySelector('#ocHistLimit');
+      const addrSpan = panel.querySelector('#ocHistAddr');
+      const countSpan = panel.querySelector('#ocHistCount');
+
+      panel.querySelector('#onchainHistoryClose').addEventListener('click', close);
+      backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+
+      const _fmtTime = (sec) => {
+        if (!sec) return '—';
+        try {
+          const d = new Date(sec * 1000);
+          return d.toLocaleString(undefined, { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        } catch { return String(sec); }
+      };
+      const _shortAddr = (a) => !a ? '—' : (a.length > 16 ? a.slice(0, 10) + '…' + a.slice(-4) : a);
+
+      async function load() {
+        const limit = parseInt(limitSel.value, 10) || 25;
+        list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:12px">Loading…</div>';
+        countSpan.textContent = '';
+        refreshBtn.disabled = true;
+        refreshBtn.style.opacity = '0.6';
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 30000);
+        try {
+          const r = await fetch('/api/onchain-reports?limit=' + limit, { signal: ctrl.signal });
+          clearTimeout(t);
+          if (!r.ok) {
+            let detail = '';
+            try { const j = await r.json(); detail = j.error || j.detail || ''; } catch {}
+            throw new Error('HTTP ' + r.status + (detail ? ' — ' + detail : ''));
+          }
+          const data = await r.json();
+          addrSpan.textContent = data.address || '—';
+          addrSpan.title = data.address || '';
+          countSpan.textContent = '· ' + (data.count || 0) + ' report' + ((data.count === 1) ? '' : 's');
+          if (!data.reports || data.reports.length === 0) {
+            list.innerHTML = `<div style="padding:32px 16px;text-align:center;color:var(--text-muted);font-size:12px;line-height:1.6">
+              No on-chain reports found for this wallet.<br>
+              <span style="font-size:11px">Reports appear once on-chain reporting is enabled and at least one batch is committed.</span>
+            </div>`;
+            return;
+          }
+          const rows = data.reports.map(rep => {
+            const p = rep.payload || {};
+            const recs = p.records || [];
+            const ok = recs.filter(x => x.ok).length;
+            const fail = recs.length - ok;
+            const tx = rep.txhash || '';
+            const txShort = tx ? (tx.slice(0, 12) + '…' + tx.slice(-8)) : '—';
+            const link = tx
+              ? `<a href="https://p2pscan.com/transaction/${_esc(tx)}" target="_blank" rel="noopener" title="${_esc(tx)}" style="color:var(--accent);text-decoration:none;font-family:var(--font-mono,monospace)">${_esc(txShort)} ↗</a>`
+              : '<span style="color:var(--text-muted)">—</span>';
+            const region = p.region || '—';
+            const baseline = (p.baselineMbps != null) ? (Number(p.baselineMbps).toFixed(1) + ' Mbps') : '—';
+            const okBadge = ok > 0
+              ? `<span style="background:var(--green-dim);color:var(--text);border:1px solid var(--border-hover);padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700">${ok} OK</span>` : '';
+            const failBadge = fail > 0
+              ? `<span style="background:var(--red-dim);color:var(--text-dim);border:1px solid var(--border);padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700">${fail} FAIL</span>` : '';
+            const recList = recs.map(rec => {
+              const addr = _shortAddr(rec.address);
+              const m = rec.ok ? (rec.mbps.toFixed(1) + ' Mbps') : 'fail';
+              const c = rec.ok ? 'var(--text)' : 'var(--text-muted)';
+              return `<span style="font-family:var(--font-mono,monospace);font-size:10px;color:${c};margin-right:10px" title="${_esc(rec.address)} · errCode ${_esc(rec.errCode)} · peers ${_esc(rec.peers)} · ${_esc(rec.latencyMs || 0)}ms">${_esc(addr)} ${_esc(m)}</span>`;
+            }).join('');
+            return `
+              <div style="padding:12px 14px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:auto 1fr auto;gap:10px 14px;align-items:start">
+                <div style="font-size:11px;color:var(--text-dim);min-width:160px">
+                  <div style="font-weight:700;color:var(--text);letter-spacing:0.4px">h${_esc(rep.height)}</div>
+                  <div style="font-size:10px;color:var(--text-muted);margin-top:2px">${_esc(_fmtTime(p.startedAt))}</div>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:6px;min-width:0">
+                  <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:11px;color:var(--text-dim)">
+                    <span style="color:var(--text);font-weight:700">${_esc(p.count || recs.length)} nodes</span>
+                    ${okBadge}${failBadge}
+                    <span style="color:var(--text-muted)">· region <code style="color:var(--accent)">${_esc(region)}</code></span>
+                    <span style="color:var(--text-muted)">· baseline ${_esc(baseline)}</span>
+                    <span style="color:var(--text-muted)">· v${_esc(p.version)}</span>
+                  </div>
+                  <div style="line-height:1.7">${recList}</div>
+                </div>
+                <div style="text-align:right;font-size:11px;min-width:200px">
+                  ${link}
+                </div>
+              </div>
+            `;
+          }).join('');
+          list.innerHTML = rows;
+        } catch (err) {
+          clearTimeout(t);
+          const aborted = err && err.name === 'AbortError';
+          list.innerHTML = `<div style="padding:24px 16px;color:var(--red);font-size:12px;text-align:center">${aborted ? 'Request timed out — RPC tx_search did not respond within 30s.' : 'Load failed: ' + _esc(err && err.message ? err.message : String(err))}</div>`;
+        } finally {
+          refreshBtn.disabled = false;
+          refreshBtn.style.opacity = '';
+        }
+      }
+
+      refreshBtn.addEventListener('click', load);
+      limitSel.addEventListener('change', load);
+      load();
+    }
+    window.showOnchainHistoryPopup = showOnchainHistoryPopup;
 
     function openModeChooser() {
       // Tear down any previous chooser
@@ -3374,7 +3513,6 @@ Record (28 bytes × count)
             return '<div style="background:var(--red-dim);border:1px solid rgba(255,23,68,0.22);border-radius:var(--radius-sm);padding:10px 12px">'
               + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">'
               + '<span class="badge badge-fail" style="font-size:9px">' + (er.stage || '?') + '</span>'
-              + '<span style="font-size:11px;color:var(--text-dim);font-family:var(--font-mono)">' + (er.error_code || '') + '</span>'
               + '<span style="font-size:11px;color:var(--text)">' + ((er.error_message || '').slice(0,100).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')) + '</span>'
               + '</div>' + snip + '</div>';
           }).join('');
@@ -3630,7 +3768,6 @@ Record (28 bytes × count)
           ${row('City', escapeHtml(er.city))}
           ${row('Service', svcType)}
           ${row('Stage', escapeHtml(er.stage))}
-          ${row('Error Code', monoVal(er.error_code))}
           ${row('Captured', escapeHtml(captured))}
           ${row('Message', `<span style="font-family:var(--font-mono);font-size:12px;white-space:pre-wrap">${escapeHtml(er.error_message)}</span>`)}
 

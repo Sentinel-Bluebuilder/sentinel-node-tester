@@ -62,6 +62,10 @@ function _openHandle(target, cache) {
   const db = new Database(target);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  // Wait up to 5s for a competing writer instead of failing immediately with
+  // SQLITE_BUSY. Matters when ad-hoc scripts (backfill, probes, `node -e`
+  // verifiers) run alongside the server.
+  db.pragma('busy_timeout = 5000');
   runMigrations(db);
 
   // Row-count fuse: if the runs table is absurdly large, a runaway writer
@@ -102,8 +106,12 @@ function isTestEnv() {
 export function useDb(db, which) {
   // Match the pragmas _openHandle sets so test/in-memory DBs get the same
   // semantics as the prod handle (WAL is a no-op on :memory: but harmless).
-  try { db.pragma('journal_mode = WAL'); } catch {}
-  try { db.pragma('foreign_keys = ON'); } catch {}
+  try { db.pragma('journal_mode = WAL'); }
+  catch (e) { console.error('[db] useDb: WAL pragma failed:', e.message); }
+  try { db.pragma('foreign_keys = ON'); }
+  catch (e) { console.error('[db] useDb: foreign_keys pragma failed:', e.message); }
+  try { db.pragma('busy_timeout = 5000'); }
+  catch (e) { console.error('[db] useDb: busy_timeout pragma failed:', e.message); }
   _handles.real = db;
 }
 
@@ -306,6 +314,25 @@ function runMigrations(db) {
     db.prepare('UPDATE schema_version SET version = 8').run();
     })();
   }
+
+  if (current < 9) {
+    db.transaction(() => {
+    // ── Migration v9: persist tester baseline-at-test on each result row ───
+    // `results` and `batch_results` historically stored only the node-side
+    // measurement (`actual_mbps`). The live admin log + `/live` need the
+    // tester's contemporaneous baseline so the FAST/SLOW classification and
+    // the "Tester Baseline" column survive page refresh and historical lookup.
+    const resCols = db.prepare(`PRAGMA table_info(results)`).all().map(c => c.name);
+    if (!resCols.includes('baseline_mbps')) {
+      db.exec(`ALTER TABLE results ADD COLUMN baseline_mbps REAL`);
+    }
+    const brCols = db.prepare(`PRAGMA table_info(batch_results)`).all().map(c => c.name);
+    if (!brCols.includes('baseline_mbps')) {
+      db.exec(`ALTER TABLE batch_results ADD COLUMN baseline_mbps REAL`);
+    }
+    db.prepare('UPDATE schema_version SET version = 9').run();
+    })();
+  }
 }
 
 // ─── Run Mutations ───────────────────────────────────────────────────────────
@@ -414,6 +441,7 @@ function mapResultToRow(run_id, r) {
     sdk:             r.sdk || null,
     continent:       countryToContinent(r.country) || null,
     tester_os:       r.testerOs ?? r.os ?? process.platform ?? null,
+    baseline_mbps:   r.baselineAtTest ?? r.baselineMbps ?? r.baseline_mbps ?? null,
   };
 }
 
@@ -421,11 +449,11 @@ const _insertResultSql = `
   INSERT INTO results
     (run_id, node_addr, moniker, country, city, service_type, advertised_mbps,
      actual_mbps, latency_ms, handshake_ok, session_ok, error_code, error_message,
-     tested_at, raw_json, pass, stage, sdk, continent, tester_os)
+     tested_at, raw_json, pass, stage, sdk, continent, tester_os, baseline_mbps)
   VALUES
     (@run_id, @node_addr, @moniker, @country, @city, @service_type, @advertised_mbps,
      @actual_mbps, @latency_ms, @handshake_ok, @session_ok, @error_code, @error_message,
-     @tested_at, @raw_json, @pass, @stage, @sdk, @continent, @tester_os)
+     @tested_at, @raw_json, @pass, @stage, @sdk, @continent, @tester_os, @baseline_mbps)
 `;
 
 /**
@@ -954,7 +982,7 @@ export function getNodeErrors(addr, { limit = 50, stage = null } = {}, which) {
     stageClause = 'AND el.stage = @stage';
     params.stage = stage;
   }
-  return db.prepare(`
+  const rows = db.prepare(`
     SELECT el.*, r.tested_at, r.actual_mbps, r.node_addr, r.moniker,
            r.country AS country,
            r.city    AS city,
@@ -976,6 +1004,46 @@ export function getNodeErrors(addr, { limit = 50, stage = null } = {}, which) {
     ORDER BY el.captured_at DESC
     LIMIT @limit
   `).all(params);
+  if (rows.length > 0) return rows;
+
+  // Fallback: no error_logs row exists for this node yet (race between
+  // upsertResult writing the result and insertErrorLog completing, or an old
+  // schema-v1 row from before migration v2). Synthesize an entry from the
+  // most recent failed `results` row so the popup never shows empty for a
+  // failed node — this is the failure-log MUST contract from CLAUDE.md.
+  const stageWhere = stage ? 'AND COALESCE(r.stage, \'unknown\') = @stage' : '';
+  if (stage) params.stage = stage;
+  const fallback = db.prepare(`
+    SELECT NULL AS id, r.id AS result_id,
+           COALESCE(r.stage, 'unknown')          AS stage,
+           COALESCE(r.error_code, 'UNKNOWN')     AS error_code,
+           COALESCE(r.error_message, '(no message captured)') AS error_message,
+           NULL                                  AS log_snippet,
+           r.tested_at                           AS captured_at,
+           r.tested_at, r.actual_mbps, r.node_addr, r.moniker,
+           r.country AS country,
+           r.city    AS city,
+           CASE WHEN r.country IS NOT NULL AND length(r.country) = 2 THEN r.country END AS country_code,
+           r.service_type      AS service_type,
+           r.advertised_mbps   AS advertised_mbps,
+           r.latency_ms        AS latency_ms,
+           r.handshake_ok      AS handshake_ok,
+           r.session_ok        AS session_ok,
+           r.pass              AS pass,
+           r.sdk               AS sdk,
+           r.continent         AS continent,
+           r.tester_os         AS tester_os,
+           r.run_id            AS run_id,
+           r.raw_json          AS raw_json,
+           1                   AS synthesized
+    FROM results r
+    WHERE r.node_addr = @addr
+      AND (r.actual_mbps IS NULL OR r.error_code IS NOT NULL)
+      ${stageWhere}
+    ORDER BY r.tested_at DESC
+    LIMIT @limit
+  `).all(params);
+  return fallback;
 }
 
 /**
@@ -1137,10 +1205,10 @@ export function insertBatchResult(batch_id, r, which) {
   const info = db.prepare(`
     INSERT INTO batch_results
       (batch_id, node_address, type, moniker, country, country_code, city,
-       actual_mbps, peers, max_peers, error, error_code, tested_at)
+       actual_mbps, peers, max_peers, error, error_code, tested_at, baseline_mbps)
     VALUES
       (@batch_id, @node_address, @type, @moniker, @country, @country_code, @city,
-       @actual_mbps, @peers, @max_peers, @error, @error_code, @tested_at)
+       @actual_mbps, @peers, @max_peers, @error, @error_code, @tested_at, @baseline_mbps)
   `).run({
     batch_id,
     node_address: r.address || r.node_address || '',
@@ -1155,6 +1223,7 @@ export function insertBatchResult(batch_id, r, which) {
     error:        r.error ? String(r.error).slice(0, 500) : null,
     error_code:   r.errorCode || r.error_code || null,
     tested_at:    r.testedAt || r.tested_at || Date.now(),
+    baseline_mbps: r.baselineMbps ?? r.baseline_mbps ?? r.baselineAtTest ?? null,
   });
   return info.lastInsertRowid;
 }
@@ -1187,7 +1256,7 @@ export function getBatchResults(batchId, { limit = 500, offset = 0 } = {}, which
   if (!batch) return { batch: null, results: [] };
   const results = db.prepare(`
     SELECT node_address, type, moniker, country, country_code, city,
-           actual_mbps, peers, max_peers, error, error_code, tested_at
+           actual_mbps, peers, max_peers, error, error_code, tested_at, baseline_mbps
     FROM batch_results
     WHERE batch_id = @batch_id
     ORDER BY tested_at ASC
@@ -1217,7 +1286,8 @@ export function getActiveBatch(which) {
     SELECT node_address AS address,
            moniker, country, country_code AS countryCode, city, type,
            actual_mbps AS actualMbps, peers, max_peers AS maxPeers,
-           error, error_code AS errorCode, tested_at AS testedAt
+           error, error_code AS errorCode, tested_at AS testedAt,
+           baseline_mbps AS baselineMbps
     FROM batch_results
     WHERE batch_id = @batch_id
     ORDER BY tested_at ASC
@@ -1256,7 +1326,8 @@ export function getBatchWithNodes(batchId, which) {
     SELECT node_address AS address,
            moniker, country, country_code AS countryCode, city, type,
            actual_mbps AS actualMbps, peers, max_peers AS maxPeers,
-           error, error_code AS errorCode, tested_at AS testedAt
+           error, error_code AS errorCode, tested_at AS testedAt,
+           baseline_mbps AS baselineMbps
     FROM batch_results
     WHERE batch_id = @batch_id
     ORDER BY tested_at ASC
@@ -1292,7 +1363,8 @@ export function getLastBatch(which) {
     SELECT node_address AS address,
            moniker, country, country_code AS countryCode, city, type,
            actual_mbps AS actualMbps, peers, max_peers AS maxPeers,
-           error, error_code AS errorCode, tested_at AS testedAt
+           error, error_code AS errorCode, tested_at AS testedAt,
+           baseline_mbps AS baselineMbps
     FROM batch_results
     WHERE batch_id = @batch_id
     ORDER BY tested_at ASC
@@ -1311,8 +1383,15 @@ export function closeDb(which) {
   if (_handles.real) {
     // Force a checkpoint so WAL changes land in the main DB file before close.
     // Without this, an aborted shutdown can leave audit.db-wal multi-GB on disk.
-    try { _handles.real.pragma('wal_checkpoint(TRUNCATE)'); } catch {}
+    try { _handles.real.pragma('wal_checkpoint(TRUNCATE)'); }
+    catch (e) { console.error('[db] wal_checkpoint failed on close:', e.message); }
     _handles.real.close();
     _handles.real = null;
   }
 }
+
+// Auto-close on process exit so ad-hoc importers (e.g. `node -e
+// "import('./core/db.js')..."` verification scripts) never leave the WAL
+// locked. Without this, a hung script blocks every subsequent `getDb()` —
+// which is exactly how the server boot-hang on 2026-04-30 happened.
+process.on('exit', () => { try { closeDb(); } catch { /* exit handlers can't throw */ } });
