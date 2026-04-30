@@ -4,7 +4,7 @@ This project is built on the **Blue JS SDK** — the JavaScript SDK for Sentinel
 
 | | |
 |---|---|
-| **SDK Repository** | [Sentinel-Autonomybuilder/blue-js-sdk](https://github.com/Sentinel-Autonomybuilder/blue-js-sdk) |
+| **SDK Repository** | [Sentinel-Bluebuilder/blue-js-sdk](https://github.com/Sentinel-Bluebuilder/blue-js-sdk) |
 | **npm Package** | [`sentinel-dvpn-sdk`](https://www.npmjs.com/package/sentinel-dvpn-sdk) |
 | **License** | MIT |
 | **Installed Version** | ^1.5.1 |

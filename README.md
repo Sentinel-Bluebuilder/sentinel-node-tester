@@ -1,5 +1,5 @@
 [![npm version](https://img.shields.io/npm/v/sentinel-node-tester.svg)](https://www.npmjs.com/package/sentinel-node-tester)
-[![Tests](https://github.com/Sentinel-Autonomybuilder/sentinel-node-tester/actions/workflows/test.yml/badge.svg)](https://github.com/Sentinel-Autonomybuilder/sentinel-node-tester/actions/workflows/test.yml)
+[![Tests](https://github.com/Sentinel-Bluebuilder/sentinel-node-tester/actions/workflows/test.yml/badge.svg)](https://github.com/Sentinel-Bluebuilder/sentinel-node-tester/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org/)
 
@@ -36,7 +36,7 @@ Admin logs in at `/admin`, optionally flips the **Broadcast Live** toggle (contr
 
 ```bash
 # 1. Clone
-git clone https://github.com/Sentinel-Autonomybuilder/sentinel-node-tester.git
+git clone https://github.com/Sentinel-Bluebuilder/sentinel-node-tester.git
 cd sentinel-node-tester
 
 # 2. Install dependencies (downloads V2Ray binary for your platform)

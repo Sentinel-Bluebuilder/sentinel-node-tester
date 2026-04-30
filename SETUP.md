@@ -77,7 +77,7 @@ which wg-quick
 ## 3. Clone the project
 
 ```bash
-git clone https://github.com/Sentinel-Autonomybuilder/sentinel-node-tester
+git clone https://github.com/Sentinel-Bluebuilder/sentinel-node-tester
 cd sentinel-node-tester
 ```
 
