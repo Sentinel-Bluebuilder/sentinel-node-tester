@@ -136,8 +136,32 @@ Every runner MUST pin `state.testRun` and `state.runMode` at its top so prior-ru
 
 ## Release status
 - npm: `sentinel-node-tester@1.4.0` (latest).
-- GitHub: `Sentinel-Autonomybuilder/sentinel-node-tester` master + open PR #1 on `stop-and-error-popup`.
+- GitHub: `Sentinel-Autonomybuilder/sentinel-node-tester` master + open PR #2 on `stop-and-error-popup` (PR #1 merged).
 - Pushes to that org require `gh auth switch --user Sentinel-Autonomybuilder` first (default `non-org-account` gets 403).
+
+## Boot Path — DO NOT regress (post-2026-04-30)
+
+The server boot path was hardened after a silent-zombie incident: `node server.js` ran at ~93MB RAM, idle CPU, never bound port 3001, and **wrote zero bytes to stdout** because the process deadlocked during module init while stdout was block-buffered. The fixes below are load-bearing — every one of them must stay in place.
+
+### Invariants
+1. **Stdout MUST be line-buffered.** `server.js` calls `process.stdout._handle?.setBlocking?.(true)` and `process.stderr._handle?.setBlocking?.(true)` at the top of the file. Without this, redirected output (Start-Process, `node server.js > log.txt`) hides every console.log if the process hangs before `app.listen`. Do not remove.
+2. **No blocking I/O at module scope before `app.listen`.** `emergencyCleanupSync()` runs `sc query` / `sc stop` / `sc delete` on Windows, each with 5s timeouts. It MUST be called inside the `app.listen` callback via `setImmediate(...)`, never at module top-level. Same rule applies to any future cleanup, RPC handshake, or chain query that could block: defer it to after the port is bound.
+3. **Top-level `await import(...)` of platform modules MUST have a timeout.** The wireguard import is wrapped in `Promise.race([_wgImport, timeout(5000)])` with a fallback that sets `WG_AVAILABLE=false`. If you add another platform-specific dynamic import, copy the same pattern.
+4. **`uncaughtException` and `unhandledRejection` handlers MUST `process.exit(1)`** after running cleanup. Without `process.exit`, the event loop keeps going on a half-initialised state and you get the silent zombie back. Both handlers must also print the **full stack** (`err?.stack || err?.message || String(err)`) — `String(reason)` alone drops the stack when reason is an Error.
+5. **No empty `catch {}` on the boot path.** Project-wide rule per global CLAUDE.md, but enforced strictly for: `server.js` boot block (state-snapshot restore, setActiveDbRunId), `core/chain.js` getRpcClient/cleanupRpc/disconnectRpc, `core/db.js` PRAGMA + checkpoint catches. These all log via `console.error('[component] thing failed:', e.message)`. Cleanup-only catches in `audit/pipeline.js` tunnel teardown are intentional and stay silent.
+
+### DB lock hygiene
+- `core/db.js:_openHandle` sets `PRAGMA busy_timeout = 5000` so writers wait instead of failing immediately with `SQLITE_BUSY` when ad-hoc scripts compete for the WAL lock.
+- `core/db.js` registers `process.on('exit', closeDb)` so any importer (the server, CLI commands, ad-hoc `node -e "import('./core/db.js')..."` verifiers) releases the WAL lock cleanly on exit. **A hung verifier without this hook deadlocks every subsequent `getDb()` call.**
+- Never run an ad-hoc `node -e` import of `core/db.js` while the server is starting. If you must verify migrations, kill the server first or use a `:memory:` handle.
+- Scripts in `scripts/` (backfill-runs, cleanup-runaway-runs, probe-plan36-scan) hold the WAL lock for their full lifetime — don't run them in parallel with the server.
+
+### When boot still hangs
+The server now logs loudly on boot failure. If a future regression brings back the silent-zombie pattern, the diagnosis order is:
+1. Check stderr — if empty, `setBlocking` was reverted; restore the call at the top of `server.js`.
+2. If stderr shows an unhandledRejection without `process.exit`, the handler was reverted; restore lines 173-186 of `server.js`.
+3. If stderr shows `wg-import-timeout`, a platform module is hanging on a sync probe — investigate `platforms/<os>/wireguard.js` module-scope `execSync` calls.
+4. If port is held by a stale node PID, kill that PID specifically (NEVER `taskkill /F /IM node.exe`).
 
 ## Don't
 - Don't add public-facing buttons. Ever.
