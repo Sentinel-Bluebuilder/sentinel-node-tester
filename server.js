@@ -476,9 +476,11 @@ function saveCurrentRun(label) {
   if (state.activeDbRunId) {
     try {
       updateRunOnFinish(state.activeDbRunId, {
-        finished_at: Date.now(),
-        node_count:  results.length,
-        pass_count:  passed.length,
+        finished_at:    Date.now(),
+        node_count:     results.length,
+        pass_count:     passed.length,
+        spent_udvpn:    Number(state.spentUdvpn)    || 0,
+        refunded_udvpn: Number(state.refundedUdvpn) || 0,
       });
     } catch (dbErr) {
       console.error(`[db] updateRunOnFinish failed: ${dbErr.message}`);

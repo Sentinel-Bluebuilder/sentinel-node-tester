@@ -333,6 +333,25 @@ function runMigrations(db) {
     db.prepare('UPDATE schema_version SET version = 9').run();
     })();
   }
+
+  if (current < 10) {
+    db.transaction(() => {
+    // ── Migration v10: per-run wallet accounting ────────────────────────────
+    // Spend/refund were tracked only in-memory (state.spentUdvpn /
+    // state.refundedUdvpn) — once a run completed, the per-run total was
+    // lost. Persist on the runs row so historical accounting survives.
+    // Stored as INTEGER udvpn (1 P2P = 1_000_000 udvpn) — matches the wire
+    // unit used everywhere else in the chain layer.
+    const runCols = db.prepare(`PRAGMA table_info(runs)`).all().map(c => c.name);
+    if (!runCols.includes('spent_udvpn')) {
+      db.exec(`ALTER TABLE runs ADD COLUMN spent_udvpn INTEGER DEFAULT 0`);
+    }
+    if (!runCols.includes('refunded_udvpn')) {
+      db.exec(`ALTER TABLE runs ADD COLUMN refunded_udvpn INTEGER DEFAULT 0`);
+    }
+    db.prepare('UPDATE schema_version SET version = 10').run();
+    })();
+  }
 }
 
 // ─── Run Mutations ───────────────────────────────────────────────────────────
@@ -363,12 +382,20 @@ export function insertRun({
  * Update a run on completion.
  *
  * @param {number} runId
- * @param {{ finished_at: number, node_count: number, pass_count: number }} opts
+ * @param {{ finished_at: number, node_count: number, pass_count: number, spent_udvpn?: number, refunded_udvpn?: number }} opts
  */
-export function updateRunOnFinish(runId, { finished_at, node_count, pass_count }, which) {
+export function updateRunOnFinish(runId, { finished_at, node_count, pass_count, spent_udvpn, refunded_udvpn }, which) {
   const db = getDb(which);
+  // Persist accounting only when caller supplied a value — orphan cleanup on
+  // boot doesn't know the live spend totals and must not zero them out.
+  const setSpend = spent_udvpn != null
+    ? `, spent_udvpn = ${Number(spent_udvpn) | 0}`
+    : '';
+  const setRefund = refunded_udvpn != null
+    ? `, refunded_udvpn = ${Number(refunded_udvpn) | 0}`
+    : '';
   db.prepare(`
-    UPDATE runs SET finished_at = @finished_at, node_count = @node_count, pass_count = @pass_count
+    UPDATE runs SET finished_at = @finished_at, node_count = @node_count, pass_count = @pass_count${setSpend}${setRefund}
     WHERE id = @id
   `).run({ id: runId, finished_at, node_count, pass_count });
 }
