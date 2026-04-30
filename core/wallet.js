@@ -93,13 +93,15 @@ export async function forceReconnect() {
 // wallet are in flight simultaneously (e.g. an SNTR1 self-send + a session
 // start), they grab the same sequence → "expected N+1, got N". Serialize all
 // signAndBroadcast calls behind this chained promise so only one TX is in
-// flight at a time per process.
+// flight at a time per process. Exported so the fee-grant broadcaster in
+// core/chain.js can share the SAME mutex — separate mutexes still race.
 let _broadcastChain = Promise.resolve();
-function _broadcastSerialized(fn) {
+export function broadcastSerialized(fn) {
   const next = _broadcastChain.then(fn, fn);
   _broadcastChain = next.catch(() => {});
   return next;
 }
+const _broadcastSerialized = broadcastSerialized;
 
 // ─── signAndBroadcast with retry + reconnect ────────────────────────────────
 export async function signAndBroadcastRetry(client, address, messages, fee, broadcast, maxRetries = 3, opts = {}) {
