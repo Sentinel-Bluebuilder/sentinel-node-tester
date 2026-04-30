@@ -62,11 +62,11 @@ Returns `"status": "ready"` or lists specific issues to fix.
 
 | Platform | WireGuard | V2Ray | Admin Elevation |
 |----------|-----------|-------|-----------------|
-| **Windows** | Full (wireguard.exe service) | Full (bin/v2ray.exe) | SentinelAudit.vbs |
-| **macOS** | Stub (wg-quick not yet implemented) | Via PATH (`brew install v2ray`) | `sudo node server.js` |
-| **Linux** | Stub (wg-quick not yet implemented) | Via PATH | `sudo node server.js` |
+| **Windows** | Full (wireguard.exe service) | Full (bin/v2ray.exe) | `SentinelAudit.vbs` |
+| **macOS** | Full via `wg-quick` (`brew install wireguard-tools`) | Full (bin/v2ray, falls back to PATH / brew) | `sudo -E node server.js` |
+| **Linux** | Full via `wg-quick` (`apt install wireguard-tools`) | Full (bin/v2ray, falls back to PATH) | `sudo -E node server.js` |
 
-Windows is the primary tested platform. macOS/Linux support V2Ray nodes but WireGuard integration is pending.
+All three platforms run the same audit pipeline. WireGuard nodes require root/Administrator on every platform. V2Ray nodes don't require elevation.
 
 ---
 

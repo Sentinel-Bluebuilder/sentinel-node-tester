@@ -14,7 +14,7 @@ This tool is built for **anyone** to 1-shot launch and test:
 4. **Test Devices** — Run from a laptop, server, VM, cloud instance. Each device's network characteristics affect tunnel performance differently. The tool records it all.
 5. **Cross-Reference Everything** — Filter results by SDK + OS + node + transport. Find patterns: "grpc/none fails on C# but works on JS" or "WireGuard is 2x slower on Linux than Windows." This is how you ship production SDKs.
 
-**Anyone can clone this repo, run `npm install`, launch `SentinelAudit.vbs`, and have a full network audit dashboard in 60 seconds.** No configuration beyond a funded wallet mnemonic in `.env`.
+**Anyone can clone this repo, run `npm install`, launch the dashboard (`SentinelAudit.vbs` on Windows, `sudo -E node server.js` on macOS/Linux), and have a full network audit in 60 seconds.** No configuration beyond a funded wallet mnemonic in `.env`.
 
 ### Two Test Modes
 The toolbar ships **`Test ALL (P2P)`** and **`Test Sub. Plan`** side by side.

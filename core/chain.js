@@ -83,6 +83,47 @@ export function cleanupRpc() {
   }
 }
 
+/**
+ * Run an RPC operation with a timeout. If the first attempt times out or
+ * throws, rotate the cached client (`cleanupRpc()`) and retry once on a
+ * fresh endpoint via `createRpcQueryClientWithFallback()`.
+ *
+ * The cached client in `getRpcClient()` is sticky — it picks one endpoint at
+ * first connect and never rotates if that endpoint later 502s mid-session.
+ * This wrapper unsticks it for any consumer that opts in.
+ *
+ * @template T
+ * @param {(client: any) => Promise<T>} op - operation receiving the RPC client
+ * @param {string} label - short label used in timeout/error messages
+ * @param {{ timeoutMs?: number }} [opts]
+ * @returns {Promise<T>}
+ */
+export async function withFreshRpc(op, label, opts = {}) {
+  const timeoutMs = opts.timeoutMs ?? 12000;
+  const withTimeout = (p, lbl) => Promise.race([
+    p,
+    new Promise((_, rej) => setTimeout(
+      () => rej(new Error(`${lbl} timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    )),
+  ]);
+  const attempt = async (lbl) => {
+    const client = await withTimeout(getRpcClient(), `${lbl}:getRpcClient`);
+    if (!client) throw new Error(`${lbl}: RPC client unavailable`);
+    return withTimeout(Promise.resolve().then(() => op(client)), lbl);
+  };
+  try {
+    return await attempt(label);
+  } catch (err) {
+    cleanupRpc();
+    try {
+      return await attempt(`${label}(retry)`);
+    } catch (err2) {
+      throw new Error(`${label} failed (initial=${err.message}; retry=${err2.message})`);
+    }
+  }
+}
+
 // ─── Node List (RPC primary, LCD fallback) ─────────────────────────────────
 
 /**
@@ -268,18 +309,20 @@ export function invalidateNodeCache() {
  * Tries RPC first (fast single-node lookup), falls back to LCD.
  */
 export async function queryNodeStatusDirect(nodeAddr) {
-  // Try RPC first
+  // RPC first — withFreshRpc rotates a wedged endpoint instead of hanging.
   try {
-    const client = await getRpcClient();
-    if (client) {
-      const node = await rpcQueryNode(client, nodeAddr);
-      if (node) {
-        const st = node.status === 1 || node.status === '1' ? 1 : 0;
-        return { active: st === 1, status: st };
-      }
-      // rpcQueryNode returned null — could be inactive or not found, try LCD
+    const node = await withFreshRpc(
+      (client) => rpcQueryNode(client, nodeAddr),
+      'queryNodeStatusDirect',
+    );
+    if (node) {
+      const st = node.status === 1 || node.status === '1' ? 1 : 0;
+      return { active: st === 1, status: st };
     }
-  } catch { /* fall through to LCD */ }
+    // null result — could be inactive or not found, try LCD
+  } catch (err) {
+    console.warn(`[queryNodeStatusDirect] RPC failed (${nodeAddr}): ${err.message}`);
+  }
 
   // LCD fallback
   for (const lcd of LCD_LIST) {
@@ -523,32 +566,32 @@ export async function discoverPlans(broadcast, opts = {}) {
   // Try RPC ABCI first: /sentinel.plan.v3.QueryService/QueryPlans
   // Request proto: field 1 = status (varint enum 1=active), field 2 = pagination
   try {
-    const rpcClient = await getRpcClient();
-    if (rpcClient) {
-      const PAGE_SIZE = 1000;
-      const pagination = encodeRpcVarintField(3, PAGE_SIZE);
-      const request = concatBytes([
-        encodeRpcVarintField(1, 1),       // status = active
-        encodeRpcEmbedded(2, pagination), // pagination
-      ]);
-      const result = await rpcClient.queryClient.queryAbci(
+    const PAGE_SIZE = 1000;
+    const pagination = encodeRpcVarintField(3, PAGE_SIZE);
+    const request = concatBytes([
+      encodeRpcVarintField(1, 1),       // status = active
+      encodeRpcEmbedded(2, pagination), // pagination
+    ]);
+    const result = await withFreshRpc(
+      (client) => client.queryClient.queryAbci(
         '/sentinel.plan.v3.QueryService/QueryPlans',
         request,
-      );
-      if (result?.value && result.value.length > 0) {
-        const fields = decodeRpcProto(new Uint8Array(result.value));
-        if (fields[1] && fields[1].length > 0) {
-          const plans = fields[1].map(entry => {
-            const pf = decodeRpcProto(entry.value);
-            return {
-              id: pf[1]?.[0] ? String(pf[1][0].value) : null,
-              provAddress: pf[2]?.[0] ? decodeRpcString(pf[2][0].value) : null,
-              status: 'active',
-            };
-          }).filter(p => p.id);
-          if (broadcast) broadcast('log', { msg: `Discovered ${plans.length} active plans (RPC)` });
-          return plans;
-        }
+      ),
+      'discoverPlans',
+    );
+    if (result?.value && result.value.length > 0) {
+      const fields = decodeRpcProto(new Uint8Array(result.value));
+      if (fields[1] && fields[1].length > 0) {
+        const plans = fields[1].map(entry => {
+          const pf = decodeRpcProto(entry.value);
+          return {
+            id: pf[1]?.[0] ? String(pf[1][0].value) : null,
+            provAddress: pf[2]?.[0] ? decodeRpcString(pf[2][0].value) : null,
+            status: 'active',
+          };
+        }).filter(p => p.id);
+        if (broadcast) broadcast('log', { msg: `Discovered ${plans.length} active plans (RPC)` });
+        return plans;
       }
     }
   } catch (rpcErr) {
@@ -591,33 +634,33 @@ export async function querySubscriptions(walletAddress) {
   // afterwards and merge any IDs RPC missed.
   const rpcOut = [];
   try {
-    const rpcClient = await getRpcClient();
-    if (rpcClient) {
-      // Bug fix: SDK default limit is 100 — wallets with long sub history (older
-      // expired subs still iterated by chain) silently drop newer subscriptions.
-      const rawEntries = await rpcQuerySubscriptionsForAccount(rpcClient, walletAddress, { limit: 5000 });
-      if (rawEntries && rawEntries.length > 0) {
-        for (const entry of rawEntries) {
-          try {
-            const bytes = entry instanceof Uint8Array ? entry
-              : entry.value instanceof Uint8Array ? entry.value
-              : null;
-            if (!bytes) continue;
-            const anyDecoded = _decodeAny(bytes);
-            if (!anyDecoded.valueBytes) continue;
-            const sub = _decodePlanSubscription(anyDecoded.valueBytes);
-            if (!sub.planId) continue;
-            rpcOut.push({
-              id: sub.subscriptionId,
-              plan_id: sub.planId,
-              status: 'STATUS_ACTIVE',
-              expiry: null,
-              ownerAddress: walletAddress, // RPC only returns direct subs
-              viaAllocation: false,
-              grantedBytes: null,
-            });
-          } catch { /* skip malformed */ }
-        }
+    // Bug fix: SDK default limit is 100 — wallets with long sub history (older
+    // expired subs still iterated by chain) silently drop newer subscriptions.
+    const rawEntries = await withFreshRpc(
+      (client) => rpcQuerySubscriptionsForAccount(client, walletAddress, { limit: 5000 }),
+      'querySubscriptions',
+    );
+    if (rawEntries && rawEntries.length > 0) {
+      for (const entry of rawEntries) {
+        try {
+          const bytes = entry instanceof Uint8Array ? entry
+            : entry.value instanceof Uint8Array ? entry.value
+            : null;
+          if (!bytes) continue;
+          const anyDecoded = _decodeAny(bytes);
+          if (!anyDecoded.valueBytes) continue;
+          const sub = _decodePlanSubscription(anyDecoded.valueBytes);
+          if (!sub.planId) continue;
+          rpcOut.push({
+            id: sub.subscriptionId,
+            plan_id: sub.planId,
+            status: 'STATUS_ACTIVE',
+            expiry: null,
+            ownerAddress: walletAddress, // RPC only returns direct subs
+            viaAllocation: false,
+            grantedBytes: null,
+          });
+        } catch { /* skip malformed */ }
       }
     }
   } catch (rpcErr) {
@@ -689,14 +732,16 @@ export async function querySubscriptions(walletAddress) {
 
 // ─── Balance (RPC primary, LCD fallback) ────────────────────────────────────
 export async function queryBalance(address, denom = 'udvpn') {
-  // RPC primary
+  // RPC primary — wrapped so a wedged endpoint gets rotated rather than hanging.
   try {
-    const client = await getRpcClient();
-    if (client) {
-      const coin = await rpcQueryBalance(client, address, denom);
-      return { denom: coin?.denom || denom, amount: String(coin?.amount || '0') };
-    }
-  } catch { }
+    const coin = await withFreshRpc(
+      (client) => rpcQueryBalance(client, address, denom),
+      'queryBalance',
+    );
+    return { denom: coin?.denom || denom, amount: String(coin?.amount || '0') };
+  } catch (err) {
+    console.warn('[queryBalance] RPC failed, falling back to LCD:', err.message);
+  }
 
   // LCD fallback
   try {
@@ -720,16 +765,32 @@ export async function hasActiveSubscription(walletAddress, planId) {
 
 // ─── Sub. Plan mode: enriched subscriber-plan query ─────────────────────────
 /**
- * Decode a Plan protobuf message (raw ABCI bytes) → { id, provAddress }.
- * Plan proto: field 1 = id (uint64), field 2 = prov_address (string).
+ * Normalize whatever `rpcQueryPlan` returned to `{ id, provAddress }`.
+ *
+ * The SDK once returned raw protobuf bytes; current versions return a parsed
+ * object `{ id, prov_address, ... }`. Handle both so a future SDK refactor in
+ * either direction doesn't silently null out every plan owner.
  */
-function decodePlanRaw(bytes) {
-  if (!bytes) return null;
-  const f = decodeRpcProto(new Uint8Array(bytes));
-  return {
-    id: f[1]?.[0] ? String(f[1][0].value) : null,
-    provAddress: f[2]?.[0] ? decodeRpcString(f[2][0].value) : null,
-  };
+function decodePlanRaw(maybe) {
+  if (!maybe) return null;
+  // Already-parsed object from current SDK
+  if (typeof maybe === 'object' && !ArrayBuffer.isView(maybe) && !(maybe instanceof ArrayBuffer)) {
+    const provAddress = maybe.prov_address || maybe.provAddress || null;
+    if (provAddress || maybe.id != null) {
+      return { id: maybe.id != null ? String(maybe.id) : null, provAddress };
+    }
+  }
+  // Raw bytes path (legacy SDK)
+  try {
+    const f = decodeRpcProto(new Uint8Array(maybe));
+    return {
+      id: f[1]?.[0] ? String(f[1][0].value) : null,
+      provAddress: f[2]?.[0] ? decodeRpcString(f[2][0].value) : null,
+    };
+  } catch (e) {
+    console.warn('[decodePlanRaw] could not decode plan payload:', e.message);
+    return null;
+  }
 }
 
 /**
@@ -739,13 +800,17 @@ function decodePlanRaw(bytes) {
  */
 export async function queryPlanOwnerSent(planId) {
   try {
-    const client = await getRpcClient();
-    if (!client) return null;
-    const bytes = await rpcQueryPlan(client, BigInt(planId));
-    const plan = decodePlanRaw(bytes);
+    const result = await withFreshRpc(
+      (client) => rpcQueryPlan(client, BigInt(planId)),
+      `queryPlanOwnerSent(${planId})`,
+    );
+    const plan = decodePlanRaw(result);
     if (!plan?.provAddress) return null;
     return sentprovToSent(plan.provAddress);
-  } catch { return null; }
+  } catch (e) {
+    console.warn(`[queryPlanOwnerSent] plan ${planId}:`, e.message);
+    return null;
+  }
 }
 
 /**
@@ -768,7 +833,6 @@ export async function querySubscriberPlansEnriched(walletAddress) {
 
   const ownerCache = new Map();
   const nodeCountCache = new Map();
-  const rpcClient = await getRpcClient();
 
   const results = [];
   for (const s of subs) {
@@ -783,9 +847,13 @@ export async function querySubscriberPlansEnriched(walletAddress) {
 
     let feeGrantActive = false;
     let feeGrantCheckFailed = false;
-    if (ownerSentAddr) {
+    const selfGranter = !!ownerSentAddr && ownerSentAddr === walletAddress;
+    if (ownerSentAddr && !selfGranter) {
       try {
-        const allowance = await queryFeeGrantRpcFirst(rpcClient, lcd, ownerSentAddr, walletAddress);
+        const allowance = await withFreshRpc(
+          (client) => queryFeeGrantRpcFirst(client, lcd, ownerSentAddr, walletAddress),
+          `queryFeeGrant(plan=${planId})`,
+        );
         feeGrantActive = !!allowance;
       } catch (e) {
         console.warn('[querySubscriberPlansEnriched] feeGrant query', e.message);
@@ -796,13 +864,14 @@ export async function querySubscriberPlansEnriched(walletAddress) {
     let nodeCount = nodeCountCache.get(planId);
     if (nodeCount === undefined) {
       nodeCount = 0;
-      if (rpcClient) {
-        try {
-          const nodes = await rpcQueryNodesForPlan(rpcClient, BigInt(planId), { status: 1, limit: 500 });
-          nodeCount = nodes.length;
-        } catch (e) {
-          console.warn('[querySubscriberPlansEnriched] rpcQueryNodesForPlan', e.message);
-        }
+      try {
+        const nodes = await withFreshRpc(
+          (client) => rpcQueryNodesForPlan(client, BigInt(planId), { status: 1, limit: 500 }),
+          `nodesForPlan(${planId})`,
+        );
+        nodeCount = nodes.length;
+      } catch (e) {
+        console.warn('[querySubscriberPlansEnriched] rpcQueryNodesForPlan', e.message);
       }
       if (nodeCount === 0) {
         try {
@@ -825,6 +894,7 @@ export async function querySubscriberPlansEnriched(walletAddress) {
       expiry: s.expiry || null,
       feeGrantActive,
       feeGrantCheckFailed,
+      selfGranter,
       nodeCount,
       viaAllocation: !!s.viaAllocation,
       grantedBytes: s.grantedBytes || null,
@@ -932,7 +1002,14 @@ export async function queryFeeGrantRpcFirst(client, lcd, granter, grantee) {
       // Empty response = no grant found
       return null;
     } catch (e) {
-      console.warn('[queryFeeGrantRpcFirst] RPC failed, falling back to LCD:', e.message);
+      // Cosmos SDK reports "no grant exists" as a chain error, not an empty
+      // response. Treat it as a successful negative answer (null) rather than
+      // an RPC failure that should fall back to LCD.
+      const msg = String(e?.message || '');
+      if (/fee[- ]?grant not found/i.test(msg) || /allowance does not exist/i.test(msg)) {
+        return null;
+      }
+      console.warn('[queryFeeGrantRpcFirst] RPC failed, falling back to LCD:', msg);
     }
   }
   // LCD fallback

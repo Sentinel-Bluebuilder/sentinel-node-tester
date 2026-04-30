@@ -15,7 +15,7 @@ Sentinel Node Tester discovers every active dVPN node on the Sentinel blockchain
 
 ## Core flow
 
-Admin logs in at `/admin`, clicks the **Public Testing** toggle, and selects a test mode (P2P or subscription). The continuous audit loop starts, cycling through every online node; public visitors see a real-time progress banner on `/` and a live iteration feed at `/live` with only filter and search controls. The operator stops the loop from the same toggle. No public user can trigger any test.
+Admin logs in at `/admin`, optionally flips the **Broadcast Live** toggle (controls whether public surfaces show the live in-flight audit or the last-completed snapshot), and starts an audit via `POST /api/start`. The continuous loop cycles through every online node; public visitors at `/` browse the node directory and at `/live` watch the real-time iteration feed via SSE — both are read-only. The operator stops the loop with `POST /api/stop`. No public user can trigger any test.
 
 ---
 
@@ -26,9 +26,9 @@ Admin logs in at `/admin`, clicks the **Public Testing** toggle, and selects a t
 | `/` | Public | Node directory — search, filter, sort, detail drawer. |
 | `/live` | Public | Real-time audit progress + results feed via SSE. |
 | `/node/:addr` | Public | Single-node result detail page. |
-| `/admin` (configurable) | Admin | Full control panel — start/stop audits, public-test toggle, logs. |
+| `/admin` (configurable) | Admin | Full control panel — start/stop audits, broadcast toggle, logs. |
 | `/api/public/*` | Public | Read-only JSON API: nodes, stats, countries, run summaries, SSE events. |
-| `/api/admin/public-test/*` | Admin | Start/stop/status for the continuous loop. Admin session required. |
+| `/api/start`, `/api/stop`, `/api/broadcast` | Admin | Audit lifecycle + broadcast-live toggle. Admin session required. |
 
 ---
 
@@ -39,18 +39,22 @@ Admin logs in at `/admin`, clicks the **Public Testing** toggle, and selects a t
 git clone https://github.com/Sentinel-Autonomybuilder/sentinel-node-tester.git
 cd sentinel-node-tester
 
-# 2. Install dependencies
+# 2. Install dependencies (downloads V2Ray binary for your platform)
 npm install
 
-# 3. Create .env
+# 3. Create .env and set MNEMONIC to your 12-word Cosmos phrase
 cp .env.example .env
-# Open .env and set MNEMONIC to your 12-word Cosmos phrase
 
 # 4. Start
-npm start
+#    Windows:    cscript //nologo SentinelAudit.vbs   (auto-elevates to Admin)
+#    macOS:      sudo -E node server.js               (root for WireGuard)
+#    Linux:      sudo -E node server.js
+#    Any OS:     npm start                            (V2Ray-only, ~70% nodes)
 ```
 
 Open **http://localhost:3001** in your browser. No `ADMIN_TOKEN` needed for local dev — the admin surface defaults to unauthenticated (safe on localhost only).
+
+> **WireGuard requires admin/root.** Without elevation, V2Ray-only audits still run (~70% of nodes). Full setup walkthrough for all three platforms: [`SETUP.md`](SETUP.md).
 
 ---
 
@@ -72,27 +76,29 @@ Full reference: [docs/CLI.md](docs/CLI.md)
 
 ---
 
-## Two test modes
+## Audit modes
 
-### Test ALL (P2P)
+### P2P (default)
 
-Scans every active node on the Sentinel chain and opens a paid session on each. The tester wallet pays gas and bandwidth costs directly from its P2P balance. Suitable for full network audits.
+Scans every active node on the Sentinel chain and opens a paid session on each. The tester wallet pays gas and bandwidth costs directly from its P2P balance. Suitable for full network audits. This is what `POST /api/start` does with no plan/subscription params.
 
-### Test Sub. Plan
+### Subscription / fee-granted
 
-Lists all active plan subscriptions held by the tester wallet. Pick a plan; only that plan's nodes are scanned. Each session transaction is broadcast via `broadcastWithFeeGrant` using the plan operator's on-chain fee grant allowance — the tester pays zero gas. This mirrors the flow used by commercial Sentinel apps where end users hold no P2P tokens.
+Pass `subscriptionId` + `subscriptionGranter` (or `planId`) to `POST /api/start`. Only nodes attached to that plan are scanned. Each session transaction is broadcast via `broadcastWithFeeGrant` using the plan operator's on-chain fee-grant allowance — the tester pays zero gas. This mirrors the flow used by commercial Sentinel apps where end users hold no P2P tokens.
+
+### TEST RUN
+
+Pass `testRun: true` in the body or `?testRun=1` to `POST /api/start`. The pipeline skips chain operations and payments and writes a `mode='test'` run row. Used for demos and UI smoke checks. See `CLAUDE.md` — TEST RUN code paths are immutable.
 
 ---
 
 ## Public deployment
 
-Set `PUBLIC_MODE=true` in your `.env`. This **requires** `ADMIN_TOKEN` to be set — the server will refuse to start without it. Generate a token:
+Set `ADMIN_TOKEN` in `.env` to enable the admin login page. Generate a token:
 
 ```bash
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
-
-Put the result in `ADMIN_TOKEN` in your `.env`. This token becomes the password for the `/admin` login page.
 
 Optionally change the admin path to something unguessable:
 
@@ -100,7 +106,7 @@ Optionally change the admin path to something unguessable:
 ADMIN_PATH=/my-secret-ops-panel
 ```
 
-Put the application behind a reverse proxy (nginx, Caddy) that terminates HTTPS. The admin surface should not be reachable over plain HTTP in production.
+Put the application behind a reverse proxy (nginx, Caddy) that terminates HTTPS. The admin surface should not be reachable over plain HTTP in production. The `Broadcast Live` toggle (`POST /api/broadcast`) controls whether the public `/` and `/live` pages stream the in-flight audit or only the last-completed snapshot.
 
 See [docs/OPERATOR-RUNBOOK.md](docs/OPERATOR-RUNBOOK.md) for the full deployment checklist.
 
@@ -111,35 +117,39 @@ See [docs/OPERATOR-RUNBOOK.md](docs/OPERATOR-RUNBOOK.md) for the full deployment
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `MNEMONIC` | Yes | — | 12-word Cosmos mnemonic. Signs session and gas transactions. Never commit to git. |
+| `RPC` | No | `https://rpc.sentinel.co:443` | Primary RPC endpoint for chain queries and broadcasts. |
+| `DENOM` | No | `udvpn` | Token denomination. Do not change. |
+| `GAS_PRICE` | No | `0.2udvpn` | Gas price for transactions. |
 | `PORT` | No | `3001` | HTTP port the server listens on. |
-| `PUBLIC_MODE` | No | `false` | Set `true` to enable public-facing mode. Enforces `ADMIN_TOKEN`. |
-| `ADMIN_TOKEN` | If PUBLIC_MODE | — | Admin login password. Required when `PUBLIC_MODE=true`. |
+| `LISTEN_HOST` | No | `127.0.0.1` | Bind address. Set `0.0.0.0` to expose on the network (with `ADMIN_TOKEN`). |
+| `ADMIN_TOKEN` | Recommended | — | Admin login password. If unset, admin surface is unauthenticated (localhost dev only). |
 | `ADMIN_PATH` | No | `/admin` | URL prefix for the admin panel. Change to an unguessable path in production. |
-| `ALLOW_PUBLIC_TEST` | No | `false` | Set `true` to allow public visitors to trigger tests (not recommended). |
-| `LCD_ENDPOINTS` | No | Built-in list | Comma-separated override for Sentinel LCD endpoints. |
-| `DNS_SERVERS` | No | HNS preset | Comma-separated DNS IPs to use inside tunnels. Presets: `hns`, `google`, `cloudflare`, `quad9`, `opendns`. |
-| `NODE_DELAY_MS` | No | `5000` | Milliseconds to wait between node tests. Keep >= 5000 to avoid chain rate limits. |
-| `MAX_NODES` | No | `0` (all) | Cap on nodes tested per run. `0` means no limit. |
+| `PUBLIC_MODE` | No | `false` | When `true`, root path serves the public dashboard; admin moves to `ADMIN_PATH`. Requires `ADMIN_TOKEN`. |
+| `INSECURE_COOKIE` | No | `false` | Allow admin session cookies over HTTP (local dev only — production must use HTTPS). |
+| `ENABLE_HSTS` | No | `false` | Send `Strict-Transport-Security` header (set behind HTTPS proxy in production). |
+| `LCD_ENDPOINTS` | No | Built-in fallback | Comma-separated LCD URLs used only if RPC fails. |
+| `DNS_SERVERS` | No | unset | Comma-separated DNS IPs to use inside tunnels. |
+| `NODE_DELAY_MS` | No | `5000` | Milliseconds between node tests. Keep ≥ 5000 to avoid chain rate limits. |
+| `MAX_NODES` | No | `0` (all) | Cap on nodes tested per run. `0` = no limit. |
 | `TEST_MB` | No | `10` | Megabytes transferred per speed test. |
-| `GIGABYTES_PER_NODE` | No | `1` | Gigabytes allocated when opening a session. |
-| `INSECURE_COOKIE` | No | `false` | Set `true` to allow admin session cookies over HTTP (local dev only). |
+| `GIGABYTES_PER_NODE` | No | `1` | Gigabytes allocated per opened session. |
+| `ALLOW_PUBLIC_TEST` | No | `false` | If `true`, public visitors can trigger a pre-configured test against `PUBLIC_TEST_PLAN_ID` / `PUBLIC_TEST_SUB_ID` / `PUBLIC_TEST_SUB_GRANTER`. Off by default — leave off unless you intend to spend your wallet on visitor traffic. |
+| `WIREGUARD_PATH` | No | auto-detected | Override the `wg`/`wg-quick` binary path on Linux/macOS. |
 
 ---
 
 ## Architecture
 
-Single Express process on port 3001. Two audit paths: `audit/pipeline.js` is the single-pass engine called by the admin "New Test" and "Retest Failed" buttons; `audit/continuous.js` wraps pipeline in a recursive loop with configurable inter-pass delay, emitting `loop:*` and `iteration:*` SSE events consumed by the public `/live` page. All results persist to `audit.db` (SQLite via `better-sqlite3`); raw per-run JSON lands in `runs/`. The public SSE stream (`/api/public/events`) is allow-listed to `public-test:*` events only — wallet addresses, plan IDs, and fee-grant internals are never sent to public consumers.
+Single Express process on port 3001. Two audit paths: `audit/pipeline.js` is the single-pass engine called by the admin "New Test" and "Retest Failed" buttons; `audit/continuous.js` wraps pipeline in a recursive loop with configurable inter-pass delay, emitting `loop:*` and `iteration:*` SSE events consumed by the public `/live` page. All results persist to `audit.db` (SQLite via `better-sqlite3`); raw per-run JSON lands in `results/`. The public SSE stream (`/api/public/events`) only forwards events while the `broadcastLive` toggle is on, and the redaction path strips wallet addresses, plan IDs, and fee-grant internals before fan-out.
+
+For module dependency graph + per-stage flow, see [`ARCH.md`](ARCH.md). For decisions and "why we did X", see [`DECISIONS.md`](DECISIONS.md). For all reference docs, see [`docs/INDEX.md`](docs/INDEX.md).
 
 ---
 
 ## Testing this tool
 
 ```bash
-# Unit + smoke suite
 npm test
-
-# Public-mode smoke test (start server first, then)
-node tools/smoke-public-mode.mjs
 ```
 
 ---

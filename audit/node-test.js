@@ -28,36 +28,29 @@ import {
   buildV2RayClientConfig, writeWgConfig, extractSessionId, waitForPort,
 } from '../protocol/v3protocol.js';
 import { speedtestDirect, speedtestViaSocks5, sleep, resolveSpeedtestIPs, checkGoogleDirect, checkGoogleViaSocks5 } from '../protocol/speedtest.js';
-// Platform-aware imports
+// Platform-aware imports — Windows / Linux / macOS each have full implementations
 let installWgTunnel, uninstallWgTunnel, WG_AVAILABLE, emergencyCleanupSync;
 let spawnV2Ray, cleanupV2Ray, killAllV2Ray, killV2RayByPid, nextSocksPort;
 if (process.platform === 'win32') {
   ({ installWgTunnel, uninstallWgTunnel, WG_AVAILABLE, emergencyCleanupSync } = await import('../platforms/windows/wireguard.js'));
   ({ spawnV2Ray, cleanupV2Ray, killAllV2Ray, killV2RayByPid, nextSocksPort } = await import('../platforms/windows/v2ray.js'));
+} else if (process.platform === 'linux') {
+  ({ installWgTunnel, uninstallWgTunnel, WG_AVAILABLE, emergencyCleanupSync } = await import('../platforms/linux/wireguard.js'));
+  ({ spawnV2Ray, cleanupV2Ray, killAllV2Ray, killV2RayByPid, nextSocksPort } = await import('../platforms/linux/v2ray.js'));
+} else if (process.platform === 'darwin') {
+  ({ installWgTunnel, uninstallWgTunnel, WG_AVAILABLE, emergencyCleanupSync } = await import('../platforms/macos/wireguard.js'));
+  ({ spawnV2Ray, cleanupV2Ray, killAllV2Ray, killV2RayByPid, nextSocksPort } = await import('../platforms/macos/v2ray.js'));
 } else {
-  const { spawn: _spawn, execSync: _execSync } = await import('child_process');
-  const { writeFileSync: _wfs } = await import('fs');
-  const _os = await import('os');
-  const _path = await import('path');
   WG_AVAILABLE = false;
   emergencyCleanupSync = () => {};
   installWgTunnel = async () => { throw new Error('WireGuard not implemented for ' + process.platform); };
   uninstallWgTunnel = async () => {};
   let _socksPort = 10800;
   nextSocksPort = async () => _socksPort++;
-  spawnV2Ray = async (config, outbound, socksPort) => {
-    const cfgPath = _path.join(_os.tmpdir(), 'sentinel-v2ray.json');
-    _wfs(cfgPath, JSON.stringify(config, null, 2));
-    const proc = _spawn('v2ray', ['run', '-config', cfgPath], { stdio: 'pipe' });
-    let stderr = '', stdout = '';
-    proc.stderr?.on('data', d => { stderr += d.toString(); });
-    proc.stdout?.on('data', d => { stdout += d.toString(); });
-    proc.on('error', err => { stderr += `spawn error: ${err.message}`; });
-    return { proc, cfgPath, getStdout: () => stdout, getStderr: () => stderr };
-  };
-  cleanupV2Ray = (proc) => { if (proc) try { proc.kill(); } catch {} };
-  killAllV2Ray = () => { try { _execSync('pkill -f v2ray 2>/dev/null', { stdio: 'ignore' }); } catch {} };
-  killV2RayByPid = (pid) => { if (pid) try { process.kill(pid); } catch {} };
+  spawnV2Ray = async () => { throw new Error('V2Ray not implemented for ' + process.platform); };
+  cleanupV2Ray = () => {};
+  killAllV2Ray = () => {};
+  killV2RayByPid = () => {};
 }
 function logFailure(nodeAddr, error, context = {}) {
   const entry = { ts: new Date().toISOString(), node: nodeAddr, error, ...context };

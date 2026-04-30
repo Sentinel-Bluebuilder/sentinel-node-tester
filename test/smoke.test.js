@@ -33,15 +33,17 @@ async function run() {
     'audit/retry.js', 'audit/pipeline.js', 'audit/node-test.js',
     'index.js',
   ];
-  // Windows-only platform modules — skip on other platforms
-  const windowsModules = [
-    'platforms/windows/wireguard.js', 'platforms/windows/v2ray.js', 'platforms/windows/network.js',
-  ];
-  const IS_WIN32 = process.platform === 'win32';
-  if (!IS_WIN32) {
-    console.log('   Skipping Windows-only platform modules on non-Windows platform');
+  // Per-platform modules — only load the ones that match the runtime OS
+  const platformModulesByOs = {
+    win32:  ['platforms/windows/wireguard.js', 'platforms/windows/v2ray.js', 'platforms/windows/network.js'],
+    linux:  ['platforms/linux/wireguard.js', 'platforms/linux/v2ray.js'],
+    darwin: ['platforms/macos/wireguard.js', 'platforms/macos/v2ray.js'],
+  };
+  const platformModules = platformModulesByOs[process.platform] || [];
+  if (platformModules.length === 0) {
+    console.log(`   No platform-specific modules registered for ${process.platform}`);
   }
-  const allModules = IS_WIN32 ? [...modules, ...windowsModules] : modules;
+  const allModules = [...modules, ...platformModules];
   for (const m of allModules) {
     try { await import('../' + m); assert(true, m); }
     catch (e) { assert(false, `IMPORT ${m}: ${e.message.split('\n')[0]}`); }

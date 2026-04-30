@@ -13,6 +13,8 @@ import { adminOnly, attachAdminFlag, safeEq, setAdminSessionValidator } from './
 import { rateLimit, sseLimit } from './core/rate-limit.js';
 
 import { MNEMONIC, DENOM, GAS_PRICE, PORT, LCD_ENDPOINTS, PROJECT_ROOT, DNS_PRESETS, ACTIVE_DNS, setActiveDns } from './core/constants.js';
+import { getSettings, updateSettings, getDefaultSettings } from './core/settings.js';
+import { queryReports as queryOnchainReports } from './core/onchain-report.js';
 import { cachedWalletSetup, createFreshClient } from './core/wallet.js';
 import { ensureLcd, getActiveLcd, cleanupRpc, getAllNodes } from './core/chain.js';
 import { nodeStatusV3 } from './protocol/v3protocol.js';
@@ -25,14 +27,19 @@ import {
   searchErrors, getNetworkStats,
   listBatches, getBatchResults, getActiveBatch, getLastBatch,
   insertBatch, updateBatchOnFinish, insertBatchResult,
+  reopenBatch, getBatchById, getBatchWithNodes,
   getDb,
 } from './core/db.js';
 import * as continuous from './audit/continuous.js';
 import { getInstalledVersions, verifyAllSdks, verifySdk } from './core/sdk-verify.js';
-// Platform-aware WireGuard import — Windows has full implementation, others get stubs
+// Platform-aware WireGuard import — Windows / Linux / macOS each have full implementations
 let emergencyCleanupSync, watchdogCheck, WG_AVAILABLE, IS_ADMIN;
 if (process.platform === 'win32') {
   ({ emergencyCleanupSync, watchdogCheck, WG_AVAILABLE, IS_ADMIN } = await import('./platforms/windows/wireguard.js'));
+} else if (process.platform === 'linux') {
+  ({ emergencyCleanupSync, watchdogCheck, WG_AVAILABLE, IS_ADMIN } = await import('./platforms/linux/wireguard.js'));
+} else if (process.platform === 'darwin') {
+  ({ emergencyCleanupSync, watchdogCheck, WG_AVAILABLE, IS_ADMIN } = await import('./platforms/macos/wireguard.js'));
 } else {
   emergencyCleanupSync = () => {};
   watchdogCheck = () => {};
@@ -62,9 +69,17 @@ const COOKIE_SECRET = ADMIN_TOKEN || crypto.randomBytes(32).toString('hex');
 // In-memory only: admin logouts drop entries; process restart invalidates all sessions.
 const ADMIN_SESSIONS = new Map();
 const ADMIN_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+// Cap to bound memory under sustained brute-force or buggy clients that never
+// log out. Map iteration order is insertion order — drop the oldest entry when
+// we exceed the cap. 1000 sessions × ~80 bytes = ~80 KB worst case.
+const ADMIN_SESSIONS_MAX = 1000;
 
 export function createAdminSession() {
   const id = crypto.randomBytes(32).toString('hex');
+  if (ADMIN_SESSIONS.size >= ADMIN_SESSIONS_MAX) {
+    const oldest = ADMIN_SESSIONS.keys().next().value;
+    if (oldest) ADMIN_SESSIONS.delete(oldest);
+  }
   ADMIN_SESSIONS.set(id, Date.now() + ADMIN_SESSION_TTL_MS);
   return id;
 }
@@ -147,7 +162,11 @@ setInterval(() => {
 // ─── SSE ────────────────────────────────────────────────────────────────────
 const emitter = new EventEmitter();
 emitter.setMaxListeners(100);
-const LOG_BUFFER_MAX = 100;
+// Sized to comfortably hold the full log of a typical run (~10–20 lines per
+// node × hundreds of nodes) plus headroom. SSE init replays this to admin and
+// live so a refresh / reconnect / resume sees the run's full prior history,
+// not just the last few lines.
+const LOG_BUFFER_MAX = 5000;
 const logBuffer = [];
 
 // ─── State Snapshot (persists volatile fields across restarts) ───────────────
@@ -181,6 +200,20 @@ function saveStateSnapshot() {
       pricingMode: state.pricingMode,
       activeSDK: state.activeSDK,
       continuousLoop: state.continuousLoop,
+      // Persist the open batch handle so /api/resume after a process bounce
+      // can re-attach to the same batches row instead of starting a new one.
+      activeBatchId: state.activeBatchId || 0,
+      // Address of the in-flight node when stop hit, so resume can hoist
+      // it back to the front of the next scan order.
+      resumeHeadAddr: state.resumeHeadAddr || null,
+      // Path of the audit log file currently being appended to. Survives
+      // process bounce so /api/resume reuses the same file instead of
+      // creating a fresh `audit-<ts>.log` and orphaning prior entries.
+      auditLogPath: state.auditLogPath || null,
+      // SQLite runs.id of the in-flight run. Without this, /api/resume after
+      // a process bounce leaves _activeDbRunId=null and post-resume failures
+      // skip insertErrorLog — the node-detail popup then has nothing to show.
+      activeDbRunId: state.activeDbRunId || null,
     }), 'utf8');
   } catch { }
 }
@@ -195,6 +228,83 @@ function broadcast(type, data = {}) {
   // service-type like 'wireguard') cannot clobber the SSE event type. The
   // event type is the dispatch key — clients switch on d.type — so it must win.
   emitter.emit('update', { ...data, type });
+}
+
+// Use this for any state change where the client must replace its row table:
+// run start, /api/clear, retest, load. The admin client treats `msg.results`
+// presence as the wipe signal — omitting it leaves stale rows on screen, which
+// has burned us before (5 stale TEST_RUN_SKIP rows after New Test).
+function broadcastStateFresh(extra = {}) {
+  broadcast('state', { state, results: getResults(), ...extra });
+}
+
+// ─── Batch persistence wrapper for direct pipeline calls ────────────────────
+// audit/continuous.js writes batches/batch_results for continuous-loop runs.
+// Direct pipeline calls (subscription start/resume, p2p start/resume, plan-test,
+// retest) bypass continuous.js entirely — without this wrapper they never
+// produce a `batches` row, so /api/public/runs/current returns 404 and the
+// /live page can't reconstruct in-flight progress on refresh.
+//
+// `mode` MUST match the run intent so the dashboard never confuses subscription
+// (Plan #N), p2p (pay-per-GB), and test (TEST_RUN_SKIP) runs.
+function withBatchTracking(baseBroadcast, mode, opts = {}) {
+  // Resume re-attaches to the previously-open batch via opts.existingBatchId so
+  // /live's hydrate-from-DB path returns the full pre-pause + post-resume row
+  // set as one batch. Without this, every resume opens a fresh batches row and
+  // the table on /live wipes back to whatever was tested AFTER resume only.
+  let batchId = opts.existingBatchId ? Number(opts.existingBatchId) : 0;
+  let opened = batchId > 0;
+  let closed = false;
+  if (opened) {
+    state.activeBatchId = batchId;
+    try { reopenBatch(batchId, 'real'); } catch (e) { console.error('[withBatchTracking reopen]', e.message); }
+  }
+  return function tracked(type, data = {}) {
+    try {
+      if (!closed && !opened && type === 'result' && data && data.result) {
+        batchId = insertBatch({
+          started_at:    Date.now(),
+          snapshot_size: state.totalNodes || 0,
+          mode,
+        }, 'real');
+        state.activeBatchId = batchId;
+        opened = true;
+      }
+      if (opened && !closed && type === 'result' && data && data.result) {
+        const r = data.result;
+        insertBatchResult(batchId, {
+          address:      r.address || '',
+          moniker:      r.moniker || null,
+          country:      r.country || null,
+          country_code: r.countryCode || r.country_code || null,
+          city:         r.city || null,
+          type:         r.type || null,
+          actual_mbps:  r.actualMbps ?? null,
+          peers:        r.peers ?? null,
+          max_peers:    r.maxPeers ?? null,
+          error:        r.error ? String(r.error).slice(0, 200) : null,
+          error_code:   r.errorCode || null,
+          tested_at:    Date.now(),
+        }, 'real');
+      }
+      if (opened && !closed && type === 'state' && data && data.state) {
+        const status = data.state.status;
+        if (status === 'done' || status === 'error' || status === 'stopped') {
+          updateBatchOnFinish(batchId, {
+            finished_at: Date.now(),
+            passed: data.state.testedNodes || 0,
+            failed: data.state.failedNodes || 0,
+          }, 'real');
+          closed = true;
+          // Keep state.activeBatchId so /api/resume can find this batch and
+          // reopen it. /api/start clears it explicitly when a new test begins.
+        }
+      }
+    } catch (err) {
+      console.error(`[withBatchTracking ${mode}] ${err.message}`);
+    }
+    baseBroadcast(type, data);
+  };
 }
 
 // ─── Continuous Loop SSE forwarding ─────────────────────────────────────────
@@ -238,17 +348,20 @@ function persistBroadcastPref() {
 const SDK_PREF_FILE = path.join(__dirname, 'results', '.sdk-preference');
 try { state.activeSDK = _rfs(SDK_PREF_FILE, 'utf8').trim() || 'js'; } catch { state.activeSDK = 'js'; }
 
-// ─── Restore log buffer from most recent audit log (survives server restart) ─
-try {
-  const logDir = path.join(__dirname, 'results');
-  const logFiles = _rd(logDir).filter(f => /^(audit|retest)-.*\.log$/.test(f)).sort().reverse();
-  if (logFiles.length > 0) {
-    const lastLog = _rfs(path.join(logDir, logFiles[0]), 'utf8');
-    const lines = lastLog.split('\n').filter(l => l.trim());
+// Helper: re-hydrate logBuffer from a specific log file on disk. Used both at
+// boot (after snapshot restore) and on /api/resume so the SSE init replay
+// always carries the in-flight run's full prior log history — not the last
+// few lines, and not a different file's contents.
+function hydrateLogBufferFromFile(filePath) {
+  try {
+    const txt = _rfs(filePath, 'utf8');
+    const lines = txt.split('\n').filter(l => l.trim());
     const tail = lines.slice(-LOG_BUFFER_MAX);
+    logBuffer.length = 0;
     logBuffer.push(...tail);
-  }
-} catch { }
+    return tail.length;
+  } catch { return 0; }
+}
 
 // ─── Test Run Management ─────────────────────────────────────────────────────
 import { readFileSync as _rfs, writeFileSync as _wfs, mkdirSync as _mkd, existsSync as _ex, readdirSync as _rd, copyFileSync as _cp } from 'fs';
@@ -259,7 +372,12 @@ if (!_ex(RUNS_DIR)) _mkd(RUNS_DIR, { recursive: true });
 
 function loadRunsIndex() {
   if (!_ex(RUNS_INDEX)) return { runs: [], activeRun: null };
-  return JSON.parse(_rfs(RUNS_INDEX, 'utf8'));
+  try {
+    return JSON.parse(_rfs(RUNS_INDEX, 'utf8'));
+  } catch (err) {
+    console.error(`[loadRunsIndex] corrupt or unreadable ${RUNS_INDEX}: ${err.message}`);
+    return { runs: [], activeRun: null };
+  }
 }
 
 function saveRunsIndex(index) {
@@ -290,8 +408,8 @@ function saveCurrentRun(label) {
     `Date: ${new Date().toISOString()}`,
     `${'='.repeat(60)}`,
     `Total: ${results.length} | Passed: ${passed.length} | Failed: ${failed.length}`,
-    `Success Rate: ${(passed.length / results.length * 100).toFixed(1)}%`,
-    `Pass 10 Mbps SLA: ${pass10.length} (${(pass10.length / passed.length * 100).toFixed(1)}%)`,
+    `Success Rate: ${results.length > 0 ? (passed.length / results.length * 100).toFixed(1) : '0.0'}%`,
+    `Pass 10 Mbps SLA: ${pass10.length} (${passed.length > 0 ? (pass10.length / passed.length * 100).toFixed(1) : '0.0'}%)`,
     ``,
     `── Passed Nodes (${passed.length}) ──`,
     ...passed.map(r => `  ${r.address.slice(0, 25)}... | ${r.actualMbps} Mbps | ${r.type} | ${r.moniker} | ${r.city}, ${r.country} | Google: ${r.googleAccessible === true ? 'YES' : r.googleAccessible === false ? 'NO' : '?'}`),
@@ -390,7 +508,34 @@ function rehydrateState(results) {
       if (snap.pricingMode) state.pricingMode = snap.pricingMode;
       if (snap.activeSDK) state.activeSDK = snap.activeSDK;
       if (snap.continuousLoop != null) state.continuousLoop = snap.continuousLoop;
+      if (snap.activeBatchId) state.activeBatchId = snap.activeBatchId;
+      if (snap.resumeHeadAddr) state.resumeHeadAddr = snap.resumeHeadAddr;
+      if (snap.auditLogPath) state.auditLogPath = snap.auditLogPath;
+      if (snap.activeDbRunId) {
+        state.activeDbRunId = Number(snap.activeDbRunId);
+        try { setActiveDbRunId(state.activeDbRunId); } catch {}
+      }
       console.log(`State snapshot restored: baseline=${snap.baselineHistory?.length || 0} readings, speeds=${snap.nodeSpeedHistory?.length || 0} nodes, total=${state.totalNodes}, runMode=${state.runMode || 'none'}`);
+    } catch { }
+
+    // Hydrate logBuffer from the IN-FLIGHT audit log (the file the run was
+    // appending to before the bounce), so SSE init replays the actual run's
+    // history. Falls back to the alphabetically-newest file only if the
+    // snapshot didn't preserve a path or the file vanished.
+    try {
+      const logDir = path.join(__dirname, 'results');
+      let used = null;
+      if (state.auditLogPath && _ex(state.auditLogPath)) {
+        if (hydrateLogBufferFromFile(state.auditLogPath) > 0) used = state.auditLogPath;
+      }
+      if (!used) {
+        const logFiles = _rd(logDir).filter(f => /^(audit|retest)-.*\.log$/.test(f)).sort().reverse();
+        if (logFiles.length > 0) {
+          const candidate = path.join(logDir, logFiles[0]);
+          if (hydrateLogBufferFromFile(candidate) > 0) used = candidate;
+        }
+      }
+      if (used) console.log(`Log buffer hydrated from ${path.basename(used)} (${logBuffer.length} lines)`);
     } catch { }
 
     // Resume the active test — DON'T create a new one on restart
@@ -414,7 +559,8 @@ const app = express();
 // Without this, req.ip is always the direct socket address — which is what
 // clientIp() in core/rate-limit.js now uses exclusively (F-02).
 app.set('trust proxy', 1);
-app.use(express.json());
+app.disable('x-powered-by');
+app.use(express.json({ limit: '512kb' }));
 // cookie-parser with HMAC signing so admin_token cookie cannot be forged
 app.use(cookieParser(COOKIE_SECRET));
 // Serve static assets (logo, fonts etc.) but do NOT auto-serve index files.
@@ -427,6 +573,14 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'no-referrer');
   // M-01: clickjacking defence covers admin routes (public CSP has frame-ancestors).
   res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Permissions-Policy', 'geolocation=(), camera=(), microphone=(), payment=(), usb=()');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  // HSTS only when reachable over TLS (operator opts in via env var so local
+  // http://localhost dev is unaffected).
+  if (process.env.ENABLE_HSTS === 'true') {
+    res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
+  }
   next();
 });
 
@@ -599,7 +753,21 @@ app.get('/api/public/countries', attachAdminFlag, rlPublicRead, (req, res) => {
  */
 app.get('/api/public/runs/current', attachAdminFlag, rlPublicRead, (req, res) => {
   try {
-    const data = state.broadcastLive ? getActiveBatch() : getLastBatch();
+    // The admin's own /live view must mirror the admin dashboard 1:1 regardless
+    // of the public broadcast toggle — operator needs to see resume-in-progress
+    // even with broadcast off. Public visitors still gated by broadcastLive.
+    const showLive = state.broadcastLive || req.admin === true;
+    let data = showLive ? getActiveBatch() : getLastBatch();
+    // Stopped-but-resumable: the batch was closed (finished_at set) on stop,
+    // but state.activeBatchId still points at it for the eventual resume.
+    // /live should keep painting it so a refresh while stopped doesn't go
+    // blank or fall through to a different historical run.
+    if (!data
+        && showLive
+        && state.status === 'stopped'
+        && state.activeBatchId) {
+      data = getBatchWithNodes(state.activeBatchId);
+    }
     if (!data) return res.status(404).json({ error: 'No active run' });
     const { batch, nodes } = data;
     res.json({
@@ -614,6 +782,10 @@ app.get('/api/public/runs/current', attachAdminFlag, rlPublicRead, (req, res) =>
       // before any SSE state event arrives. runPlanId is null unless plan mode.
       runMode: state.runMode || null,
       runPlanId: state.runPlanId || null,
+      // Tell /live this is a paused-but-pinned run so it paints rows even
+      // though finished_at is set. Without this flag, the client treats
+      // any finished_at as "historical" and skips painting under broadcast.
+      stopped: state.status === 'stopped' && state.activeBatchId === batch.id,
       nodes,
     });
   } catch (err) {
@@ -866,6 +1038,9 @@ app.get('/api/sdk-verify/:key', adminOnly, async (req, res) => {
     const result = await verifySdk(req.params.key, __dirname);
     res.json(result);
   } catch (err) {
+    if (err && /^Unknown SDK key/.test(err.message || '')) {
+      return res.status(400).json({ error: err.message });
+    }
     console.error('[api/sdk-verify]', err);
     res.status(500).json({ error: 'Internal error' });
   }
@@ -1034,8 +1209,9 @@ app.get('/api/public/events', attachAdminFlag, rlPublicSse, (req, res) => {
   } catch (_) {}
   // Sanitized snapshot of in-memory state and per-node results so /live paints
   // the full dashboard on connect/refresh — fully identical to admin (minus
-  // operator-internal fields). Empty when broadcastLive is off.
-  const liveOn = !!state.broadcastLive;
+  // operator-internal fields). Empty when broadcastLive is off (unless admin).
+  const isAdminViewer = req.admin === true;
+  const liveOn = !!state.broadcastLive || isAdminViewer;
   const initState = liveOn ? sanitizePublicState(state) : {};
   const initResults = liveOn ? getResults().map(sanitizePublicResult).filter(Boolean) : [];
   send({
@@ -1049,10 +1225,16 @@ app.get('/api/public/events', attachAdminFlag, rlPublicSse, (req, res) => {
     logs: liveOn ? logBuffer.slice() : [],
     state: initState,
     results: initResults,
+    // Report effective-live so the admin's own /live page flips into live mode
+    // (skipping the paused overlay) without forcing the operator to also flip
+    // the public broadcast toggle. Public visitors get the real flag.
     broadcastLive: liveOn,
   });
   const handler = (data) => {
-    if (!state.broadcastLive) return;
+    // Admin's own /live SSE: forward live events even when broadcast is off so
+    // the operator's view stays in lockstep with the admin dashboard. Public
+    // visitors only get events when broadcastLive is on.
+    if (!state.broadcastLive && !isAdminViewer) return;
     if (!PUBLIC_EVENT_WHITELIST.has(data.type)) return;
     send(sanitizeForPublic(data));
   };
@@ -1072,7 +1254,11 @@ app.get('/api/public/events', attachAdminFlag, rlPublicSse, (req, res) => {
  * Empty when broadcastLive is off (public must not see live activity then).
  */
 app.get('/api/public/logs', attachAdminFlag, rlPublicRead, (req, res) => {
-  if (!state.broadcastLive) return res.json({ logs: [], broadcastLive: false });
+  // Admin's own /live: always return logs so the operator can monitor without
+  // toggling broadcast. Public visitors still gated by broadcastLive.
+  const showLive = state.broadcastLive || req.admin === true;
+  if (!showLive) return res.json({ logs: [], broadcastLive: false });
+  // Report effective-live so admin viewers get the live-mode UI on /live.
   res.json({ logs: logBuffer.slice(), broadcastLive: true });
 });
 
@@ -1083,10 +1269,14 @@ app.get('/api/public/logs', attachAdminFlag, rlPublicRead, (req, res) => {
  * operator-internal fields. Empty when broadcastLive is off.
  */
 app.get('/api/public/live-state', attachAdminFlag, rlPublicRead, (req, res) => {
-  if (!state.broadcastLive) {
+  // Admin's own /live: always reveal live state so operator's view matches the
+  // admin dashboard. Public visitors still gated by broadcastLive.
+  const showLive = state.broadcastLive || req.admin === true;
+  if (!showLive) {
     return res.json({ broadcastLive: false, state: {}, results: [] });
   }
   res.json({
+    // Report effective-live so admin viewers get the live-mode UI on /live.
     broadcastLive: true,
     state: sanitizePublicState(state),
     results: getResults().map(sanitizePublicResult).filter(Boolean),
@@ -1179,6 +1369,41 @@ app.post('/api/broadcast', adminOnly, (req, res) => {
 
 app.get('/api/broadcast', (req, res) => {
   res.json({ broadcastLive: state.broadcastLive });
+});
+
+// ─── Audit settings (P2P payment tunables) ───────────────────────────────────
+// Read-anywhere / write-admin. Hot-reloaded by audit pipeline at run start.
+app.get('/api/settings', (req, res) => {
+  res.json({ settings: getSettings(), defaults: getDefaultSettings() });
+});
+
+app.post('/api/settings', adminOnly, (req, res) => {
+  const patch = (req.body && typeof req.body === 'object') ? req.body : {};
+  const next = updateSettings(patch);
+  res.json({ settings: next, defaults: getDefaultSettings() });
+});
+
+// ─── On-chain reports (RPC tx_search by tester wallet) ───────────────────────
+// Returns recent decoded report TXs posted by this tester. Open endpoint —
+// the data is already public on-chain. Limit capped at 50 per request.
+app.get('/api/onchain-reports', async (req, res) => {
+  try {
+    let address = req.query.address || state.walletAddress || null;
+    if (!address) {
+      try {
+        const { account } = await cachedWalletSetup(process.env.MNEMONIC);
+        address = account.address;
+      } catch (e) {
+        return res.status(503).json({ error: 'tester wallet not yet initialized', detail: e.message });
+      }
+    }
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 50);
+    const fromHeight = Math.max(0, parseInt(req.query.fromHeight, 10) || 0);
+    const reports = await queryOnchainReports(address, { limit, fromHeight });
+    res.json({ address, count: reports.length, reports });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 const rlAdminSse = sseLimit({ maxPerIp: 10, bucket: 'admin-sse' });
@@ -1321,6 +1546,10 @@ app.post('/api/start', adminOnly, async (req, res) => {
   state.runPlanId = null;
   state.runSubscriptionId = null;
   state.runGranter = null;
+  // Brand-new test → drop any prior batch handle. Resume reuses; start does not.
+  state.activeBatchId = 0;
+  state.resumeHeadAddr = null;
+  state.auditLogPath = null;
   const { newNum: firstNum } = startFreshRun(`Test #${getNextRunNumber()}`, { mode: runMode });
 
   const SDK_LABELS = { js: 'Blue JS', csharp: 'Blue C#', tkd: 'TKD JS' };
@@ -1328,20 +1557,22 @@ app.post('/api/start', adminOnly, async (req, res) => {
   const modeTag = testRun ? 'Test Run (sample data)' : 'P2P (all online nodes)';
   broadcast('log', { msg: `🚀 Starting Test #${firstNum} — Mode: ${modeTag} | ${label}${infiniteLoop ? ' | ∞ LOOP' : ''} | Pricing: ${pricingMode === 'hours' ? 'Per Hour' : 'Per GB'}` });
   res.json({ ok: true, testNumber: firstNum, testRun, infiniteLoop, pricingMode });
-  broadcast('state', { state });
+  broadcastStateFresh();
 
   (async () => {
     let curNum = firstNum;
     // First pass + any further passes if continuousLoop stays true.
     while (true) {
+      // Fresh wrapper per pass so each iteration writes its own batches row.
+      const tracked = withBatchTracking(broadcast, testRun ? 'test' : 'p2p');
       try {
-        await runAudit(false, state, broadcast, null, { testRun, pricingMode });
+        await runAudit(false, state, tracked, null, { testRun, pricingMode });
         saveCurrentRun(`Test #${curNum}`);
-        broadcast('log', { msg: `💾 Test #${curNum} complete and saved` });
+        tracked('log', { msg: `💾 Test #${curNum} complete and saved` });
       } catch (err) {
         state.status = 'error';
         state.errorMessage = err.message;
-        broadcast('state', { state });
+        tracked('state', { state });
         break;
       }
       if (!state.continuousLoop || state.stopRequested) break;
@@ -1349,7 +1580,7 @@ app.post('/api/start', adminOnly, async (req, res) => {
       curNum = getNextRunNumber();
       startFreshRun(`Test #${curNum}`, { mode: runMode });
       broadcast('log', { msg: `♾  Loop continues — starting Test #${curNum}` });
-      broadcast('state', { state });
+      broadcastStateFresh();
     }
     state.continuousLoop = false;
     broadcast('state', { state });
@@ -1373,11 +1604,21 @@ app.post('/api/resume', adminOnly, async (req, res) => {
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const results = getResults();
   if (results.length === 0) return res.json({ error: 'No results to resume from. Use Start to begin a new test.' });
-  state.stopRequested = false;
   // Ensure run directory exists and is active for continuous saves
   const resumeRunDir = path.join(RUNS_DIR, `test-${String(state.activeRunNumber).padStart(3, '0')}`);
   try { _mkd(resumeRunDir, { recursive: true }); } catch { }
   setActiveRunDir(resumeRunDir);
+
+  // Re-hydrate the live log buffer from the in-flight audit log. Without this,
+  // a Stop that happened earlier in the same process (no bounce) leaves the
+  // buffer with only the lines emitted live during this process — but a fresh
+  // admin / live tab opening after Resume sees the SSE init replay only those
+  // post-bounce lines. Hydrating from the on-disk log file guarantees the
+  // resumed live log mirrors the prior session exactly.
+  if (state.auditLogPath && _ex(state.auditLogPath)) {
+    const n = hydrateLogBufferFromFile(state.auditLogPath);
+    if (n > 0) console.log(`Resume: rehydrated logBuffer from ${path.basename(state.auditLogPath)} (${n} lines)`);
+  }
 
   // Refuse to silently demote an unknown-mode resume to P2P. If the snapshot
   // didn't preserve runMode (older runs pre-snapshot-v2) the operator must
@@ -1391,9 +1632,29 @@ app.post('/api/resume', adminOnly, async (req, res) => {
   }
   const runMode = state.runMode;
   const modeTag = runMode === 'subscription' ? `Sub. Plan ${state.runPlanId}` : (runMode === 'test' ? 'Test Run' : 'P2P');
+  // Flip status to 'running' synchronously and push a state event BEFORE the
+  // pipeline goroutine starts. Without this, a live tab that fires its SSE
+  // `init` between this response and the runner's first `broadcast('state')`
+  // sees the stale `status: 'stopped'` snapshot and shows the paused overlay
+  // — even though the audit is fully resumed. Pushes the full results array
+  // too so the live table re-paints any rows the client may have wiped.
+  state.status = 'running';
+  state.stopRequested = false;
+  // Re-arm the pipeline's _activeDbRunId so post-resume failures still write to
+  // error_logs. Without this, the node-detail "View error details" popup on
+  // /live and admin shows "No stored failure log" for any node tested after Resume.
+  if (state.activeDbRunId) {
+    try { setActiveDbRunId(Number(state.activeDbRunId)); } catch {}
+  }
   broadcast('log', { msg: `▶ Resuming Test #${state.activeRunNumber} (${modeTag}) from node ${results.length + 1} (${results.length} already tested, SDK: ${state.activeSDK.toUpperCase()})` });
+  broadcastStateFresh();
   res.json({ ok: true, testNumber: state.activeRunNumber, resumeFrom: results.length, runMode });
 
+  // Resume: re-attach to the prior batch row if we still have its id, so /live's
+  // hydrate-from-DB returns the full pre-pause + post-resume row set as one
+  // batch. Without existingBatchId, withBatchTracking opens a fresh batches row
+  // and the live table wipes back to only post-resume rows.
+  const existingBatchId = state.activeBatchId || 0;
   if (runMode === 'subscription') {
     if (!state.runPlanId || !state.runSubscriptionId || !state.runGranter) {
       state.status = 'error';
@@ -1401,22 +1662,24 @@ app.post('/api/resume', adminOnly, async (req, res) => {
       broadcast('state', { state });
       return;
     }
-    runSubPlanTest(state.runPlanId, state.runSubscriptionId, state.runGranter, state, broadcast, { resume: true }).then(() => {
+    const tracked = withBatchTracking(broadcast, 'subscription', { existingBatchId });
+    runSubPlanTest(state.runPlanId, state.runSubscriptionId, state.runGranter, state, tracked, { resume: true }).then(() => {
       saveCurrentRun(`Test #${state.activeRunNumber} — Sub. Plan ${state.runPlanId}`);
-      broadcast('log', { msg: `💾 Test #${state.activeRunNumber} saved` });
+      tracked('log', { msg: `💾 Test #${state.activeRunNumber} saved` });
     }).catch(err => {
       state.status = 'error';
       state.errorMessage = err.message;
-      broadcast('state', { state });
+      tracked('state', { state });
     });
   } else {
-    runAudit(true, state, broadcast, null, { testRun: !!state.testRun, pricingMode: state.pricingMode }).then(() => {
+    const tracked = withBatchTracking(broadcast, state.testRun ? 'test' : 'p2p', { existingBatchId });
+    runAudit(true, state, tracked, null, { testRun: !!state.testRun, pricingMode: state.pricingMode }).then(() => {
       saveCurrentRun(`Test #${state.activeRunNumber}`);
-      broadcast('log', { msg: `💾 Test #${state.activeRunNumber} saved` });
+      tracked('log', { msg: `💾 Test #${state.activeRunNumber} saved` });
     }).catch(err => {
       state.status = 'error';
       state.errorMessage = err.message;
-      broadcast('state', { state });
+      tracked('state', { state });
     });
   }
 });
@@ -1461,10 +1724,11 @@ app.post('/api/retest-skips', adminOnly, async (req, res) => {
   if (skipAddrs.length === 0) return res.json({ error: 'No unreachable failures to retest' });
   state.stopRequested = false;
   res.json({ ok: true, retesting: skipAddrs.length });
-  runRetestSkips(skipAddrs, state, broadcast).catch(err => {
+  const tracked = withBatchTracking(broadcast, state.runMode || 'p2p');
+  runRetestSkips(skipAddrs, state, tracked).catch(err => {
     state.status = 'error';
     state.errorMessage = err.message;
-    broadcast('state', { state });
+    tracked('state', { state });
   });
 });
 
@@ -1482,10 +1746,11 @@ app.post('/api/retest-fails', adminOnly, async (req, res) => {
   if (failAddrs.length === 0) return res.json({ error: 'No failures to retest' });
   state.stopRequested = false;
   res.json({ ok: true, retesting: failAddrs.length, addresses: failAddrs });
-  runRetestSkips(failAddrs, state, broadcast).catch(err => {
+  const tracked = withBatchTracking(broadcast, state.runMode || 'p2p');
+  runRetestSkips(failAddrs, state, tracked).catch(err => {
     state.status = 'error';
     state.errorMessage = err.message;
-    broadcast('state', { state });
+    tracked('state', { state });
   });
 });
 
@@ -1497,10 +1762,11 @@ app.post('/api/test-plan', adminOnly, async (req, res) => {
   if (!planId) return res.status(400).json({ error: 'planId required' });
   state.stopRequested = false;
   res.json({ ok: true, planId });
-  runPlanTest(parseInt(planId), state, broadcast).catch(err => {
+  const tracked = withBatchTracking(broadcast, 'subscription');
+  runPlanTest(parseInt(planId), state, tracked).catch(err => {
     state.status = 'error';
     state.errorMessage = err.message;
-    broadcast('state', { state });
+    tracked('state', { state });
   });
 });
 
@@ -1558,21 +1824,27 @@ app.post('/api/test-sub-plan', adminOnly, async (req, res) => {
   state.runSubscriptionId = String(subscriptionId);
   state.runGranter = String(granter);
   state.testRun = false;
-  broadcast('state', { state, results: getResults() });
+  // Brand-new test → drop any prior batch handle. Resume reuses; start does not.
+  state.activeBatchId = 0;
+  state.resumeHeadAddr = null;
+  state.auditLogPath = null;
+  broadcastStateFresh();
   broadcast('log', { msg: `🚀 Starting Test #${newNum} — Mode: Plan #${planId} (subscription-allocated sessions, plan-scoped node set)${infiniteLoop ? ' | ∞ LOOP' : ''}` });
   res.json({ ok: true, testNumber: newNum, planId, subscriptionId, granter, infiniteLoop });
 
   (async () => {
     let curNum = newNum;
     while (true) {
+      // Fresh wrapper per pass so each iteration writes its own batches row.
+      const tracked = withBatchTracking(broadcast, 'subscription');
       try {
-        await runSubPlanTest(String(planId), String(subscriptionId), String(granter), state, broadcast);
+        await runSubPlanTest(String(planId), String(subscriptionId), String(granter), state, tracked);
         saveCurrentRun(`Test #${curNum} — Sub. Plan ${planId}`);
-        broadcast('log', { msg: `💾 Test #${curNum} complete and saved` });
+        tracked('log', { msg: `💾 Test #${curNum} complete and saved` });
       } catch (err) {
         state.status = 'error';
         state.errorMessage = err.message;
-        broadcast('state', { state });
+        tracked('state', { state });
         break;
       }
       if (!state.continuousLoop || state.stopRequested) break;
@@ -1580,7 +1852,7 @@ app.post('/api/test-sub-plan', adminOnly, async (req, res) => {
       startFreshRun(`Sub. Plan ${planId}`, { mode: 'subscription', plan_id: String(planId) });
       state.continuousLoop = true;
       broadcast('log', { msg: `♾  Loop continues — starting Test #${curNum} (Plan #${planId})` });
-      broadcast('state', { state });
+      broadcastStateFresh();
     }
     state.continuousLoop = false;
     broadcast('state', { state });
@@ -1588,14 +1860,13 @@ app.post('/api/test-sub-plan', adminOnly, async (req, res) => {
 });
 
 app.post('/api/clear', adminOnly, (req, res) => {
-  const results = getResults();
-  results.length = 0;
+  getResults().length = 0;
   state.testedNodes = state.failedNodes = state.skippedNodes = state.passed15 = state.passed10 = state.passedBaseline = 0;
   state.retryCount = 0;
   state.baselineHistory = [];
   state.nodeSpeedHistory = [];
   saveResults();
-  broadcast('state', { state, results });
+  broadcastStateFresh();
   res.json({ ok: true });
 });
 
@@ -1690,12 +1961,39 @@ app.get('/api/chain/nodes', adminOnly, async (req, res) => {
   }
 });
 
+// ─── SSRF guard ─────────────────────────────────────────────────────────────
+// Reject internal/loopback/link-local targets so admin-driven proxy fetches
+// can't be turned into an internal-network probe (cloud metadata, intranet, etc.).
+function isPrivateOrLoopbackHost(host) {
+  if (!host) return true;
+  const h = host.toLowerCase();
+  if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]') return true;
+  // IPv4 private + link-local + multicast + 0.0.0.0
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}$/);
+  if (m) {
+    const [a, b] = [parseInt(m[1], 10), parseInt(m[2], 10)];
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a >= 224) return true;
+  }
+  // IPv6 ULA / link-local
+  if (h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80:') || h.startsWith('[fc') || h.startsWith('[fd') || h.startsWith('[fe80:')) return true;
+  return false;
+}
+
 // ─── Live node status (admin-only) ───────────────────────────────────────────
 // Proxies nodeStatusV3 against the node's own remoteUrl for the admin UI.
 app.get('/api/chain/node-status', adminOnly, async (req, res) => {
   const remoteUrl = String(req.query.remoteUrl || '').trim();
   if (!remoteUrl || !/^https?:\/\//i.test(remoteUrl)) {
     return res.status(400).json({ error: 'remoteUrl query param required' });
+  }
+  let parsed;
+  try { parsed = new URL(remoteUrl); } catch { return res.status(400).json({ error: 'invalid remoteUrl' }); }
+  if (isPrivateOrLoopbackHost(parsed.hostname)) {
+    return res.status(400).json({ error: 'private / loopback hosts are not allowed' });
   }
   try {
     const s = await nodeStatusV3(remoteUrl);
@@ -1713,25 +2011,6 @@ app.get('/api/chain/node-status', adminOnly, async (req, res) => {
     });
   } catch (err) {
     res.status(502).json({ error: err?.message || 'node status failed' });
-  }
-});
-
-// ─── Rescan: re-fetch node list from chain to verify current total ───────────
-app.post('/api/rescan', adminOnly, async (req, res) => {
-  try {
-    broadcast('log', { msg: '🔍 Rescanning chain for current node count...' });
-    await ensureLcd();
-    const allNodes = await getAllNodes(broadcast);
-    const testedAddrs = new Set(getResults().map(r => r.address));
-    const remaining = allNodes.filter(n => !testedAddrs.has(n.address)).length;
-    state.totalNodes = testedAddrs.size + remaining;
-    broadcast('state', { state });
-    broadcast('log', { msg: `Rescan: ${allNodes.length} nodes on chain, ${testedAddrs.size} tested, ${remaining} remaining` });
-    res.json({ total: allNodes.length, tested: testedAddrs.size, remaining });
-  } catch (err) {
-    console.error('[api/rescan]', err);
-    broadcast('log', { msg: 'Rescan failed (see server logs)' });
-    res.json({ error: 'Internal error' });
   }
 });
 
@@ -1762,10 +2041,11 @@ app.post('/api/auto-retest', adminOnly, async (req, res) => {
   res.json({ ok: true, retesting: retestable.length, addresses: retestable.map(r => r.address) });
 
   const { runRetestSkips } = await import('./audit/pipeline.js');
-  runRetestSkips(retestable.map(r => r.address), state, broadcast).catch(err => {
+  const tracked = withBatchTracking(broadcast, state.runMode || 'p2p');
+  runRetestSkips(retestable.map(r => r.address), state, tracked).catch(err => {
     state.status = 'error';
     state.errorMessage = err.message;
-    broadcast('state', { state });
+    tracked('state', { state });
   });
 });
 
@@ -1816,7 +2096,7 @@ app.post('/api/runs/load/:num', adminOnly, (req, res) => {
   rehydrateState(data);
   state.activeRunNumber = num;
   state.status = 'idle';
-  broadcast('state', { state, results: data });
+  broadcastStateFresh();
   broadcast('log', { msg: `📂 Loaded Test #${num} (${data.length} results)` });
   res.json({ ok: true, number: num, total: data.length });
 });
@@ -1854,15 +2134,28 @@ app.get('/api/sdk', adminOnly, (req, res) => {
 
 // ─── Health Check (prelaunch validation for AI/automation) ─────────────────
 app.get('/api/health', adminOnly, async (req, res) => {
-  const { checkV2Ray } = process.platform === 'win32'
-    ? await import('./platforms/windows/v2ray.js')
-    : { checkV2Ray: async () => { try { const { execSync } = await import('child_process'); execSync('which v2ray', { stdio: 'pipe' }); return true; } catch { return false; } } };
+  let checkV2Ray;
+  if (process.platform === 'win32') {
+    ({ checkV2Ray } = await import('./platforms/windows/v2ray.js'));
+  } else if (process.platform === 'linux') {
+    ({ checkV2Ray } = await import('./platforms/linux/v2ray.js'));
+  } else if (process.platform === 'darwin') {
+    ({ checkV2Ray } = await import('./platforms/macos/v2ray.js'));
+  } else {
+    checkV2Ray = async () => false;
+  }
   const v2ray = await checkV2Ray();
   const issues = [];
   if (!MNEMONIC) issues.push('MNEMONIC not set in .env — copy .env.example to .env and add your wallet mnemonic');
-  if (!IS_ADMIN && WG_AVAILABLE) issues.push('Not running as Administrator — WireGuard nodes will fail. Use SentinelAudit.vbs (Windows) or sudo (macOS/Linux)');
+  if (!IS_ADMIN && WG_AVAILABLE) {
+    issues.push(process.platform === 'win32'
+      ? 'Not running as Administrator — WireGuard nodes will fail. Use SentinelAudit.vbs to elevate.'
+      : 'Not running as root — WireGuard nodes will fail. Re-run with `sudo`.');
+  }
   if (!v2ray) issues.push('V2Ray binary not found — download from https://github.com/v2fly/v2ray-core/releases and place in bin/');
   if (!WG_AVAILABLE && process.platform === 'win32') issues.push('WireGuard not installed — install from https://www.wireguard.com/install/');
+  if (!WG_AVAILABLE && process.platform === 'linux') issues.push('WireGuard not installed — `sudo apt install wireguard-tools` (Debian/Ubuntu) or `sudo dnf install wireguard-tools` (Fedora)');
+  if (!WG_AVAILABLE && process.platform === 'darwin') issues.push('WireGuard not installed — `brew install wireguard-tools`');
   res.json({
     status: issues.length === 0 ? 'ready' : 'issues',
     platform: process.platform,
@@ -1940,12 +2233,24 @@ app.get('/health', (req, res) => {
 });
 
 // ─── Server Startup ─────────────────────────────────────────────────────────
-app.listen(PORT, async () => {
-  console.log(`\nSentinel Node Audit Dashboard → http://localhost:${PORT}\n`);
+// LISTEN_HOST controls bind address. Defaults to 127.0.0.1 (localhost-only) so
+// a fresh install never accidentally exposes the admin panel to the LAN/internet.
+// Set LISTEN_HOST=0.0.0.0 explicitly when fronting with a reverse proxy / firewall.
+const LISTEN_HOST = process.env.LISTEN_HOST || '127.0.0.1';
+app.listen(PORT, LISTEN_HOST, async () => {
+  console.log(`\nSentinel Node Audit Dashboard → http://${LISTEN_HOST === '0.0.0.0' ? 'localhost' : LISTEN_HOST}:${PORT}  (bound to ${LISTEN_HOST})\n`);
   if (!IS_ADMIN) {
-    console.warn('⚠  NOT running as Administrator — WireGuard tests will be skipped.');
+    if (process.platform === 'win32') {
+      console.warn('⚠  NOT running as Administrator — WireGuard tests will be skipped.');
+    } else {
+      console.warn('⚠  NOT running as root — WireGuard tests will be skipped. Re-run with `sudo`.');
+    }
   } else {
-    console.log('✓  Running as Administrator — WireGuard tunnels will work without UAC.\n');
+    if (process.platform === 'win32') {
+      console.log('✓  Running as Administrator — WireGuard tunnels will work without UAC.\n');
+    } else {
+      console.log('✓  Running as root — WireGuard tunnels will work.\n');
+    }
   }
 
   if (!MNEMONIC) {

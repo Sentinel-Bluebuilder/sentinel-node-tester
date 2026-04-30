@@ -41,7 +41,10 @@ function log(msg) {
 
 function follow(url) {
   return new Promise((resolve, reject) => {
-    https.get(url, { headers: { 'User-Agent': 'sentinel-node-tester' } }, (res) => {
+    const req = https.get(url, {
+      headers: { 'User-Agent': 'sentinel-node-tester' },
+      timeout: 30_000,
+    }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         follow(res.headers.location).then(resolve, reject);
         return;
@@ -51,7 +54,11 @@ function follow(url) {
         return;
       }
       resolve(res);
-    }).on('error', reject);
+    });
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy(new Error(`Download timed out (30s) for ${url}`));
+    });
   });
 }
 
@@ -103,20 +110,24 @@ function extractZip(zipPath, destDir) {
       { stdio: 'pipe' },
     );
   } else {
-    // Check unzip is available before invoking
-    const whichResult = spawnSync('which', ['unzip'], { encoding: 'utf8' });
-    if (whichResult.status !== 0) {
+    // Probe unzip directly (no `which` — minimal containers may lack it)
+    const probe = spawnSync('unzip', ['-v'], { stdio: 'ignore' });
+    if (probe.error || probe.status !== 0) {
       const installHint = process.platform === 'darwin'
         ? 'brew install unzip'
         : 'apt-get install unzip  (or equivalent for your distro)';
       log(`ERROR: 'unzip' not found. Install it with: ${installHint}`);
-      log('V2Ray setup skipped. App will run in limited mode (WireGuard-only nodes).');
+      log('V2Ray setup skipped. App will run in limited mode (V2Ray nodes unavailable; WireGuard-only testing).');
       rmSync(tmpDir, { recursive: true, force: true });
       if (existsSync(zipPath)) unlinkSync(zipPath);
       process.exit(0);
     }
-    // Use unzip on macOS/Linux
-    execSync(`unzip -o "${zipPath}" -d "${tmpDir}"`, { stdio: 'pipe' });
+    // Use unzip on macOS/Linux — array form avoids shell injection on paths
+    const unzipResult = spawnSync('unzip', ['-o', zipPath, '-d', tmpDir], { stdio: 'pipe' });
+    if (unzipResult.status !== 0) {
+      const stderr = unzipResult.stderr ? unzipResult.stderr.toString() : '';
+      throw new Error(`unzip failed (exit ${unzipResult.status}): ${stderr || 'unknown error'}`);
+    }
   }
 
   // Copy desired files from extracted dir to bin/
@@ -152,12 +163,33 @@ function findFile(dir, name) {
 
 // ─── Main ───
 
+function ensureCliExecutable() {
+  // npm sets +x on `bin` entries when installed from the registry, but local
+  // `git clone && npm install` workflows don't get that — fix it here.
+  if (process.platform === 'win32') return;
+  const cliPath = join(PROJECT_ROOT, 'bin', 'cli.js');
+  if (!existsSync(cliPath)) return;
+  try {
+    chmodSync(cliPath, 0o755);
+    log('Set executable permission on bin/cli.js');
+  } catch (err) {
+    log(`Warning: could not chmod bin/cli.js: ${err.message}`);
+  }
+}
+
 async function main() {
+  ensureCliExecutable();
+
+  if (process.env.SKIP_POSTINSTALL || process.env.SENTINEL_SKIP_POSTINSTALL) {
+    log('SKIP_POSTINSTALL set — skipping V2Ray download. App will run in limited mode (V2Ray nodes unavailable).');
+    process.exit(0);
+  }
+
   const key = `${process.platform}-${process.arch}`;
   const asset = PLATFORM_MAP[key];
 
   if (!asset) {
-    log(`WARNING: V2Ray binary not available for ${key}. App will run in limited mode (WireGuard-only nodes).`);
+    log(`WARNING: V2Ray binary not available for ${key}. App will run in limited mode (V2Ray nodes unavailable; WireGuard-only testing).`);
     log(`Supported platforms: ${Object.keys(PLATFORM_MAP).join(', ')}`);
     process.exit(0);
   }
@@ -211,7 +243,11 @@ async function main() {
     if (existsSync(zipPath)) {
       unlinkSync(zipPath);
     }
-    process.exit(1);
+    // Network/extraction failures must NOT hard-fail `npm install`. The app
+    // will run in limited mode (V2Ray unavailable; WireGuard-only). The user
+    // can retry later with `node scripts/postinstall.js --force`.
+    log('V2Ray setup skipped. Retry with: node scripts/postinstall.js --force');
+    process.exit(0);
   }
 }
 

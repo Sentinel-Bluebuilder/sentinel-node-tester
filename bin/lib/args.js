@@ -29,6 +29,8 @@ const VALUE_FLAGS = new Set([
   '--plan-id', '--sub-id', '--sub-granter',
   '--pricing-mode', '--addr', '--remote-url', '--num', '--mode',
   '--dns', '--enabled',
+  // universal-test flags
+  '--plan',
 ]);
 
 // ─── Parser ───────────────────────────────────────────────────────────────────

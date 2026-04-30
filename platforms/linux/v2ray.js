@@ -3,7 +3,7 @@
  * Same interface as platforms/windows/v2ray.js, adapted for Linux.
  */
 
-import { spawn, execSync } from 'child_process';
+import { spawn, execSync, spawnSync } from 'child_process';
 import { existsSync, writeFileSync } from 'fs';
 import net from 'net';
 import path from 'path';
@@ -24,24 +24,17 @@ export function getV2RayExe() {
   for (const p of systemPaths) {
     if (existsSync(p)) return p;
   }
-  // Fall back to PATH lookup
-  try {
-    const result = execSync('which v2ray', { encoding: 'utf8', stdio: 'pipe' }).trim();
-    if (result) return result;
-  } catch {}
+  // Fall back to PATH lookup — probe directly so we don't depend on `which`
+  const probe = spawnSync('v2ray', ['version'], { stdio: 'ignore' });
+  if (!probe.error && (probe.status === 0 || probe.status === 1)) return 'v2ray';
   return 'v2ray';
 }
 
 export async function checkV2Ray() {
   if (existsSync(LOCAL_V2RAY)) return true;
-  try {
-    execSync('which v2ray', { stdio: 'pipe' });
-    return true;
-  } catch {}
-  try {
-    execSync('v2ray version', { stdio: 'pipe' });
-    return true;
-  } catch {}
+  // Probe `v2ray version` directly — works whether or not `which` is installed.
+  const probe = spawnSync('v2ray', ['version'], { stdio: 'ignore' });
+  if (!probe.error && (probe.status === 0 || probe.status === 1)) return true;
   return false;
 }
 
@@ -80,7 +73,9 @@ export function killV2RayByPid(pid) {
 
 /** Kill all v2ray processes — use ONLY for pre-test cleanup */
 export function killAllV2Ray() {
-  try { execSync('pkill -9 -f v2ray 2>/dev/null || true', { stdio: 'ignore' }); } catch {}
+  // pkill exit codes: 0 = killed, 1 = no match (both fine). stdio:'ignore'
+  // already drops output, no need for shell redirection.
+  spawnSync('pkill', ['-9', '-f', 'v2ray'], { stdio: 'ignore' });
 }
 
 /**

@@ -8,15 +8,26 @@ import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, ren
 import path from 'path';
 
 import {
-  MNEMONIC, DENOM, GIGS, TEST_MB, MAX_NODES, NODE_DELAY,
-  RESULTS_DIR, RESULTS_FILE, FAILURE_LOG, BATCH_SIZE, PROJECT_ROOT,
+  MNEMONIC, DENOM, GIGS as _GIGS_LEGACY, TEST_MB, MAX_NODES, NODE_DELAY,
+  RESULTS_DIR, RESULTS_FILE, FAILURE_LOG, BATCH_SIZE as _BATCH_SIZE_LEGACY, PROJECT_ROOT,
   V3_SUB_TYPE, V3_SUB_SESSION_TYPE,
 } from '../core/constants.js';
+import { gigsRT, batchSizeRT, autoCancelRT, onchainEnabledRT, onchainBatchSizeRT, onchainRegionRT } from '../core/settings.js';
+import { resultToRecord, encodeBatch, commitBatch as commitOnchainBatch } from '../core/onchain-report.js';
+
+// Runtime aliases — read once per audit start so a single run uses a stable
+// value, but each new run picks up the latest operator-configured setting.
+let GIGS = _GIGS_LEGACY;
+let BATCH_SIZE = _BATCH_SIZE_LEGACY;
+function refreshAuditSettings() {
+  GIGS = gigsRT();
+  BATCH_SIZE = batchSizeRT();
+}
 import { cachedWalletSetup, createFreshClient, signAndBroadcastRetry } from '../core/wallet.js';
-import { getAllNodes, fetchPlanMembership, ensureLcd, getActiveLcd, getRpcClient, rpcFetchAllNodesForPlanPaginated } from '../core/chain.js';
+import { getAllNodes, fetchPlanMembership, ensureLcd, getActiveLcd, getRpcClient, rpcFetchAllNodesForPlanPaginated, withFreshRpc } from '../core/chain.js';
 import { rpcQueryNode } from 'blue-js-sdk';
 import {
-  submitBatchPayment, waitForBatchSessions, waitForSessionActive,
+  submitBatchPayment, submitBatchCancel, waitForBatchSessions, waitForSessionActive,
   clearPoisonedSessions, clearPaidNodes, clearAllCredentials, invalidateSessionCache, parseNodePriceUdvpn,
 } from '../core/session.js';
 import { nodeStatusV3 } from '../protocol/v3protocol.js';
@@ -46,19 +57,34 @@ export function resetPipelineStop() {
   _pipelineStopFlag = false;
 }
 
-// Platform-aware imports — Windows has full implementation, others get stubs
+// True when the user clicked Stop. Three signals are checked because the stop
+// can race with an in-flight node test: the global state flag, an injected
+// `_stopRequested` marker on thrown errors, and the literal string thrown by
+// any awaited helper that pre-checks the flag.
+export function isStopSignal(state, error) {
+  if (state?.stopRequested) return true;
+  if (error?._stopRequested) return true;
+  const msg = error?.message ?? error;
+  return typeof msg === 'string' && msg === 'Stop requested';
+}
+
+// Platform-aware imports — Windows / Linux / macOS each have full implementations
 let WG_AVAILABLE, IS_ADMIN, emergencyCleanupSync, uninstallWgTunnel, checkV2Ray;
 if (process.platform === 'win32') {
   ({ WG_AVAILABLE, IS_ADMIN, emergencyCleanupSync, uninstallWgTunnel } = await import('../platforms/windows/wireguard.js'));
   ({ checkV2Ray } = await import('../platforms/windows/v2ray.js'));
+} else if (process.platform === 'linux') {
+  ({ WG_AVAILABLE, IS_ADMIN, emergencyCleanupSync, uninstallWgTunnel } = await import('../platforms/linux/wireguard.js'));
+  ({ checkV2Ray } = await import('../platforms/linux/v2ray.js'));
+} else if (process.platform === 'darwin') {
+  ({ WG_AVAILABLE, IS_ADMIN, emergencyCleanupSync, uninstallWgTunnel } = await import('../platforms/macos/wireguard.js'));
+  ({ checkV2Ray } = await import('../platforms/macos/v2ray.js'));
 } else {
   WG_AVAILABLE = false;
   IS_ADMIN = process.getuid?.() === 0 || false;
   emergencyCleanupSync = () => {};
   uninstallWgTunnel = async () => {};
-  checkV2Ray = async () => {
-    try { const { execSync } = await import('child_process'); execSync('which v2ray', { stdio: 'pipe' }); return true; } catch { return false; }
-  };
+  checkV2Ray = async () => false;
 }
 import { checkAndPauseIfInterference, classifyFailure } from '../protocol/diagnostics.js';
 import { loadTransportCache, getCacheStats, saveTransportCache } from '../core/transport-cache.js';
@@ -150,6 +176,72 @@ export function setActiveDbRunId(id) { _activeDbRunId = id; }
 /** Get the current SQLite run_id (null if not yet set). */
 export function getActiveDbRunId() { return _activeDbRunId; }
 
+// ─── On-chain reporter (per-run state) ───────────────────────────────────────
+// Buffers per-node records during a run and self-sends a memo TX with the
+// encoded batch every `onchainBatchSize` nodes. Opt-in via settings; failure
+// to commit is non-fatal — audit continues.
+let _onchainReporter = null;
+
+function _initOnchainReporter(account, client, state, broadcast) {
+  if (!onchainEnabledRT()) { _onchainReporter = null; return; }
+  _onchainReporter = {
+    enabled: true,
+    batchSize: onchainBatchSizeRT(),
+    region: onchainRegionRT() || (state.testerCountry || ''),
+    baselineMbps: Math.round(state.baselineMbps || 0),
+    startedAt: state.startedAt ? new Date(state.startedAt) : new Date(),
+    signerAddress: account.address,
+    client,
+    broadcast,
+    buffer: [],
+    committed: 0,
+    lastTxhash: null,
+  };
+  broadcast('log', { msg: `📡 On-chain reporting ON — every ${_onchainReporter.batchSize} nodes (region=${_onchainReporter.region || 'auto'}, baseline=${_onchainReporter.baselineMbps}Mbps)` });
+}
+
+async function _flushOnchainBatch(force = false) {
+  const r = _onchainReporter;
+  if (!r || !r.enabled) return;
+  if (r.buffer.length === 0) return;
+  if (!force && r.buffer.length < r.batchSize) return;
+  const batch = r.buffer.splice(0, Math.min(r.buffer.length, 6));
+  try {
+    const encoded = encodeBatch(
+      { region: r.region, baselineMbps: r.baselineMbps, startedAt: r.startedAt },
+      batch,
+    );
+    const res = await commitOnchainBatch(r.client, r.signerAddress, encoded, r.broadcast);
+    r.committed += batch.length;
+    r.lastTxhash = res.txhash;
+    const url = res.txhash ? `https://p2pscan.com/transactions/${res.txhash}` : '';
+    r.broadcast('log', { msg: `📡 On-chain report posted: ${batch.length} nodes, ${res.memoBytes}B @h${res.height} → ${url}` });
+  } catch (e) {
+    r.broadcast('log', { msg: `⚠ On-chain report failed (non-fatal): ${e.message}` });
+  }
+}
+
+function _bufferOnchainRecord(result) {
+  const r = _onchainReporter;
+  if (!r || !r.enabled) return;
+  const rec = resultToRecord(result);
+  if (!rec) return;
+  r.buffer.push(rec);
+  if (r.buffer.length >= r.batchSize) {
+    // Fire and forget — must not block the audit loop.
+    _flushOnchainBatch(false).catch(() => {});
+  }
+}
+
+async function _finalizeOnchainReporter() {
+  if (!_onchainReporter) return;
+  await _flushOnchainBatch(true);
+  if (_onchainReporter) {
+    _onchainReporter.broadcast?.('log', { msg: `📡 On-chain reporting done — ${_onchainReporter.committed} nodes posted across ${_onchainReporter.lastTxhash ? 'multiple TXs' : 'no TXs'}.` });
+  }
+  _onchainReporter = null;
+}
+
 export function saveResults() {
   const data = JSON.stringify(results, null, 2);
   const tmpFile = RESULTS_FILE + '.tmp';
@@ -178,6 +270,9 @@ export function logFailure(nodeAddr, error, context = {}) {
 const _WALLET_RE    = /sent1[a-z0-9]{38}/g;
 const _MNEMONIC_RE  = /MNEMONIC\s*=\s*\S+/gi;
 const _HEX64_RE     = /[0-9a-fA-F]{64}/g;
+// 12+ consecutive lowercase ASCII words (3-8 chars each) — BIP-39 mnemonic shape.
+// Conservative: requires 12 words minimum; will also catch 24-word phrases.
+const _BIP39_RE     = /\b(?:[a-z]{3,8}\s+){11,23}[a-z]{3,8}\b/g;
 // Lines containing Bearer tokens or Authorization headers are dropped entirely.
 const _AUTH_LINE_RE = /^.*(?:BEARER\s|Authorization:).*/gim;
 const _MAX_SNIPPET  = 4096;
@@ -186,6 +281,7 @@ function _sanitizeSnippet(raw) {
   if (!raw) return null;
   const s = String(raw)
     .replace(_AUTH_LINE_RE, '[auth-redacted]')
+    .replace(_BIP39_RE, '[mnemonic-redacted]')
     .replace(_WALLET_RE, '[addr]')
     .replace(_MNEMONIC_RE, 'MNEMONIC=[redacted]')
     .replace(_HEX64_RE, '[key]');
@@ -196,6 +292,11 @@ function upsertResult(result, logSnippet = null) {
   const idx = results.findIndex(r => r.address === result.address);
   if (idx !== -1) results[idx] = result;
   else results.push(result);
+
+  // ─── On-chain reporter (opt-in, fire-and-forget) ─────────────────────────
+  try { _bufferOnchainRecord(result); } catch (e) {
+    console.warn('[onchain] buffer failed:', e.message);
+  }
 
   // ─── SQLite persistence (non-blocking — failure must not stop the audit) ─
   if (_activeDbRunId != null) {
@@ -215,7 +316,7 @@ function upsertResult(result, logSnippet = null) {
           _dbInsertErrorLog({
             result_id:     Number(resultId),
             stage,
-            error_code:    result.errorCode || null,
+            error_code:    result.errorCode || 'UNKNOWN',
             error_message: err.slice(0, 2048),
             log_snippet:   _sanitizeSnippet(logSnippet),
           });
@@ -262,6 +363,12 @@ export function createState() {
     stopRequested: false,
     lowBalanceWarning: false,
     pauseReason: null,
+    activeBatchId: 0,
+    // Address of the node that was in-flight when Stop was received.
+    // Cleared once consumed by the next /api/resume so resume picks up
+    // with that exact node first instead of whatever order the parallel
+    // online-scan happens to return.
+    resumeHeadAddr: null,
   };
 }
 
@@ -279,9 +386,29 @@ function recomputeCounters(state) {
   }).length;
 }
 
+/**
+ * Bucket a probe error into a coarse category so the dashboard log shows
+ * *why* nodes are offline instead of a meaningless "0 online".
+ */
+function classifyProbeError(err) {
+  const msg = (err?.message || String(err || '')).toLowerCase();
+  const code = err?.code || '';
+  if (msg.includes('timeout') || code === 'ETIMEDOUT' || code === 'ECONNABORTED') return 'TIMEOUT';
+  if (code === 'ENOTFOUND' || msg.includes('getaddrinfo') || msg.includes('enotfound')) return 'DNS_FAIL';
+  if (code === 'ECONNREFUSED' || msg.includes('econnrefused')) return 'TCP_REFUSED';
+  if (code === 'ECONNRESET' || msg.includes('econnreset')) return 'TCP_RESET';
+  if (code === 'EHOSTUNREACH' || msg.includes('ehostunreach')) return 'HOST_UNREACH';
+  if (code === 'ENETUNREACH' || msg.includes('enetunreach')) return 'NET_UNREACH';
+  if (msg.includes('cert') || msg.includes('tls') || msg.includes('ssl') || msg.includes('self-signed') || msg.includes('certificate')) return 'TLS_FAIL';
+  if (msg.includes('no result') || msg.includes('empty')) return 'EMPTY_RESPONSE';
+  if (msg.includes('http')) return 'HTTP_ERROR';
+  return 'OTHER';
+}
+
 /** Scan nodes for online status in parallel */
 async function scanNodesParallel(nodes, concurrency, broadcast, state) {
   const online = [];
+  const errorBuckets = Object.create(null);
   let idx = 0;
   let scanned = 0;
   const worker = async () => {
@@ -295,17 +422,39 @@ async function scanNodesParallel(nodes, concurrency, broadcast, state) {
           sleep(6000).then(() => { throw new Error('timeout'); }),
         ]);
         online.push({ node, status });
-      } catch { }
+      } catch (err) {
+        const bucket = classifyProbeError(err);
+        errorBuckets[bucket] = (errorBuckets[bucket] || 0) + 1;
+      }
       scanned++;
       if (scanned % 100 === 0 || scanned === nodes.length) {
-        if (broadcast) broadcast('log', { msg: `  Scanned ${scanned}/${nodes.length} — ${online.length} online` });
+        // Bucket bracket only on the final summary line. Intermediate
+        // milestones stay clean — operators can read the full breakdown
+        // off the final line or the per-node failure log.
+        const isFinal = scanned === nodes.length;
+        let tail = '';
+        if (isFinal) {
+          const bucketSummary = Object.entries(errorBuckets)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 4)
+            .map(([k, v]) => `${k}:${v}`)
+            .join(' ');
+          if (bucketSummary) tail = ` [${bucketSummary}]`;
+        }
+        if (broadcast) broadcast('log', { msg: `  Scanned ${scanned}/${nodes.length} — ${online.length} online${tail}` });
         if (broadcast) broadcast('state', { state });
       }
     }
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, nodes.length) }, worker));
+  // Stash on state so callers can surface buckets in summary logs / API.
+  if (state) state.lastScanErrorBuckets = errorBuckets;
+  online.errorBuckets = errorBuckets;
   return online;
 }
+
+// Exported for universal-test reachability phase.
+export { scanNodesParallel, classifyProbeError };
 
 /**
  * Build a FAIL result from an error (zero-skip: every failure is explicit).
@@ -350,8 +499,12 @@ function buildFailResult(node, status, state, errMsg, diag = {}) {
 // ─── Main Audit ─────────────────────────────────────────────────────────────
 export async function runAudit(resume, state, broadcast, preloadedNodes = null, opts = {}) {
   resetPipelineStop();
+  refreshAuditSettings();
   state.status = 'running';
-  state.startedAt = new Date().toISOString();
+  // Preserve the original startedAt across Stop/Resume so the dashboard's
+  // "started at" / ETA / elapsed-time mirror the original run exactly.
+  // Only stamp a fresh time on a brand-new run.
+  if (!resume || !state.startedAt) state.startedAt = new Date().toISOString();
   state.errorMessage = null;
   state.retryCount = 0;
   state.retestMode = false;
@@ -359,6 +512,14 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   state.retestFailed = null;
 
   state.testRun = !!opts.testRun;
+  // Route isolation — pin runMode so a leftover 'subscription' from a prior
+  // sub-plan run cannot accidentally propagate into a P2P / TEST_RUN audit.
+  state.runMode = state.testRun ? 'test' : 'p2p';
+  if (state.runMode !== 'subscription') {
+    state.runPlanId = null;
+    state.runSubscriptionId = null;
+    state.runGranter = null;
+  }
 
   clearPoisonedSessions();
   clearPaidNodes();
@@ -366,14 +527,28 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   invalidateSessionCache(); // Wipe stale session map — prevents wrong node→session mapping
   broadcast('state', { state });
 
-  // Create audit log file
-  const logTs = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const auditLogPath = path.join(PROJECT_ROOT, 'results', `audit-${logTs}.log`);
-  state.auditLogPath = auditLogPath;
+  // Create audit log file. On resume, reuse the prior run's log file so the
+  // entire run appends to a single file — otherwise a Stop/Resume splits the
+  // log across multiple files and the boot-time logBuffer rehydration only
+  // sees the newest one (prior-run logs vanish from /api/public/logs).
+  let auditLogPath;
+  if (resume && state.auditLogPath && existsSync(state.auditLogPath)) {
+    auditLogPath = state.auditLogPath;
+  } else {
+    const logTs = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    auditLogPath = path.join(PROJECT_ROOT, 'results', `audit-${logTs}.log`);
+    state.auditLogPath = auditLogPath;
+  }
   const logLine = (msg) => { try { appendFileSync(auditLogPath, msg + '\n', 'utf8'); } catch {} };
-  logLine(`Sentinel Node Tester — Full Audit Log`);
-  logLine(`Started: ${state.startedAt} | Resume: ${resume}`);
-  logLine(`${'='.repeat(80)}`);
+  if (resume) {
+    logLine(`${'='.repeat(80)}`);
+    logLine(`RESUMED: ${new Date().toISOString()}`);
+    logLine(`${'='.repeat(80)}`);
+  } else {
+    logLine(`Sentinel Node Tester — Full Audit Log`);
+    logLine(`Started: ${state.startedAt} | Resume: ${resume}`);
+    logLine(`${'='.repeat(80)}`);
+  }
 
   // Wrap broadcast to also write to log file
   const origBroadcast = broadcast;
@@ -382,7 +557,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
     if (type === 'log' && data?.msg) logLine(data.msg);
   };
 
-  broadcast('log', { msg: `📝 Log file: results/audit-${logTs}.log` });
+  broadcast('log', { msg: `📝 Log file: results/${path.basename(auditLogPath)}${resume ? ' (resumed — appending)' : ''}` });
 
   // ─── Wallet / client setup ────────────────────────
   broadcast('log', { msg: '🔑 Setting up wallet...' });
@@ -418,7 +593,11 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   const v2rayAvailable = await checkV2Ray();
   broadcast('log', { msg: `V2Ray:     ${v2rayAvailable ? '✓ available' : '✗ not found'}` });
   broadcast('log', { msg: `WireGuard: ${WG_AVAILABLE ? '✓ available' : '✗ not found'}` });
-  broadcast('log', { msg: `Admin:     ${IS_ADMIN ? '✓ running as Administrator' : '⚠ NOT admin — use SentinelAudit.vbs for WireGuard'}` });
+  const _adminGood = process.platform === 'win32' ? '✓ running as Administrator' : '✓ running as root';
+  const _adminBad = process.platform === 'win32'
+    ? '⚠ NOT admin — use SentinelAudit.vbs for WireGuard'
+    : '⚠ NOT root — run with sudo for WireGuard';
+  broadcast('log', { msg: `Admin:     ${IS_ADMIN ? _adminGood : _adminBad}` });
 
   // ── Transport intelligence cache ────────────────────────────────────────
   loadTransportCache();
@@ -445,6 +624,9 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   } catch (e) {
     broadcast('log', { msg: `Baseline speed test failed: ${_sanitizeSnippet(e.message)}` });
   }
+
+  // ── On-chain reporter (opt-in) ─────────────────────────────────────────
+  _initOnchainReporter(account, client, state, broadcast);
 
   async function refreshBaseline() {
     try {
@@ -488,6 +670,21 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
     const testedAddrs = new Set(results.map(r => r.address));
     const before = viableNodes.length;
     const filtered = viableNodes.filter(({ node }) => !testedAddrs.has(node.address));
+    // Hoist the in-flight (interrupted) node to position 0 so resume picks
+    // up exactly where Stop hit. scanNodesParallel returns nodes in
+    // race-completion order, so without this hoist the interrupted node
+    // ends up wherever its probe happened to finish.
+    const headAddr = state.resumeHeadAddr;
+    if (headAddr) {
+      const hi = filtered.findIndex(({ node }) => node.address === headAddr);
+      if (hi > 0) {
+        const [head] = filtered.splice(hi, 1);
+        filtered.unshift(head);
+        broadcast('log', { msg: `Resume: starting with interrupted node ${headAddr.slice(0, 20)}…` });
+      } else if (hi === 0) {
+        broadcast('log', { msg: `Resume: starting with interrupted node ${headAddr.slice(0, 20)}…` });
+      }
+    }
     viableNodes.length = 0;
     viableNodes.push(...filtered);
     broadcast('log', { msg: `Resume: skipping ${before - viableNodes.length} already-tested, ${viableNodes.length} remaining.` });
@@ -603,6 +800,9 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
       const nodeNum = b * BATCH_SIZE + j + 1;
 
       state.currentNode = node.address;
+      // Pin the in-flight node so /api/resume hoists it back to position 0.
+      // Cleared the moment we record a result for this node (success or fail).
+      state.resumeHeadAddr = node.address;
       broadcast('state', { state });
       broadcast('log', { msg: `[${nodeNum}/${viableNodes.length}] Testing ${node.address.slice(0, 20)}…` });
 
@@ -644,6 +844,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
         if (result.pass10mbps) state.passed10++;
         if (result.passBaseline) state.passedBaseline++;
         upsertResult(result); // success — no snippet needed
+        state.resumeHeadAddr = null;
         saveResults();
         broadcast('result', { result, state });
         if (result.actualMbps != null) {
@@ -659,7 +860,11 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
         // ─── Stop requested — NOT a failure ────────────────────────────
         // When user pauses/stops, the current node should remain untested
         // so it's first in line on resume. Don't record, don't increment.
-        if (error?._stopRequested || errMsg === 'Stop requested') {
+        // Stop requested — NOT a failure. The in-flight node's V2Ray was killed
+        // by /api/stop, which surfaces as ECONNREFUSED/speedtest errors here.
+        // Trust state.stopRequested over the error message — anything thrown
+        // after the user clicked Stop is collateral, not a real node failure.
+        if (isStopSignal(state, error)) {
           broadcast('log', { msg: `⏸ Node ${node.address.slice(0, 20)}… interrupted — will retry on resume` });
           break;
         }
@@ -707,6 +912,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
         const failResult = buildFailResult(node, status, state, errMsg, error?.diag || {});
         state.failedNodes++;
         upsertResult(failResult, _logSnippet);
+        state.resumeHeadAddr = null;
         saveResults();
         broadcast('result', { result: failResult, state });
         const retryLabel = retried > 0 ? ` (${retried} retries)` : '';
@@ -737,6 +943,22 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
       await sleep(500);
       emergencyCleanupSync();
       if (NODE_DELAY > 0) await sleep(NODE_DELAY);
+    }
+
+    // ─── Auto-cancel sessions in this batch (post-test) ──────────────────────
+    // When `autoCancelAfterTest` is on and we're not in TEST RUN, broadcast a
+    // single MsgCancelSession TX for every session we just paid for. The chain
+    // moves them into inactive_pending; the per-node refund (deposit minus
+    // bytes consumed during the ~10s speedtest) is paid out by the chain after
+    // the settlement window. This is the difference between locking the full
+    // 1 GB deposit per node forever vs. recovering ~98% of it per audit cycle.
+    if (autoCancelRT() && !state.testRun && batchSessionMap && batchSessionMap.size > 0) {
+      const idsToCancel = [...batchSessionMap.values()];
+      try {
+        await submitBatchCancel(client, account, idsToCancel, broadcast);
+      } catch (cancelErr) {
+        broadcast('log', { msg: `  ⚠ Batch cancel raised: ${_sanitizeSnippet(cancelErr.message)}. Continuing.` });
+      }
     }
   }
 
@@ -778,7 +1000,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
       const _irRaw = _irLogLines.join('\n');
       const _irSnippet = _irRaw.length > 4096 ? _irRaw.slice(-4096) : (_irRaw || null);
 
-      if (error?._stopRequested || error?.message === 'Stop requested') {
+      if (isStopSignal(state, error)) {
         broadcast('log', { msg: `⏸ Internet-recovery retest interrupted — remaining nodes untouched` });
         break;
       }
@@ -844,7 +1066,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
       const _ironRaw = _ironLogLines.join('\n');
       const _ironSnippet = _ironRaw.length > 4096 ? _ironRaw.slice(-4096) : (_ironRaw || null);
 
-      if (error?._stopRequested || error?.message === 'Stop requested') {
+      if (isStopSignal(state, error)) {
         broadcast('log', { msg: `⏸ Iron Rule retest interrupted — remaining nodes untouched` });
         break;
       }
@@ -874,6 +1096,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   }
 
   const finalCache = getCacheStats();
+  await _finalizeOnchainReporter();
   state.status = 'done';
   state.completedAt = new Date().toISOString();
   state.currentNode = null;
@@ -885,6 +1108,8 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
 
 // ─── Retest Previously-Failed Nodes ─────────────────────────────────────────
 export async function runRetestSkips(skipAddrs, state, broadcast) {
+  resetPipelineStop();
+  refreshAuditSettings();
   state.status = 'running';
   state.startedAt = new Date().toISOString();
   state.errorMessage = null;
@@ -940,6 +1165,8 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
     broadcast('log', { msg: `Baseline: ${bl.mbps} Mbps` });
   } catch (e) { broadcast('log', { msg: `Baseline failed: ${_sanitizeSnippet(e.message)}` }); }
 
+  _initOnchainReporter(account, client, state, broadcast);
+
   broadcast('log', { msg: '🔍 Fetching node list...' });
   const allNodes = await getAllNodes(broadcast);
 
@@ -947,19 +1174,17 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
   const toTest = allNodes.filter(n => skipSet.has(n.address));
 
   // Direct lookup for nodes not found in paginated list (pagination can miss nodes)
-  // RPC primary (fast single-node lookup), LCD fallback
+  // RPC-only per global rule; withFreshRpc rotates to a new RPC on failure.
   const foundAddrs = new Set(toTest.map(n => n.address));
   const missingAddrs = skipAddrs.filter(a => !foundAddrs.has(a));
   if (missingAddrs.length > 0) {
-    broadcast('log', { msg: `⚠ ${missingAddrs.length} nodes not in paginated list — doing direct lookup...` });
-    const rpcClient = await getRpcClient();
+    broadcast('log', { msg: `⚠ ${missingAddrs.length} nodes not in paginated list — doing direct RPC lookup...` });
     for (const addr of missingAddrs) {
       try {
-        let node = null;
-        // Try RPC first
-        if (rpcClient) {
-          node = await rpcQueryNode(rpcClient, addr);
-        }
+        const node = await withFreshRpc(
+          (rpc) => rpcQueryNode(rpc, addr),
+          `rpcQueryNode(${addr.slice(0, 20)}…)`,
+        );
         if (node) {
           const rawAddrs = (node.remote_addrs || []).filter(Boolean);
           const rawAddr = rawAddrs[0] || '';
@@ -972,27 +1197,9 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
             planIds: [],
           });
           broadcast('log', { msg: `  ✓ Found ${addr.slice(0, 20)}… via RPC` });
-        } else {
-          // LCD fallback
-          const activeLcd = getActiveLcd();
-          const res = await fetch(`${activeLcd}/sentinel/node/v3/nodes/${addr}`, { signal: AbortSignal.timeout(10000) });
-          const data = await res.json();
-          if (data.node) {
-            const rawAddrs = (data.node.remote_addrs || []).filter(Boolean);
-            const rawAddr = rawAddrs[0] || '';
-            toTest.push({
-              address: data.node.address || addr,
-              remoteUrl: rawAddr.startsWith('http') ? rawAddr : `https://${rawAddr}`,
-              remoteAddrs: rawAddrs.map(a => a.startsWith('http') ? a : `https://${a}`),
-              gigabyte_prices: data.node.gigabyte_prices || [],
-              hourly_prices: data.node.hourly_prices || [],
-              planIds: [],
-            });
-            broadcast('log', { msg: `  ✓ Found ${addr.slice(0, 20)}… via LCD fallback` });
-          }
         }
       } catch (e) {
-        broadcast('log', { msg: `  ✗ ${addr.slice(0, 20)}… lookup failed: ${_sanitizeSnippet(e.message?.slice(0, 50))}` });
+        broadcast('log', { msg: `  ✗ ${addr.slice(0, 20)}… RPC lookup failed: ${_sanitizeSnippet(e.message?.slice(0, 50))}` });
       }
     }
   }
@@ -1037,7 +1244,7 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
     const _rrRaw = _rrLogLines.join('\n');
     const _rrSnippet = _rrRaw.length > 4096 ? _rrRaw.slice(-4096) : (_rrRaw || null);
 
-    if (error?._stopRequested || error?.message === 'Stop requested') {
+    if (isStopSignal(state, error)) {
       broadcast('log', { msg: `⏸ Retest interrupted — remaining nodes untouched` });
       logLine(`  STOPPED by user (node not counted as failed)`);
       break;
@@ -1076,6 +1283,7 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
   }
 
   emergencyCleanupSync();
+  await _finalizeOnchainReporter();
   state.status = 'done';
   state.completedAt = new Date().toISOString();
   state.currentNode = null;
@@ -1094,6 +1302,12 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
 
 // ─── Plan Subscription Test ─────────────────────────────────────────────────
 export async function runPlanTest(planId, state, broadcast) {
+  resetPipelineStop();
+  refreshAuditSettings();
+  // Route isolation — see runSubPlanTest comment.
+  state.testRun = false;
+  state.runMode = 'subscription';
+  state.runPlanId = String(planId);
   state.status = 'running';
   state.startedAt = new Date().toISOString();
   state.errorMessage = null;
@@ -1170,45 +1384,46 @@ export async function runPlanTest(planId, state, broadcast) {
     return;
   }
 
-  // 2. Fetch plan nodes (RPC primary, LCD fallback)
-  broadcast('log', { msg: `  Fetching plan ${planId} nodes...` });
+  // 2. Fetch plan nodes (RPC-only per global rule; withFreshRpc rotates on failure)
+  broadcast('log', { msg: `  Fetching plan ${planId} nodes via RPC...` });
   let planNodes = [];
+  let allPlanNodes = [];
   try {
-    let allPlanNodes = [];
-    // Try RPC first (paginated — walks all pages)
-    const rpcClient = await getRpcClient();
-    if (rpcClient) {
-      try {
-        allPlanNodes = await rpcFetchAllNodesForPlanPaginated(rpcClient, planId, broadcast);
-        broadcast('log', { msg: `  Fetched ${allPlanNodes.length} plan nodes via RPC (paginated)` });
-      } catch (e) {
-        broadcast('log', { msg: `  RPC plan-nodes fetch failed: ${_sanitizeSnippet(e.message)}` });
-        allPlanNodes = [];
-      }
-    }
-    // LCD fallback if RPC failed
-    if (allPlanNodes.length === 0) {
-      const activeLcd = await ensureLcd();
-      // Chain truncates at `limit` without emitting next_key, so request a big page.
-      const pnUrl = `${activeLcd}/sentinel/node/v3/plans/${planId}/nodes?status=1&pagination.limit=10000`;
-      const nr = await fetch(pnUrl, { signal: AbortSignal.timeout(20000) });
-      const nd = await nr.json();
-      allPlanNodes.push(...(nd.nodes || []));
-    }
-    planNodes = allPlanNodes.map(n => {
+    allPlanNodes = await withFreshRpc(
+      (rpc) => rpcFetchAllNodesForPlanPaginated(rpc, planId, broadcast),
+      `rpcFetchAllNodesForPlan(${planId})`,
+    );
+    broadcast('log', { msg: `  Fetched ${allPlanNodes.length} plan nodes via RPC (paginated)` });
+  } catch (err) {
+    state.status = 'error';
+    state.errorMessage = `RPC plan-nodes fetch failed: ${err.message}`;
+    broadcast('state', { state });
+    return;
+  }
+  if (!allPlanNodes || allPlanNodes.length === 0) {
+    state.status = 'done';
+    state.errorMessage = `Plan ${planId} returned 0 nodes from RPC`;
+    state.completedAt = new Date().toISOString();
+    broadcast('state', { state });
+    return;
+  }
+  let _droppedNoRemote = 0;
+  planNodes = allPlanNodes
+    .map(n => {
       const rawAddr = (n.remote_addrs || [])[0] || '';
+      if (!rawAddr || typeof rawAddr !== 'string') { _droppedNoRemote++; return null; }
+      const remoteUrl = rawAddr.startsWith('http') ? rawAddr : `https://${rawAddr}`;
+      if (remoteUrl === 'https://' || remoteUrl === 'http://') { _droppedNoRemote++; return null; }
       return {
         address: n.address,
-        remoteUrl: rawAddr.startsWith('http') ? rawAddr : `https://${rawAddr}`,
+        remoteUrl,
         gigabyte_prices: n.gigabyte_prices || [],
         planIds: [planId],
       };
-    });
-  } catch (err) {
-    state.status = 'error';
-    state.errorMessage = err.message;
-    broadcast('state', { state });
-    return;
+    })
+    .filter(Boolean);
+  if (_droppedNoRemote) {
+    broadcast('log', { msg: `  Dropped ${_droppedNoRemote} plan node(s) with empty/invalid remote_addrs` });
   }
 
   broadcast('log', { msg: `  Found ${planNodes.length} nodes in plan ${planId}` });
@@ -1241,6 +1456,8 @@ export async function runPlanTest(planId, state, broadcast) {
     state.baselineMbps = bl.mbps;
     broadcast('log', { msg: `  Baseline: ${bl.mbps} Mbps` });
   } catch (e) { broadcast('log', { msg: `  Baseline failed: ${_sanitizeSnippet(e.message)}` }); }
+
+  _initOnchainReporter(account, client, state, broadcast);
 
   let planPassed = 0, planFailed = 0;
 
@@ -1337,7 +1554,7 @@ export async function runPlanTest(planId, state, broadcast) {
         planFailed++;
         broadcast('log', { msg: `  ✗ Plan node failed` });
       }
-    } else if (error?._stopRequested || error?.message === 'Stop requested') {
+    } else if (isStopSignal(state, error)) {
       broadcast('log', { msg: `⏸ Plan test interrupted — remaining nodes untouched` });
       break;
     } else {
@@ -1359,6 +1576,7 @@ export async function runPlanTest(planId, state, broadcast) {
   }
 
   emergencyCleanupSync();
+  await _finalizeOnchainReporter();
   state.status = 'done';
   state.completedAt = new Date().toISOString();
   state.currentNode = null;
@@ -1381,21 +1599,39 @@ export async function runPlanTest(planId, state, broadcast) {
  * This mirrors how Android/iOS consumer apps ship — the end user never holds
  * P2P, the plan operator covers all on-chain fees via a pre-granted feegrant.
  */
-export async function runSubPlanTest(planId, subscriptionId, granterAddr, state, broadcast) {
+export async function runSubPlanTest(planId, subscriptionId, granterAddr, state, broadcast, opts = {}) {
+  resetPipelineStop();
+  // Route isolation — a sub-plan run is NEVER a test-run, regardless of what
+  // a previous run left behind on `state`. Without this, a stale state.testRun
+  // from a prior TEST_RUN sweep would short-circuit testNode() into TEST_RUN_SKIP
+  // rows and the entire plan would return spoofed data. Pin runMode here too so
+  // SSE consumers (admin / live) classify in-flight events correctly.
+  state.testRun = false;
+  state.runMode = 'subscription';
+  state.runPlanId = String(planId);
+  state.runSubscriptionId = String(subscriptionId);
+  state.runGranter = String(granterAddr);
+  const resume = !!opts.resume;
   state.status = 'running';
-  state.startedAt = new Date().toISOString();
+  // Preserve original startedAt across Stop/Resume so dashboard ETA / elapsed
+  // mirror the original run. Only stamp fresh on a brand-new run.
+  if (!resume || !state.startedAt) state.startedAt = new Date().toISOString();
   state.errorMessage = null;
-  state.totalNodes = 0;
-  state.testedNodes = 0;
-  state.failedNodes = 0;
+  if (!resume) {
+    state.totalNodes = 0;
+    state.testedNodes = 0;
+    state.failedNodes = 0;
+  }
   state.retryCount = 0;
   recomputeCounters(state);
   clearPoisonedSessions();
   clearPaidNodes();
   broadcast('state', { state });
 
+  if (!granterAddr || typeof granterAddr !== 'string') {
+    throw new Error('runSubPlanTest: granterAddr is required (got null/undefined)');
+  }
   broadcast('log', { msg: `📋 Sub. Plan ${planId} — sub ${subscriptionId} — granter ${granterAddr.slice(0, 16)}…` });
-  broadcast('log', { msg: `  Mode: fee-granted (wallet pays zero gas; plan owner pays all TXs)` });
 
   const { wallet, account, privkey } = await cachedWalletSetup(MNEMONIC);
   state.walletAddress = account.address;
@@ -1409,48 +1645,59 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
 
   // Pre-broadcast fee grant verification — abort with structured error if missing/expired.
   // A revoked fee grant means EVERY session TX will fail; fail fast before spending any chain time.
-  const { queryFeeGrant, queryFeeGrantRpcFirst, getRpcClient: _getRpcClient, broadcastWithFeeGrant, hasActiveSubscription, ensureLcd: _ensureLcd } = await import('../core/chain.js');
+  // Special case: when the operator IS the plan owner, no feegrant is required —
+  // they pay their own gas natively.
+  const { queryFeeGrant, queryFeeGrantRpcFirst, withFreshRpc: _withFreshRpc, broadcastWithFeeGrant, hasActiveSubscription, ensureLcd: _ensureLcd } = await import('../core/chain.js');
   const lcd = await _ensureLcd();
-  const _fgRpcClient = await _getRpcClient();
-  try {
-    const allowance = await queryFeeGrantRpcFirst(_fgRpcClient, lcd, granterAddr, account.address);
-    if (!allowance) {
+  const _selfGranter = granterAddr === account.address;
+  if (_selfGranter) {
+    broadcast('log', { msg: `  Mode: self-granter (wallet IS the plan owner — pays its own gas, no feegrant)` });
+    broadcast('log', { msg: `  ✓ Self-granter path — no fee-grant verification needed` });
+  } else {
+    broadcast('log', { msg: `  Mode: fee-granted (wallet pays zero gas; plan owner pays all TXs)` });
+    try {
+      const allowance = await _withFreshRpc(
+        (client) => queryFeeGrantRpcFirst(client, lcd, granterAddr, account.address),
+        'feeGrantStartCheck',
+      );
+      if (!allowance) {
+        const abortErr = {
+          code: 'FEE_GRANT_MISSING_AT_START',
+          granter: granterAddr,
+          grantee: account.address,
+          allowanceType: null,
+          spendLimit: null,
+          message: `Plan owner ${granterAddr.slice(0, 16)}… has no active fee grant for this wallet`,
+        };
+        state.status = 'error';
+        state.errorMessage = abortErr.message;
+        state.errorCode = abortErr.code;
+        broadcast('state', { state });
+        broadcast('log', { msg: `  ✗ FEE_GRANT_MISSING_AT_START — cannot continue (plan owner must grant first)` });
+        return;
+      }
+      // Surface allowance details in log for operator debugging
+      const allowanceType = allowance['@type'] || allowance.type_url || null;
+      const spendLimit = allowance.spend_limit || allowance.allowance?.spend_limit || null;
+      broadcast('log', { msg: `  ✓ Fee grant verified — type=${allowanceType || 'unknown'} limit=${JSON.stringify(spendLimit) || 'none'}` });
+    } catch (err) {
+      // If the query itself throws (network error), abort rather than silently proceeding —
+      // we cannot know whether the grant exists, and every session TX would fail.
       const abortErr = {
         code: 'FEE_GRANT_MISSING_AT_START',
         granter: granterAddr,
         grantee: account.address,
         allowanceType: null,
         spendLimit: null,
-        message: `Plan owner ${granterAddr.slice(0, 16)}… has no active fee grant for this wallet`,
+        message: `Fee grant check threw: ${_sanitizeSnippet(err.message)}`,
       };
       state.status = 'error';
       state.errorMessage = abortErr.message;
       state.errorCode = abortErr.code;
       broadcast('state', { state });
-      broadcast('log', { msg: `  ✗ FEE_GRANT_MISSING_AT_START — cannot continue (plan owner must grant first)` });
+      broadcast('log', { msg: `  ✗ FEE_GRANT_MISSING_AT_START — check threw error, aborting: ${_sanitizeSnippet(err.message)}` });
       return;
     }
-    // Surface allowance details in log for operator debugging
-    const allowanceType = allowance['@type'] || allowance.type_url || null;
-    const spendLimit = allowance.spend_limit || allowance.allowance?.spend_limit || null;
-    broadcast('log', { msg: `  ✓ Fee grant verified — type=${allowanceType || 'unknown'} limit=${JSON.stringify(spendLimit) || 'none'}` });
-  } catch (err) {
-    // If the query itself throws (network error), abort rather than silently proceeding —
-    // we cannot know whether the grant exists, and every session TX would fail.
-    const abortErr = {
-      code: 'FEE_GRANT_MISSING_AT_START',
-      granter: granterAddr,
-      grantee: account.address,
-      allowanceType: null,
-      spendLimit: null,
-      message: `Fee grant check threw: ${_sanitizeSnippet(err.message)}`,
-    };
-    state.status = 'error';
-    state.errorMessage = abortErr.message;
-    state.errorCode = abortErr.code;
-    broadcast('state', { state });
-    broadcast('log', { msg: `  ✗ FEE_GRANT_MISSING_AT_START — check threw error, aborting: ${_sanitizeSnippet(err.message)}` });
-    return;
   }
 
   // Verify subscription still active
@@ -1466,43 +1713,46 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
 
   const v2rayAvailable = await checkV2Ray();
 
-  // Fetch plan nodes (RPC primary, LCD fallback)
-  broadcast('log', { msg: `  Fetching plan ${planId} nodes...` });
+  // Fetch plan nodes (RPC-only per global rule; withFreshRpc rotates on failure)
+  broadcast('log', { msg: `  Fetching plan ${planId} nodes via RPC...` });
   let planNodes = [];
+  let allPlanNodes = [];
   try {
-    let allPlanNodes = [];
-    const rpcClient = await getRpcClient();
-    if (rpcClient) {
-      try {
-        allPlanNodes = await rpcFetchAllNodesForPlanPaginated(rpcClient, planId, broadcast);
-        broadcast('log', { msg: `  Fetched ${allPlanNodes.length} plan nodes via RPC (paginated)` });
-      } catch (e) {
-        broadcast('log', { msg: `  RPC plan-nodes fetch failed: ${_sanitizeSnippet(e.message)}` });
-        allPlanNodes = [];
-      }
-    }
-    if (allPlanNodes.length === 0) {
-      const activeLcd = await ensureLcd();
-      // Chain truncates at `limit` without emitting next_key, so request a big page.
-      const pnUrl = `${activeLcd}/sentinel/node/v3/plans/${planId}/nodes?status=1&pagination.limit=10000`;
-      const nr = await fetch(pnUrl, { signal: AbortSignal.timeout(20000) });
-      const nd = await nr.json();
-      allPlanNodes.push(...(nd.nodes || []));
-    }
-    planNodes = allPlanNodes.map(n => {
+    allPlanNodes = await withFreshRpc(
+      (rpc) => rpcFetchAllNodesForPlanPaginated(rpc, planId, broadcast),
+      `rpcFetchAllNodesForPlan(${planId})`,
+    );
+    broadcast('log', { msg: `  Fetched ${allPlanNodes.length} plan nodes via RPC (paginated)` });
+  } catch (err) {
+    state.status = 'error';
+    state.errorMessage = `RPC plan-nodes fetch failed: ${err.message}`;
+    broadcast('state', { state });
+    return;
+  }
+  if (!allPlanNodes || allPlanNodes.length === 0) {
+    state.status = 'done';
+    state.errorMessage = `Plan ${planId} returned 0 nodes from RPC`;
+    state.completedAt = new Date().toISOString();
+    broadcast('state', { state });
+    return;
+  }
+  let _droppedNoRemote = 0;
+  planNodes = allPlanNodes
+    .map(n => {
       const rawAddr = (n.remote_addrs || [])[0] || '';
+      if (!rawAddr || typeof rawAddr !== 'string') { _droppedNoRemote++; return null; }
+      const remoteUrl = rawAddr.startsWith('http') ? rawAddr : `https://${rawAddr}`;
+      if (remoteUrl === 'https://' || remoteUrl === 'http://') { _droppedNoRemote++; return null; }
       return {
         address: n.address,
-        remoteUrl: rawAddr.startsWith('http') ? rawAddr : `https://${rawAddr}`,
+        remoteUrl,
         gigabyte_prices: n.gigabyte_prices || [],
         planIds: [planId],
       };
-    });
-  } catch (err) {
-    state.status = 'error';
-    state.errorMessage = err.message;
-    broadcast('state', { state });
-    return;
+    })
+    .filter(Boolean);
+  if (_droppedNoRemote) {
+    broadcast('log', { msg: `  Dropped ${_droppedNoRemote} plan node(s) with empty/invalid remote_addrs` });
   }
 
   broadcast('log', { msg: `  Found ${planNodes.length} nodes in plan ${planId}` });
@@ -1514,8 +1764,34 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
   }
 
   broadcast('log', { msg: `  Scanning plan nodes for online status...` });
-  const onlineNodes = await scanNodesParallel(planNodes, 20, broadcast, state);
-  broadcast('log', { msg: `  ${onlineNodes.length}/${planNodes.length} plan nodes are online` });
+  const onlineNodesRaw = await scanNodesParallel(planNodes, 20, broadcast, state);
+  broadcast('log', { msg: `  ${onlineNodesRaw.length}/${planNodes.length} plan nodes are online` });
+
+  // Resume mode: filter already-tested addresses so the in-flight node (if any)
+  // is first in line and previously-completed nodes are not re-paid for.
+  let onlineNodes = onlineNodesRaw;
+  let _alreadyTested = 0;
+  if (resume) {
+    const testedAddrs = new Set(results.map(r => r.address));
+    const filtered = onlineNodesRaw.filter(({ node }) => !testedAddrs.has(node.address));
+    _alreadyTested = onlineNodesRaw.length - filtered.length;
+    // Hoist the in-flight (interrupted) node to position 0. Without this,
+    // scanNodesParallel returns nodes in race-completion order so the
+    // interrupted node lands wherever its probe happened to finish.
+    const headAddr = state.resumeHeadAddr;
+    if (headAddr) {
+      const hi = filtered.findIndex(({ node }) => node.address === headAddr);
+      if (hi > 0) {
+        const [head] = filtered.splice(hi, 1);
+        filtered.unshift(head);
+        broadcast('log', { msg: `  Resume: starting with interrupted node ${headAddr.slice(0, 20)}…` });
+      } else if (hi === 0) {
+        broadcast('log', { msg: `  Resume: starting with interrupted node ${headAddr.slice(0, 20)}…` });
+      }
+    }
+    onlineNodes = filtered;
+    broadcast('log', { msg: `  Resume: skipping ${_alreadyTested} already-tested, ${onlineNodes.length} remaining.` });
+  }
 
   if (onlineNodes.length === 0) {
     state.status = 'done';
@@ -1524,7 +1800,7 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
     return;
   }
 
-  state.totalNodes = onlineNodes.length;
+  state.totalNodes = (resume ? results.length : 0) + onlineNodes.length;
   broadcast('state', { state });
 
   broadcast('log', { msg: `📡 Running baseline...` });
@@ -1534,12 +1810,15 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
     broadcast('log', { msg: `  Baseline: ${bl.mbps} Mbps` });
   } catch (e) { broadcast('log', { msg: `  Baseline failed: ${_sanitizeSnippet(e.message)}` }); }
 
+  _initOnchainReporter(account, client, state, broadcast);
+
   let subPassed = 0, subFailed = 0;
 
   for (let i = 0; i < onlineNodes.length; i++) {
     if (state.stopRequested) { broadcast('log', { msg: '⏹ Stop requested.' }); break; }
     const { node, status } = onlineNodes[i];
     state.currentNode = node.address;
+    state.resumeHeadAddr = node.address;
     broadcast('state', { state });
     broadcast('log', { msg: `[${i + 1}/${onlineNodes.length}] Testing ${node.address.slice(0, 20)}… via Sub. Plan ${planId}` });
 
@@ -1558,12 +1837,23 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
         typeUrl: V3_SUB_SESSION_TYPE,
         value: { from: account.address, id: BigInt(subscriptionId), nodeAddress: node.address },
       };
-      _spBroadcast('log', { msg: `  Starting session (fee-granted by ${granterAddr.slice(0, 12)}…)` });
-      const sessResult = await broadcastWithFeeGrant(client, account.address, [sessMsg], granterAddr);
-      if (sessResult.code !== 0) {
-        throw new Error(`Session tx failed code=${sessResult.code}: ${sessResult.rawLog}`);
+      let sessResult;
+      if (_selfGranter) {
+        _spBroadcast('log', { msg: `  Starting session (self-paid gas)` });
+        const _spFee = { amount: [{ denom: DENOM, amount: '200000' }], gas: '800000' };
+        sessResult = await signAndBroadcastRetry(client, account.address, [sessMsg], _spFee, _spBroadcast);
+        if (sessResult.code !== 0) {
+          throw new Error(`Session tx failed code=${sessResult.code}: ${sessResult.rawLog}`);
+        }
+        state.spentUdvpn += 200000;
+      } else {
+        _spBroadcast('log', { msg: `  Starting session (fee-granted by ${granterAddr.slice(0, 12)}…)` });
+        sessResult = await broadcastWithFeeGrant(client, account.address, [sessMsg], granterAddr);
+        if (sessResult.code !== 0) {
+          throw new Error(`Session tx failed code=${sessResult.code}: ${sessResult.rawLog}`);
+        }
+        // Wallet pays zero — do NOT increment spentUdvpn on fee-granted TX
       }
-      // Wallet pays zero — do NOT increment spentUdvpn on fee-granted TX
 
       for (const event of (sessResult.events || [])) {
         if (/session/i.test(event.type)) {
@@ -1578,10 +1868,12 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
         }
       }
       if (!sessionId) throw new Error('No session_id in tx events');
-      _spBroadcast('log', { msg: `  ✓ Session ${sessionId} (fee-granted) — tx=${sessResult.transactionHash}` });
+      const _payTag = _selfGranter ? 'self-paid' : 'fee-granted';
+      _spBroadcast('log', { msg: `  ✓ Session ${sessionId} (${_payTag}) — tx=${sessResult.transactionHash}` });
       await waitForSessionActive(node.address, account.address, 20_000);
     } catch (err) {
-      _spBroadcast('log', { msg: `  ✗ Fee-granted session start failed: ${_sanitizeSnippet(err.message)}` });
+      const _failTag = _selfGranter ? 'Self-paid' : 'Fee-granted';
+      _spBroadcast('log', { msg: `  ✗ ${_failTag} session start failed: ${_sanitizeSnippet(err.message)}` });
       subFailed++;
       const _spRawSess = _spLogLines.join('\n');
       const _spSnippetSess = _spRawSess.length > 4096 ? _spRawSess.slice(-4096) : (_spRawSess || null);
@@ -1590,9 +1882,11 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
       errResult.planIds = [planId];
       errResult.diag = errResult.diag || {};
       errResult.diag.viaSubscription = true;
-      errResult.diag.feeGranted = true;
+      errResult.diag.feeGranted = !_selfGranter;
+      errResult.diag.selfGranter = _selfGranter;
       errResult.diag.granter = granterAddr;
       upsertResult(errResult, _sanitizeSnippet(_spSnippetSess));
+      state.resumeHeadAddr = null;
       saveResults();
       broadcast('result', { result: errResult, state });
       continue;
@@ -1616,12 +1910,14 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
       result.diag.planId = planId;
       result.diag.subscriptionId = subscriptionId;
       result.diag.viaSubscription = true;
-      result.diag.feeGranted = true;
+      result.diag.feeGranted = !_selfGranter;
+      result.diag.selfGranter = _selfGranter;
       result.diag.granter = granterAddr;
       if (result.slaApplicable && result.pass15mbps) state.passed15++;
       if (result.pass10mbps) state.passed10++;
       if (result.passBaseline) state.passedBaseline++;
       upsertResult(result);
+      state.resumeHeadAddr = null;
       saveResults();
       broadcast('result', { result, state });
       if (result.actualMbps != null) {
@@ -1631,7 +1927,7 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
         subFailed++;
         broadcast('log', { msg: `  ✗ Sub. Plan node failed` });
       }
-    } else if (error?._stopRequested || error?.message === 'Stop requested') {
+    } else if (isStopSignal(state, error)) {
       broadcast('log', { msg: `⏸ Sub. Plan test interrupted — remaining nodes untouched` });
       break;
     } else {
@@ -1643,9 +1939,11 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
       failResult.planIds = [planId];
       failResult.diag = failResult.diag || {};
       failResult.diag.viaSubscription = true;
-      failResult.diag.feeGranted = true;
+      failResult.diag.feeGranted = !_selfGranter;
+      failResult.diag.selfGranter = _selfGranter;
       failResult.diag.granter = granterAddr;
       upsertResult(failResult, _sanitizeSnippet(_spSnippet));
+      state.resumeHeadAddr = null;
       saveResults();
       broadcast('result', { result: failResult, state });
       broadcast('log', { msg: `  ✗ Test error: ${errMsg}` });
@@ -1657,10 +1955,16 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
   }
 
   emergencyCleanupSync();
+  await _finalizeOnchainReporter();
   state.status = 'done';
   state.completedAt = new Date().toISOString();
   state.currentNode = null;
   broadcast('state', { state });
   broadcast('log', { msg: `✅ Sub. Plan ${planId} test complete. ${subPassed} passed, ${subFailed} failed out of ${onlineNodes.length} tested.` });
-  broadcast('log', { msg: `  Wallet paid: 0 P2P (all gas covered by granter ${granterAddr.slice(0, 16)}…)` });
+  if (_selfGranter) {
+    const _spentP2P = (state.spentUdvpn / 1_000_000).toFixed(6);
+    broadcast('log', { msg: `  Wallet paid: ${_spentP2P} P2P (self-granter — wallet IS the plan owner)` });
+  } else {
+    broadcast('log', { msg: `  Wallet paid: 0 P2P (all gas covered by granter ${granterAddr.slice(0, 16)}…)` });
+  }
 }

@@ -1,6 +1,8 @@
 # Security Audit — Sentinel Node Tester
 **Date:** 2026-04-23  
 **Auditor:** Internal (Wave A backend review)  
+
+> **⚠️ ARCHIVED — point-in-time audit.** Some findings reference `PUBLIC_MODE`, which was removed in the 2026-04-25 single-mode collapse. Re-audit before relying on remediation status.
 **Scope:** `server.js`, `core/auth.js`, `core/rate-limit.js`, `core/db.js`, `core/chain.js`, `audit/continuous.js`, `audit/pipeline.js`
 
 ---

@@ -1,7 +1,7 @@
 // Linux WireGuard tunnel management
 // Uses wg-quick up/down (requires root/sudo)
 
-import { execSync, execFileSync } from 'child_process';
+import { execSync, execFileSync, spawnSync } from 'child_process';
 import { existsSync, writeFileSync, unlinkSync, mkdirSync, statSync } from 'fs';
 import path from 'path';
 import os from 'os';
@@ -28,10 +28,9 @@ function findWireGuardExe() {
   for (const p of paths) {
     if (existsSync(p)) return p;
   }
-  try {
-    const result = execSync('which wg', { encoding: 'utf8', stdio: 'pipe' }).trim();
-    if (result) return result;
-  } catch {}
+  // Probe `wg` directly via PATH — `which` may not exist in minimal containers
+  const probe = spawnSync('wg', ['--version'], { stdio: 'ignore' });
+  if (!probe.error && (probe.status === 0 || probe.status === 1)) return 'wg';
   return null;
 }
 
@@ -44,10 +43,9 @@ function findWgQuick() {
   for (const p of paths) {
     if (existsSync(p)) return p;
   }
-  try {
-    const result = execSync('which wg-quick', { encoding: 'utf8', stdio: 'pipe' }).trim();
-    if (result) return result;
-  } catch {}
+  // Probe `wg-quick` directly via PATH — `which` may not exist in minimal containers
+  const probe = spawnSync('wg-quick', ['--help'], { stdio: 'ignore' });
+  if (!probe.error && (probe.status === 0 || probe.status === 1)) return 'wg-quick';
   return null;
 }
 
