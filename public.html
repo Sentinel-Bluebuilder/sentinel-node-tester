@@ -1684,6 +1684,42 @@
         .replace(/'/g, '&#39;');
     }
 
+    // Map raw error codes (DB strings) to human-readable labels for the
+    // public failure popup. The raw code stays alongside the label so the
+    // operator/curious viewer can still grep logs by canonical code.
+    const ERR_LABELS = {
+      TEST_RUN_SKIP:           'Skipped (test run)',
+      UNKNOWN:                 'Unknown failure',
+      OTHER:                   'Unclassified',
+      TIMEOUT:                 'Connection timed out',
+      NODE_TIMEOUT:            'Node response timed out',
+      HANDSHAKE_TIMEOUT:       'WireGuard handshake timed out',
+      HANDSHAKE_FAILED:        'WireGuard handshake failed',
+      DNS_FAIL:                'DNS resolution failed',
+      TCP_REFUSED:             'TCP connection refused',
+      TCP_RESET:               'TCP connection reset',
+      TCP_PORT_DEAD:           'V2Ray proxy port not responding',
+      HOST_UNREACH:            'Host unreachable',
+      NET_UNREACH:             'Network unreachable',
+      TLS_FAIL:                'TLS / certificate error',
+      EMPTY_RESPONSE:          'Empty response from node',
+      HTTP_ERROR:              'HTTP error from node',
+      '409_SESSION_EXISTS':    'Active session already exists (409)',
+      CODE_105_INACTIVE:       'Subscription inactive (code 105)',
+      INVALID_PRICE:           'Node advertised invalid price',
+      ADDRESS_MISMATCH:        'Node config address mismatch',
+      NODE_RPC_BROKEN:         'Node RPC endpoint broken',
+      DUPLICATE_PAYMENT:       'Duplicate payment detected',
+      SOCKS5_NO_CONNECTIVITY:  'Tunnel up but no internet routing',
+      NODE_DB_CORRUPT:         'Node-side database corrupted',
+      INSUFFICIENT_FUNDS:      'Insufficient wallet funds',
+    };
+    function errLabel(code) {
+      if (!code) return '—';
+      const c = String(code).trim().toUpperCase();
+      return ERR_LABELS[c] || c.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, ch => ch.toUpperCase());
+    }
+
     // ─── Build pass bar HTML ───
     function buildPassBarHtml(barArr, cssClass) {
       if (!barArr || barArr.length === 0) return '<span class="pass-ratio">—</span>';
@@ -2184,6 +2220,7 @@
           'Node:       ' + (moniker || '—'),
           'Address:    ' + addr,
           'Stage:      ' + (er.stage || '—'),
+          'Error:      ' + errLabel(er.error_code),
           'Error Code: ' + (er.error_code || '—'),
           'Message:    ' + (er.error_message || '—'),
           'Captured:   ' + (er.captured_at ? fmtUtc(er.captured_at) : '—'),
@@ -2258,7 +2295,7 @@
           ${row('Node', eh(moniker))}
           ${row('Address', `<span style="font-family:var(--font-mono);font-size:12px">${eh(addr)}</span>`)}
           ${row('Stage', eh(er.stage))}
-          ${row('Error Code', `<span style="font-family:var(--font-mono);font-size:12px">${eh(er.error_code)}</span>`)}
+          ${row('Error', `<span style="color:var(--text)">${eh(errLabel(er.error_code))}</span><span style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted);margin-left:8px">${eh(er.error_code || '')}</span>`)}
           ${row('Captured', eh(captured))}
           ${row('Message', `<span style="font-family:var(--font-mono);font-size:12px;white-space:pre-wrap">${eh(er.error_message)}</span>`)}
           ${er.log_snippet ? `
