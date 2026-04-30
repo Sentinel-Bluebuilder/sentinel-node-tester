@@ -183,7 +183,18 @@ export function getActiveDbRunId() { return _activeDbRunId; }
 let _onchainReporter = null;
 
 function _initOnchainReporter(account, client, state, broadcast) {
-  if (!onchainEnabledRT()) { _onchainReporter = null; return; }
+  // Always reset between runs so a prior reporter never leaks across modes.
+  _onchainReporter = null;
+  if (!onchainEnabledRT()) {
+    broadcast('log', { msg: '📡 On-chain reporting: OFF (toggle in admin → settings to enable)' });
+    return;
+  }
+  // Enabled in settings but no signer/client available — log the reason loudly
+  // so the operator knows why nothing is being posted.
+  if (!account || !client) {
+    broadcast('log', { msg: `⚠ On-chain reporting: ENABLED but no ${!account ? 'wallet' : 'RPC client'} — staying OFF for this run` });
+    return;
+  }
   _onchainReporter = {
     enabled: true,
     batchSize: onchainBatchSizeRT(),
@@ -197,7 +208,7 @@ function _initOnchainReporter(account, client, state, broadcast) {
     committed: 0,
     lastTxhash: null,
   };
-  broadcast('log', { msg: `📡 On-chain reporting ON — every ${_onchainReporter.batchSize} nodes (region=${_onchainReporter.region || 'auto'}, baseline=${_onchainReporter.baselineMbps}Mbps)` });
+  broadcast('log', { msg: `📡 On-chain reporting: ON — every ${_onchainReporter.batchSize} nodes (region=${_onchainReporter.region || 'auto'}, baseline=${_onchainReporter.baselineMbps}Mbps, signer=${account.address.slice(0, 16)}…)` });
 }
 
 async function _flushOnchainBatch(force = false) {
@@ -233,6 +244,10 @@ async function _flushOnchainBatch(force = false) {
 function _bufferOnchainRecord(result) {
   const r = _onchainReporter;
   if (!r || !r.enabled) return;
+  // Skip rows that represent "not actually tested" — TEST RUN demo rows and
+  // operator-flagged skips are not real measurements and must never end up
+  // in an on-chain performance report.
+  if (result?.errorCode === 'TEST_RUN_SKIP' || result?.skipped) return;
   const rec = resultToRecord(result);
   if (!rec) return;
   r.buffer.push(rec);
@@ -246,7 +261,11 @@ async function _finalizeOnchainReporter() {
   if (!_onchainReporter) return;
   await _flushOnchainBatch(true);
   if (_onchainReporter) {
-    _onchainReporter.broadcast?.('log', { msg: `📡 On-chain reporting done — ${_onchainReporter.committed} nodes posted across ${_onchainReporter.lastTxhash ? 'multiple TXs' : 'no TXs'}.` });
+    const r = _onchainReporter;
+    const tail = r.lastTxhash
+      ? `last TX https://p2pscan.com/transaction/${r.lastTxhash}`
+      : 'no TXs broadcast';
+    r.broadcast?.('log', { msg: `📡 On-chain reporting done — ${r.committed} nodes posted (${tail}).` });
   }
   _onchainReporter = null;
 }
