@@ -1,81 +1,58 @@
 /**
  * On-chain node test report — encoder, decoder, broadcaster, querier.
  *
- * Purpose: commit the tester's per-node results to the Sentinel chain in compact
- * binary form so any consumer can ingest performance + concurrency data via
- * RPC tx_search. The tester wallet self-sends 1udvpn with the encoded payload
- * stuffed into the TX memo; consumers filter by sender + magic prefix.
+ * Purpose: commit the tester's per-node results to the Sentinel chain in a
+ * compact human-readable form so any consumer can ingest performance +
+ * concurrency data via RPC tx_search WITHOUT a binary decoder. The tester
+ * wallet self-sends 1udvpn with the encoded payload stuffed into the TX memo;
+ * consumers filter by sender + magic prefix.
  *
- * Wire format (all big-endian):
+ * Wire format (v2 — CSV, plain ASCII, since 2026-04-30):
  *
- *   magic         5  ASCII "SNTR1"
- *   version       1  uint8 (currently 1)
- *   region        2  ASCII ISO-3166 country code (e.g. "US"); "  " if unknown
- *   baselineMbps  2  uint16 (0–65535 Mbps, of the tester's own connection)
- *   startedAt     4  uint32 unix seconds
- *   count         1  uint8 (1–50, records that follow)
- *   records       count × 28
+ *   Line 1 (header):
+ *     SNTR1|v2|<region>|b=<baselineMbps>|t=<unixSeconds>
+ *       region          2-char ISO country (e.g. "US"); "--" if unknown
+ *       baselineMbps    tester's own measured Mbps, one decimal
+ *       unixSeconds     run start time
  *
- * Per-record (28 bytes):
- *   addr          20 raw bech32 hash (sent1<addr> → fromBech32 data)
- *   flags          1 bit0 = ok (could connect & speed-test); reserved bits high
- *   mbpsTimes10    2 uint16 — actual measured Mbps × 10 (one decimal)
- *   peers          2 uint16 — concurrent users on the node at test time
- *   latencyMs      2 uint16 — handshake/probe latency in ms (0 if not measured)
- *   errCode        1 uint8 — see ERR_CODES
+ *   Lines 2..N (one per node):
+ *     <addr>|<ok>|<mbps>|<peers>|<lat>
+ *       addr            full bech32 (`sent1…`)
+ *       ok              1 = working node, 0 = failed
+ *       mbps            measured Mbps (one decimal); empty if ok=0
+ *       peers           concurrent users on the node at test time
+ *       lat             handshake latency in ms; empty if not measured
  *
- * Sentinel's chain enforces a 256-character TX memo limit (chain rejects with
- * code 12 "memo too large" otherwise). Base64 expands 3→4, so max raw payload
- * = floor(256/4)*3 = 192 bytes. Header (15) + 6 records (168) = 183 raw → 244
- * base64 chars. 7 records would be 211 raw → 284 base64 (over). Hence
- * MAX_RECORDS = 6.
+ *   Lines are joined by '\n'. Total memo MUST be ≤ MEMO_CHAR_LIMIT (256 chars,
+ *   the Sentinel chain's hard cap). The packer (`packBatch`) greedily fits
+ *   records until adding one more would overflow; `MAX_RECORDS` (6) is the
+ *   upper bound on records considered per batch.
+ *
+ * v1 (legacy binary, base64) is still decoded by `decodeMemo` so historical
+ * TXs continue to render in the history popup.
  */
 
-import { fromBech32, toBech32, toBase64, fromBase64 } from '@cosmjs/encoding';
+import { fromBase64, toBase64, toBech32 } from '@cosmjs/encoding';
 import { decodeTxRaw } from '@cosmjs/proto-signing';
 import { signAndBroadcastRetry } from './wallet.js';
-import { getRpcClient, cleanupRpc, withFreshRpc } from './chain.js';
+import { withFreshRpc } from './chain.js';
 
 const MAGIC = 'SNTR1';
-const MAGIC_BYTES = new TextEncoder().encode(MAGIC);
-const VERSION = 1;
-const HEADER_LEN = 15;
-const RECORD_LEN = 28;
+const VERSION = 2;
 const MAX_RECORDS = 6;
-const MEMO_CHAR_LIMIT = 256;
 const MIN_RECORDS = 1;
+const MEMO_CHAR_LIMIT = 256;
+const SEP = '|';
+const NL = '\n';
 
 export const ERR_CODES = Object.freeze({
-  OK: 0,
-  TIMEOUT: 1,
-  TUNNEL_FAIL: 2,
-  HANDSHAKE: 3,
-  AUTH: 4,
-  PAYMENT: 5,
-  NO_ROUTE: 6,
-  RPC_ERROR: 7,
-  STATUS_DEAD: 8,
-  OTHER: 255,
+  OK: 0, TIMEOUT: 1, TUNNEL_FAIL: 2, HANDSHAKE: 3, AUTH: 4,
+  PAYMENT: 5, NO_ROUTE: 6, RPC_ERROR: 7, STATUS_DEAD: 8, OTHER: 255,
 });
 
 export const DEFAULT_HRP = 'sent';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function deriveErrCode(result) {
-  if (result.actualMbps != null) return ERR_CODES.OK;
-  const code = String(result.errorCode || '').toUpperCase();
-  const msg = String(result.error || '').toLowerCase();
-  if (code === 'TIMEOUT' || /timeout|timed out/.test(msg)) return ERR_CODES.TIMEOUT;
-  if (/handshake|address mismatch|409/.test(msg)) return ERR_CODES.HANDSHAKE;
-  if (/tunnel|wireguard|wg-quick|v2ray|socks/.test(msg)) return ERR_CODES.TUNNEL_FAIL;
-  if (/auth|forbidden|401|403/.test(msg)) return ERR_CODES.AUTH;
-  if (/insufficient|payment|udvpn|pricing/.test(msg)) return ERR_CODES.PAYMENT;
-  if (/no route|unreachable|connection refused|ehostunreach/.test(msg)) return ERR_CODES.NO_ROUTE;
-  if (/rpc|broadcast|tx failed|sequence/.test(msg)) return ERR_CODES.RPC_ERROR;
-  if (/inactive|status code 5\d\d|service dead|not listening/.test(msg)) return ERR_CODES.STATUS_DEAD;
-  return ERR_CODES.OTHER;
-}
 
 function clampU16(n) {
   if (!Number.isFinite(n) || n < 0) return 0;
@@ -83,56 +60,89 @@ function clampU16(n) {
   return Math.round(n);
 }
 
-function clampU32(n) {
-  if (!Number.isFinite(n) || n < 0) return 0;
-  if (n > 0xffffffff) return 0xffffffff;
-  return Math.floor(n);
+function fmtMbps(n) {
+  if (!Number.isFinite(n) || n < 0) return '';
+  return (Math.round(n * 10) / 10).toFixed(1);
 }
 
-function regionToBytes(region) {
-  const out = new Uint8Array(2);
-  out[0] = 0x20; out[1] = 0x20; // default: ASCII space
-  if (typeof region === 'string' && region.length >= 2) {
-    out[0] = region.charCodeAt(0) & 0x7f;
-    out[1] = region.charCodeAt(1) & 0x7f;
-  }
-  return out;
+function fmtRegion(region) {
+  if (typeof region !== 'string' || region.length < 2) return '--';
+  const r = region.slice(0, 2).toUpperCase();
+  if (!/^[A-Z]{2}$/.test(r)) return '--';
+  return r;
 }
 
 /**
- * Convert a per-node test result row (from upsertResult) → 28-byte record.
- * Returns null if the address is malformed (not bech32-decodable).
+ * Convert a per-node test result row → record object.
+ * Returns null if the address looks malformed.
  */
 export function resultToRecord(result) {
-  let addrBytes;
-  try {
-    const decoded = fromBech32(result.address);
-    if (decoded.data.length !== 20) return null;
-    addrBytes = decoded.data;
-  } catch {
-    return null;
-  }
-  const buf = new Uint8Array(RECORD_LEN);
-  buf.set(addrBytes, 0);
+  const addr = result?.address;
+  if (typeof addr !== 'string' || !addr.startsWith('sent1') || addr.length < 30) return null;
   const ok = result.actualMbps != null;
-  buf[20] = ok ? 0x01 : 0x00;
-  const mbps = ok ? clampU16(result.actualMbps * 10) : 0;
-  buf[21] = (mbps >>> 8) & 0xff;
-  buf[22] = mbps & 0xff;
-  const peers = clampU16(result.peers);
-  buf[23] = (peers >>> 8) & 0xff;
-  buf[24] = peers & 0xff;
-  const latency = clampU16(result.diag?.handshakeLatencyMs ?? result.googleLatencyMs);
-  buf[25] = (latency >>> 8) & 0xff;
-  buf[26] = latency & 0xff;
-  buf[27] = deriveErrCode(result) & 0xff;
-  return buf;
+  return {
+    address: addr,
+    ok: ok ? 1 : 0,
+    mbps: ok ? Number(result.actualMbps) : null,
+    peers: clampU16(result.peers),
+    lat: clampU16(result.diag?.handshakeLatencyMs ?? result.diag?.googleLatencyMs ?? result.googleLatencyMs ?? 0),
+  };
+}
+
+function buildHeader(ctx) {
+  const region = fmtRegion(ctx.region);
+  const baseline = fmtMbps(Number(ctx.baselineMbps) || 0);
+  const startedAtSec = ctx.startedAt instanceof Date
+    ? Math.floor(ctx.startedAt.getTime() / 1000)
+    : typeof ctx.startedAt === 'number'
+      ? Math.floor(ctx.startedAt / 1000)
+      : Math.floor(Date.now() / 1000);
+  return `${MAGIC}${SEP}v${VERSION}${SEP}${region}${SEP}b=${baseline}${SEP}t=${startedAtSec}`;
+}
+
+function buildRecordLine(rec) {
+  const addr = String(rec.address);
+  const ok = rec.ok ? '1' : '0';
+  const mbps = rec.ok && Number.isFinite(rec.mbps) ? fmtMbps(rec.mbps) : '';
+  const peers = String(clampU16(rec.peers));
+  const lat = rec.lat ? String(clampU16(rec.lat)) : '';
+  return `${addr}${SEP}${ok}${SEP}${mbps}${SEP}${peers}${SEP}${lat}`;
 }
 
 /**
- * Encode a batch of records + header into a single binary blob.
- * @param {object} ctx { region: string|null, baselineMbps: number|null, startedAt?: Date|number }
- * @param {Uint8Array[]} records (each 28 bytes — already produced by resultToRecord)
+ * Greedy packer — returns up to MAX_RECORDS lines whose total memo
+ * (header + lines + newlines) stays ≤ MEMO_CHAR_LIMIT.
+ * @returns {{ memo: string, packed: number }} packed = how many records consumed
+ */
+export function packBatch(ctx, records) {
+  if (!Array.isArray(records) || records.length === 0) {
+    throw new Error('packBatch: need at least one record');
+  }
+  const header = buildHeader(ctx);
+  const lines = [header];
+  let total = header.length;
+  let packed = 0;
+  const limit = Math.min(records.length, MAX_RECORDS);
+  for (let i = 0; i < limit; i++) {
+    const line = buildRecordLine(records[i]);
+    const next = total + 1 /* \n */ + line.length;
+    if (next > MEMO_CHAR_LIMIT) break;
+    lines.push(line);
+    total = next;
+    packed++;
+  }
+  if (packed === 0) {
+    // A single record didn't fit — shouldn't happen for normal bech32 addrs,
+    // but guard anyway. Return a header-only memo so the caller can drop it.
+    throw new Error(`packBatch: first record overflows memo (header=${header.length} chars, limit=${MEMO_CHAR_LIMIT})`);
+  }
+  return { memo: lines.join(NL), packed };
+}
+
+/**
+ * Back-compat shim — old pipeline call signature.
+ * Returns a string (the encoded memo) for ≤MAX_RECORDS records.
+ * Throws if the resulting memo exceeds the chain's char limit.
  */
 export function encodeBatch(ctx, records) {
   if (!Array.isArray(records) || records.length < MIN_RECORDS) {
@@ -141,54 +151,94 @@ export function encodeBatch(ctx, records) {
   if (records.length > MAX_RECORDS) {
     throw new Error(`encodeBatch: max ${MAX_RECORDS} records per batch (got ${records.length})`);
   }
-  const total = HEADER_LEN + records.length * RECORD_LEN;
-  const out = new Uint8Array(total);
-  out.set(MAGIC_BYTES, 0);
-  out[5] = VERSION;
-  out.set(regionToBytes(ctx.region), 6);
-  const baseline = clampU16(ctx.baselineMbps);
-  out[8] = (baseline >>> 8) & 0xff;
-  out[9] = baseline & 0xff;
-  const startedAtSec = clampU32(
-    ctx.startedAt instanceof Date ? Math.floor(ctx.startedAt.getTime() / 1000)
-    : typeof ctx.startedAt === 'number' ? Math.floor(ctx.startedAt / 1000)
-    : Math.floor(Date.now() / 1000),
-  );
-  out[10] = (startedAtSec >>> 24) & 0xff;
-  out[11] = (startedAtSec >>> 16) & 0xff;
-  out[12] = (startedAtSec >>> 8) & 0xff;
-  out[13] = startedAtSec & 0xff;
-  out[14] = records.length & 0xff;
-  let offset = HEADER_LEN;
-  for (const rec of records) {
-    if (!(rec instanceof Uint8Array) || rec.length !== RECORD_LEN) {
-      throw new Error(`encodeBatch: each record must be a ${RECORD_LEN}-byte Uint8Array`);
-    }
-    out.set(rec, offset);
-    offset += RECORD_LEN;
+  const { memo, packed } = packBatch(ctx, records);
+  if (packed !== records.length) {
+    throw new Error(`encodeBatch: only ${packed}/${records.length} records fit under ${MEMO_CHAR_LIMIT}-char memo limit; use packBatch instead`);
   }
-  return out;
+  return memo;
 }
 
-/**
- * Decode a base64-encoded memo back to { region, baselineMbps, startedAt, records[] }.
- * Returns null if the memo is not one of ours (missing/invalid magic).
- */
-export function decodeMemo(memoBase64, hrp = DEFAULT_HRP) {
-  if (typeof memoBase64 !== 'string' || memoBase64.length === 0) return null;
-  let bytes;
-  try { bytes = fromBase64(memoBase64); }
-  catch { return null; }
-  return decodeBytes(bytes, hrp);
+// ─── Decoder (v2 CSV + v1 legacy binary fallback) ────────────────────────────
+
+export function decodeMemo(memo, hrp = DEFAULT_HRP) {
+  if (typeof memo !== 'string' || memo.length === 0) return null;
+
+  // v2 (CSV) — starts with "SNTR1|v2|"
+  if (memo.startsWith(`${MAGIC}${SEP}v${VERSION}${SEP}`)) {
+    return _decodeCsv(memo);
+  }
+  if (memo.startsWith(`${MAGIC}${SEP}v`)) {
+    // Future versions / unknown — try CSV-style anyway, return null on failure
+    return _decodeCsv(memo);
+  }
+
+  // v1 (legacy binary base64) — try base64 decode + binary parse
+  try {
+    const bytes = fromBase64(memo);
+    return _decodeLegacyBinary(bytes, hrp);
+  } catch {
+    return null;
+  }
 }
 
-export function decodeBytes(bytes, hrp = DEFAULT_HRP) {
+function _decodeCsv(memo) {
+  const lines = memo.split(NL);
+  if (lines.length < 1) return null;
+  const headerParts = lines[0].split(SEP);
+  if (headerParts[0] !== MAGIC) return null;
+  const ver = headerParts[1] || '';
+  const region = (headerParts[2] || '').replace(/-/g, '').trim() || null;
+  let baselineMbps = 0;
+  let startedAt = 0;
+  for (let i = 3; i < headerParts.length; i++) {
+    const eq = headerParts[i].indexOf('=');
+    if (eq < 0) continue;
+    const k = headerParts[i].slice(0, eq);
+    const v = headerParts[i].slice(eq + 1);
+    if (k === 'b') baselineMbps = Number(v) || 0;
+    else if (k === 't') startedAt = Number(v) || 0;
+  }
+  const records = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    const p = line.split(SEP);
+    if (p.length < 5) continue;
+    const ok = p[1] === '1';
+    const mbps = ok && p[2] !== '' ? Number(p[2]) : null;
+    const peers = Number(p[3]) || 0;
+    const latencyMs = p[4] !== '' ? (Number(p[4]) || 0) : null;
+    records.push({
+      address: p[0],
+      ok,
+      mbps,
+      peers,
+      latencyMs,
+      errCode: ok ? 0 : 255,
+    });
+  }
+  return {
+    version: ver,
+    region,
+    baselineMbps,
+    startedAt,
+    startedAtIso: startedAt ? new Date(startedAt * 1000).toISOString() : null,
+    count: records.length,
+    records,
+  };
+}
+
+// Legacy v1 binary decoder (kept so old TXs still render in history popups).
+function _decodeLegacyBinary(bytes, hrp) {
+  const HEADER_LEN = 15;
+  const RECORD_LEN = 28;
   if (!(bytes instanceof Uint8Array) || bytes.length < HEADER_LEN) return null;
-  for (let i = 0; i < MAGIC_BYTES.length; i++) {
-    if (bytes[i] !== MAGIC_BYTES[i]) return null;
+  const magicBytes = new TextEncoder().encode(MAGIC);
+  for (let i = 0; i < magicBytes.length; i++) {
+    if (bytes[i] !== magicBytes[i]) return null;
   }
   const version = bytes[5];
-  if (version !== VERSION) return null;
+  if (version !== 1) return null;
   const region = String.fromCharCode(bytes[6], bytes[7]).trim() || null;
   const baselineMbps = (bytes[8] << 8) | bytes[9];
   const startedAt = ((bytes[10] << 24) | (bytes[11] << 16) | (bytes[12] << 8) | bytes[13]) >>> 0;
@@ -214,7 +264,7 @@ export function decodeBytes(bytes, hrp = DEFAULT_HRP) {
     });
   }
   return {
-    version,
+    version: 1,
     region,
     baselineMbps,
     startedAt,
@@ -228,17 +278,23 @@ export function decodeBytes(bytes, hrp = DEFAULT_HRP) {
 
 /**
  * Self-send 1udvpn with the encoded batch in the memo.
- * Returns { txhash, height, memoBytes }. Throws on unrecoverable failure.
+ * Accepts either a pre-encoded string memo (v2 CSV) or a Uint8Array (legacy v1
+ * binary, base64-encoded inline) so existing call sites keep working.
  *
- * @param {SigningStargateClient} client
- * @param {string} signerAddress
- * @param {Uint8Array} encodedBatch (output of encodeBatch)
- * @param {(type:string,data:any)=>void} broadcast (logger)
+ * Returns { txhash, height, memoBytes }. Throws on unrecoverable failure.
  */
-export async function commitBatch(client, signerAddress, encodedBatch, broadcast) {
-  const memo = toBase64(encodedBatch);
+export async function commitBatch(client, signerAddress, encoded, broadcast) {
+  let memo;
+  if (typeof encoded === 'string') {
+    memo = encoded;
+  } else if (encoded instanceof Uint8Array) {
+    // Legacy: base64 the bytes (kept so any caller still using v1 binary works).
+    memo = toBase64(encoded);
+  } else {
+    throw new Error('commitBatch: encoded must be a string (v2 CSV) or Uint8Array (legacy)');
+  }
   if (memo.length > MEMO_CHAR_LIMIT) {
-    throw new Error(`Encoded memo ${memo.length} chars exceeds Sentinel chain limit ${MEMO_CHAR_LIMIT}; reduce MAX_RECORDS`);
+    throw new Error(`Encoded memo ${memo.length} chars exceeds Sentinel chain limit ${MEMO_CHAR_LIMIT}`);
   }
   const sendMsg = {
     typeUrl: '/cosmos.bank.v1beta1.MsgSend',
@@ -256,7 +312,7 @@ export async function commitBatch(client, signerAddress, encodedBatch, broadcast
   return {
     txhash: result.transactionHash,
     height: result.height,
-    memoBytes: encodedBatch.length,
+    memoBytes: memo.length,
     base64Bytes: memo.length,
   };
 }
@@ -265,29 +321,18 @@ export async function commitBatch(client, signerAddress, encodedBatch, broadcast
 
 /**
  * Query past on-chain reports posted by a given tester wallet.
- * Returns an array of { txhash, height, time, payload } where payload is the
- * decoded batch (see decodeMemo).
- *
- * Filters are applied chain-side via tx_search:
- *   message.sender='<wallet>' AND tx.height>=fromHeight
- *
- * @param {string} senderAddress
- * @param {object} opts { fromHeight?: number, limit?: number }
+ * Filters chain-side via tx_search using `transfer.sender` (the bank module's
+ * TransferEvent — `message.sender` is not reliably indexed for these MsgSends
+ * on the Sentinel chain).
  */
 export async function queryReports(senderAddress, opts = {}) {
   const { fromHeight = 0, limit = 50 } = opts;
-  // Filter to self-sends only — every report is a MsgSend from wallet→wallet
-  // with the SNTR1 memo. message.sender alone returns every TX the wallet ever
-  // signed (subscriptions, payments, etc.) which is huge for active wallets
-  // and makes tx_search time out. transfer.recipient narrows to self-sends.
   const queryParts = [
-    `message.sender='${senderAddress}'`,
+    `transfer.sender='${senderAddress}'`,
     `transfer.recipient='${senderAddress}'`,
   ];
   if (fromHeight > 0) queryParts.push(`tx.height>=${fromHeight}`);
   const query = queryParts.join(' AND ');
-  // Single-page txSearch — txSearchAll walks every match (slow / times out for
-  // wallets with many TXs). The UI only needs the most recent `limit` rows.
   const perPage = Math.min(Math.max(limit, 1), 100);
   const res = await withFreshRpc(async (rpc) => {
     if (!rpc?.tmClient) throw new Error('RPC tmClient unavailable');
@@ -321,5 +366,5 @@ function extractMemo(tx) {
 
 // ─── Constants exported for tests / introspection ────────────────────────────
 export const SCHEMA = Object.freeze({
-  MAGIC, VERSION, HEADER_LEN, RECORD_LEN, MAX_RECORDS, MIN_RECORDS,
+  MAGIC, VERSION, MAX_RECORDS, MIN_RECORDS, MEMO_CHAR_LIMIT, SEP,
 });
