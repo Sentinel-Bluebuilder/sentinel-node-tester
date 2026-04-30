@@ -12,7 +12,7 @@ to change and why, *before* writing code.
 - **Keep the public dashboard read-only.** No new buttons on `public.html` or
   `live.html` that visitors can click to spend money or change state.
 - **Don't touch TEST RUN code paths.** The canonical implementation lives on
-  GitHub at `Sentinel-Autonomybuilder/sentinel-node-tester`. If a refactor
+  GitHub at `Sentinel-Bluebuilder/sentinel-node-tester`. If a refactor
   seems to require touching them, stop and open an issue first.
 - **RPC-first for chain calls.** New code must not call LCD as the primary
   path. LCD is fallback only.
@@ -22,7 +22,7 @@ to change and why, *before* writing code.
 ## Local development
 
 ```bash
-git clone https://github.com/Sentinel-Autonomybuilder/sentinel-node-tester
+git clone https://github.com/Sentinel-Bluebuilder/sentinel-node-tester
 cd sentinel-node-tester
 npm install
 cp .env.example .env   # set MNEMONIC

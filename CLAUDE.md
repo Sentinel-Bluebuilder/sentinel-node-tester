@@ -3,7 +3,7 @@
 > **New Claude session: read this file first, then `memory/handoff-node-tester.md` (current state), then `ARCH.md` (module map). Stop there.** Everything under `docs/` is reference material — open only when the task needs it. Files in `docs/archive/` are historical and may contradict current code; treat them as read-only context, never as source of truth. The user is `rahul@norselabs.io` (Sentinel founder); the tester is their primary network audit instrument.
 
 ## What this is
-Standalone tool for stress-testing every node on the Sentinel chain. Runs sessions, measures speed/latency, persists results in `audit.db` (SQLite). Type 1 deployment (Node.js server + browser dashboard) per global CLAUDE.md categorization. Published to npm as `sentinel-node-tester`. Canonical repo: `Sentinel-Autonomybuilder/sentinel-node-tester`.
+Standalone tool for stress-testing every node on the Sentinel chain. Runs sessions, measures speed/latency, persists results in `audit.db` (SQLite). Type 1 deployment (Node.js server + browser dashboard) per global CLAUDE.md categorization. Published to npm as `sentinel-node-tester`. Canonical repo: `Sentinel-Bluebuilder/sentinel-node-tester` (renamed from `Sentinel-Bluebuilder` on 2026-04-30 — old URLs auto-redirect but always use the new name in new code/docs).
 
 **Key purpose: on-chain performance oracle.** The tester is a primary publisher of node performance + concurrent-user data to the Sentinel chain. Every N tested nodes, the tester self-sends 1 udvpn with a compact binary memo (`SNTR1` magic prefix) so any consumer can ingest results via RPC `tx_search` — no off-chain API needed. See `core/onchain-report.js` (encoder/decoder/broadcaster/querier) and the "On-Chain Reporting" section in the admin settings drawer. Opt-in (off by default); batch size 1–6 (default 6) — capped because Sentinel's chain enforces a 256-char TX memo limit and 7 binary records would overflow base64. Region 2-letter ISO + tester baseline Mbps included in every batch header.
 
@@ -38,7 +38,7 @@ This rule exists because we burned ~2 hours on 2026-04-30 untangling a 3-week-ol
 8. **`master` is always deployable.** No half-finished features behind feature flags counts — if it's on master, it ships. Use a runtime setting (like the `onchainEnabled` toggle) for opt-in features, NOT branch isolation.
 
 ### Allowed gh accounts
-Repo `Sentinel-Autonomybuilder/sentinel-node-tester` requires `gh auth switch --user Sentinel-Autonomybuilder` before push (default `safelife4200-ship-it` gets 403).
+Repo `Sentinel-Bluebuilder/sentinel-node-tester` requires `gh auth switch --user Sentinel-Bluebuilder` before push (default `safelife4200-ship-it` gets 403).
 
 ### When something gets weird
 - "Branch has 11 commits ahead of master, 2 behind, won't merge cleanly" → STOP. Ask before any rebase/merge. The right answer is usually "force-set master to branch tip and delete the branch," not "spend an hour resolving fake conflicts."
@@ -161,8 +161,8 @@ Every runner MUST pin `state.testRun` and `state.runMode` at its top so prior-ru
 
 ## Release status
 - npm: `sentinel-node-tester@1.4.0` (latest).
-- GitHub: `Sentinel-Autonomybuilder/sentinel-node-tester` master + open PR #2 on `stop-and-error-popup` (PR #1 merged).
-- Pushes to that org require `gh auth switch --user Sentinel-Autonomybuilder` first (default `safelife4200-ship-it` gets 403).
+- GitHub: `Sentinel-Bluebuilder/sentinel-node-tester` master + open PR #2 on `stop-and-error-popup` (PR #1 merged).
+- Pushes to that org require `gh auth switch --user Sentinel-Bluebuilder` first (default `safelife4200-ship-it` gets 403).
 
 ## Boot Path — DO NOT regress (post-2026-04-30)
 
@@ -196,7 +196,7 @@ The server now logs loudly on boot failure. If a future regression brings back t
 - Don't hide or remove the per-row failure copy button — the failure-log UX is a MUST, not a polish item.
 - Don't reach for LCD endpoints as the primary path. RPC-first per global rule.
 - Don't treat `docs/archive/*` as authoritative — those files are historical snapshots and may describe UI/routes/code that no longer exists.
-- **DON'T FUCK WITH TEST RUN.** Never modify TEST RUN code paths. The canonical implementation lives on GitHub at `Sentinel-Autonomybuilder/sentinel-node-tester` — that is the source of truth. This includes:
+- **DON'T FUCK WITH TEST RUN.** Never modify TEST RUN code paths. The canonical implementation lives on GitHub at `Sentinel-Bluebuilder/sentinel-node-tester` — that is the source of truth. This includes:
   - The `if (state.testRun)` short-circuit in `audit/node-test.js` (the block that returns early with `errorCode: 'TEST_RUN_SKIP'` after price discovery).
   - The TEST RUN branching in `audit/pipeline.js` (anything gated on `state.testRun`, including the batch-payment skip and `state.testRun = ...` assignment).
   - The `testRun` flag plumbing through `POST /api/start` (body `testRun: true` and query `?testRun=1`) in `server.js`.
