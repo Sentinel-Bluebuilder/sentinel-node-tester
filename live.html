@@ -335,6 +335,14 @@
     .pager .btn-paginate:disabled { opacity: 0.4; cursor: not-allowed; }
     .pager .btn-paginate:not(:disabled):hover { border-color: var(--border-hover); }
 
+    /* Opaque header band — covers BOTH the 4px row-gap above each th (page bg
+       bleed when border-spacing: 0 4px exposes empty stripe at the top) AND
+       the 4px row-gap below the header row that body rows scroll through. The
+       box-shadow draws a solid stripe both upward and downward in the same
+       color as --bg-card-solid; the bottom stripe is what hides scrolling rows
+       passing under the sticky header. */
+    thead { background: var(--bg-card-solid); }
+    thead tr { background: var(--bg-card-solid); }
     th {
       text-align: left;
       padding: 8px 6px;
@@ -344,8 +352,11 @@
       border-bottom: 1px solid var(--border);
       color: var(--text-secondary);
       position: sticky; top: 0;
-      /* Opaque so scrolling rows don't bleed through the header bar */
-      background: var(--bg-card-solid);
+      background: var(--bg-card-solid) !important;
+      box-shadow:
+        0 -6px 0 0 var(--bg-card-solid),
+        0  6px 0 0 var(--bg-card-solid),
+        0  7px 0 0 var(--border);
       z-index: 10;
     }
 
@@ -738,6 +749,7 @@
         <div class="cb-progress-track">
           <div class="cb-progress-fill" id="cbProgressFill"></div>
         </div>
+        <span class="cb-eta" id="cbEta" style="font-size:11px;color:var(--text-muted);font-variant-numeric:tabular-nums;min-width:80px;text-align:right">ETA —</span>
       </div>
       <div class="cb-snapshot-row">
         <span class="cb-snap-item">Batch size: <strong id="cbSnapshot">—</strong></span>
@@ -1384,8 +1396,6 @@
         parts.push(`<span class="log-mbps ${klass}">${v.toFixed(1)} Mbps</span>`);
       }
 
-      if (o.errCode) parts.push(`<span class="log-err-code">${escHtml(o.errCode)}</span>`);
-
       if (o.msg) {
         const escaped = escHtml(o.msg);
         const linkified = escaped.replace(/(https?:\/\/[^\s<]+)/g, (u) => `<a href="${u}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">${u}</a>`);
@@ -1508,14 +1518,34 @@
       // _cb.tested only when resultsArr hasn't arrived (early init).
       const arr    = Array.isArray(resultsArr) ? resultsArr : [];
       const tested = arr.length > 0 ? arr.length : _cb.tested;
-      const total  = snap || tested;
-      const pct    = total > 0 ? Math.min(100, Math.round(tested / total * 100)) : 0;
+      // Bar pct is ONLY meaningful when we know the snapshot size. Falling
+      // back to `tested` for `total` made pct=100% the moment any row arrived.
+      const pct    = snap > 0 ? Math.min(100, Math.round(tested / snap * 100)) : 0;
+      const totalDisplay = snap > 0 ? snap : '—';
 
       const fill = _cbEl('cbProgressFill');
       if (fill) fill.style.width = pct + '%';
 
       const countEl = _cbEl('cbCount');
-      if (countEl) countEl.textContent = tested + ' / ' + (total || '—') + ' nodes tested';
+      if (countEl) countEl.textContent = tested + ' / ' + totalDisplay + ' nodes tested';
+
+      const etaEl = _cbEl('cbEta');
+      if (etaEl) {
+        const remaining = snap > 0 ? snap - tested : 0;
+        const startedAt = _cb.startedAt ? new Date(_cb.startedAt).getTime() : 0;
+        if (snap > 0 && tested > 0 && remaining > 0 && startedAt > 0) {
+          const elapsed = Date.now() - startedAt;
+          const ms = remaining * (elapsed / tested);
+          const h = Math.floor(ms / 3600000);
+          const m = Math.floor((ms % 3600000) / 60000);
+          const s = Math.floor((ms % 60000) / 1000);
+          etaEl.textContent = `ETA ${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+        } else if (snap > 0 && remaining <= 0 && tested > 0) {
+          etaEl.textContent = 'ETA 00:00:00';
+        } else {
+          etaEl.textContent = 'ETA —';
+        }
+      }
 
       // Pass/Fail derived from resultsArr (matches admin's recompute logic).
       const passed = arr.filter(r => Number(r.actualMbps) >= 10).length;
@@ -1650,6 +1680,26 @@
       renderLiveStats();
       applyHeaderStatsFromState();
     }, 5000);
+
+    // Tick ETA every second so the countdown reads smoothly between
+    // node:result events (which can be 10–60s apart on slow nodes).
+    setInterval(() => {
+      if (!_cb.startedAt) return;
+      const etaEl = document.getElementById('cbEta');
+      if (!etaEl) return;
+      const snap = _cb.snapshotSize;
+      const tested = (Array.isArray(resultsArr) && resultsArr.length > 0) ? resultsArr.length : _cb.tested;
+      const remaining = snap > 0 ? snap - tested : 0;
+      const startedAt = _cb.startedAt ? new Date(_cb.startedAt).getTime() : 0;
+      if (snap > 0 && tested > 0 && remaining > 0 && startedAt > 0) {
+        const elapsed = Date.now() - startedAt;
+        const ms = remaining * (elapsed / tested);
+        const h = Math.floor(ms / 3600000);
+        const m = Math.floor((ms % 3600000) / 60000);
+        const s = Math.floor((ms % 60000) / 1000);
+        etaEl.textContent = `ETA ${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+      }
+    }, 1000);
 
     // ─── Upsert ───
     function upsert(r) {
@@ -1803,8 +1853,12 @@
         detail = 'On-Chain Subscription Plan Test';
         color = 'var(--green)';
       } else {
+        const pricing = _liveState && _liveState.pricingMode;
+        const suffix = pricing === 'hours'
+          ? ' : Testing All Nodes - Paying Per Hour'
+          : ' : Testing All Nodes - Paying Per GB';
         label = 'P2P';
-        detail = 'All online nodes — direct peer-to-peer payments per session';
+        detail = 'All online nodes — direct peer-to-peer payments per session' + suffix;
         color = 'var(--accent)';
       }
       badge.style.display = '';
@@ -1890,10 +1944,12 @@
         case 'batch:start': {
           // If this batch is different from the one we have rendered, drop
           // stale rows from the prior batch so the table reflects the current
-          // run only. (loop:started already wipes for top-level run starts;
-          // this catches mid-loop iteration boundaries too.)
+          // run only. Also reset when we have no current batchId but the
+          // table is showing rehydrated rows from a prior session — otherwise
+          // the pager + count carry over from the previous run.
           const newBatchId = d.batchId || d.batch_id || null;
-          if (newBatchId && _cb.batchId && newBatchId !== _cb.batchId) {
+          const haveStaleRows = _cb.batchId == null && resultsArr.length > 0;
+          if (newBatchId && ((_cb.batchId && newBatchId !== _cb.batchId) || haveStaleRows)) {
             resetLiveForNewRun();
           }
           setStatus('running');
@@ -2236,7 +2292,8 @@
               type: t,
               actualMbps: (n.actualMbps != null) ? Number(n.actualMbps) :
                           (n.actual_mbps != null) ? Number(n.actual_mbps) : null,
-              baselineAtTest: n.baseline_mbps != null ? Number(n.baseline_mbps) : null,
+              baselineAtTest: (n.baselineMbps != null) ? Number(n.baselineMbps)
+                            : (n.baseline_mbps != null) ? Number(n.baseline_mbps) : null,
               peers: n.peers != null ? Number(n.peers) : null,
               maxPeers: (n.maxPeers != null) ? Number(n.maxPeers) :
                          (n.max_peers != null) ? Number(n.max_peers) : null,
@@ -2428,7 +2485,6 @@
           ${row('City', eh(er.city))}
           ${row('Service', svcType)}
           ${row('Stage', eh(er.stage))}
-          ${row('Error Code', monoVal(er.error_code))}
           ${row('Captured', eh(captured))}
           ${row('Message', `<span style="font-family:var(--font-mono);font-size:12px;white-space:pre-wrap">${eh(er.error_message)}</span>`)}
 

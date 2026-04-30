@@ -32,14 +32,40 @@ import {
 } from './core/db.js';
 import * as continuous from './audit/continuous.js';
 import { getInstalledVersions, verifyAllSdks, verifySdk } from './core/sdk-verify.js';
+// Force line-buffered stdout/stderr so boot diagnostics flush immediately
+// even when redirected to a file (Windows defaults to block-buffering, which
+// hides every console.log if the process hangs before app.listen).
+try { process.stdout._handle?.setBlocking?.(true); } catch (e) { console.error('[boot] stdout setBlocking failed:', e.message); }
+try { process.stderr._handle?.setBlocking?.(true); } catch (e) { console.error('[boot] stderr setBlocking failed:', e.message); }
+
 // Platform-aware WireGuard import — Windows / Linux / macOS each have full implementations
+// Wrapped in a 5s timeout: the windows module runs sync `execSync` probes
+// (`net session`, `where wireguard.exe`, `wg-quick --version`) at its own
+// module scope. Any of those can stall on a slow Service Control Manager
+// and deadlock the entire server boot. Falling back to WG_AVAILABLE=false
+// is preferable to a silent zombie.
 let emergencyCleanupSync, watchdogCheck, WG_AVAILABLE, IS_ADMIN;
-if (process.platform === 'win32') {
-  ({ emergencyCleanupSync, watchdogCheck, WG_AVAILABLE, IS_ADMIN } = await import('./platforms/windows/wireguard.js'));
-} else if (process.platform === 'linux') {
-  ({ emergencyCleanupSync, watchdogCheck, WG_AVAILABLE, IS_ADMIN } = await import('./platforms/linux/wireguard.js'));
-} else if (process.platform === 'darwin') {
-  ({ emergencyCleanupSync, watchdogCheck, WG_AVAILABLE, IS_ADMIN } = await import('./platforms/macos/wireguard.js'));
+const _wgFallback = () => {
+  console.error('[boot] WireGuard module init timed out — continuing with WG disabled');
+  emergencyCleanupSync = () => {};
+  watchdogCheck = () => {};
+  WG_AVAILABLE = false;
+  IS_ADMIN = false;
+};
+const _wgImport = (() => {
+  if (process.platform === 'win32') return import('./platforms/windows/wireguard.js');
+  if (process.platform === 'linux') return import('./platforms/linux/wireguard.js');
+  if (process.platform === 'darwin') return import('./platforms/macos/wireguard.js');
+  return null;
+})();
+if (_wgImport) {
+  const _wgTimeout = new Promise((_, reject) => setTimeout(() => reject(new Error('wg-import-timeout')), 5000));
+  try {
+    ({ emergencyCleanupSync, watchdogCheck, WG_AVAILABLE, IS_ADMIN } = await Promise.race([_wgImport, _wgTimeout]));
+  } catch (e) {
+    console.error(`[boot] WireGuard import failed: ${e.message}`);
+    _wgFallback();
+  }
 } else {
   emergencyCleanupSync = () => {};
   watchdogCheck = () => {};
@@ -126,7 +152,9 @@ if (!MNEMONIC || !MNEMONIC.trim()) {
 }
 
 // ─── WireGuard Safety: cleanup on ANY exit ──────────────────────────────────
-emergencyCleanupSync();
+// Boot-time cleanup is deferred until AFTER app.listen — running it inline
+// here can block the event loop for 10–30s on a slow Service Control Manager
+// (sc query / sc stop / sc delete each carry their own 5s timeouts).
 
 function onProcessExit() { cleanupRpc(); emergencyCleanupSync(); }
 process.on('exit', onProcessExit);
@@ -142,14 +170,19 @@ function gracefulShutdown(signal, exitCode) {
 }
 process.on('SIGINT', () => gracefulShutdown('SIGINT', 130));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM', 143));
+// Crash loud, crash fast. Without process.exit, the handler runs cleanup and
+// the event loop keeps going on a half-initialised state — silent zombie.
 process.on('uncaughtException', (err) => {
   const msg = err?.stack || err?.message || String(err);
   console.error(`[uncaughtException] ${msg}`);
-  emergencyCleanupSync();
+  try { emergencyCleanupSync(); } catch (e) { console.error('[uncaughtException] cleanup failed:', e.message); }
+  setTimeout(() => process.exit(1), 500).unref();
 });
 process.on('unhandledRejection', (reason) => {
-  console.error(`[unhandledRejection] ${String(reason)}`);
-  emergencyCleanupSync();
+  const msg = reason?.stack || reason?.message || String(reason);
+  console.error(`[unhandledRejection] ${msg}`);
+  try { emergencyCleanupSync(); } catch (e) { console.error('[unhandledRejection] cleanup failed:', e.message); }
+  setTimeout(() => process.exit(1), 500).unref();
 });
 
 // Watchdog: every 5s, check if a tunnel has been up too long
@@ -273,18 +306,19 @@ function withBatchTracking(baseBroadcast, mode, opts = {}) {
       if (opened && !closed && type === 'result' && data && data.result) {
         const r = data.result;
         insertBatchResult(batchId, {
-          address:      r.address || '',
-          moniker:      r.moniker || null,
-          country:      r.country || null,
-          country_code: r.countryCode || r.country_code || null,
-          city:         r.city || null,
-          type:         r.type || null,
-          actual_mbps:  r.actualMbps ?? null,
-          peers:        r.peers ?? null,
-          max_peers:    r.maxPeers ?? null,
-          error:        r.error ? String(r.error).slice(0, 200) : null,
-          error_code:   r.errorCode || null,
-          tested_at:    Date.now(),
+          address:       r.address || '',
+          moniker:       r.moniker || null,
+          country:       r.country || null,
+          country_code:  r.countryCode || r.country_code || null,
+          city:          r.city || null,
+          type:          r.type || null,
+          actual_mbps:   r.actualMbps ?? null,
+          peers:         r.peers ?? null,
+          max_peers:     r.maxPeers ?? null,
+          error:         r.error ? String(r.error).slice(0, 200) : null,
+          error_code:    r.errorCode || null,
+          tested_at:     Date.now(),
+          baseline_mbps: r.baselineAtTest ?? r.baselineMbps ?? null,
         }, 'real');
       }
       if (opened && !closed && type === 'state' && data && data.state) {
@@ -513,10 +547,11 @@ function rehydrateState(results) {
       if (snap.auditLogPath) state.auditLogPath = snap.auditLogPath;
       if (snap.activeDbRunId) {
         state.activeDbRunId = Number(snap.activeDbRunId);
-        try { setActiveDbRunId(state.activeDbRunId); } catch {}
+        try { setActiveDbRunId(state.activeDbRunId); }
+        catch (e) { console.error('[boot] setActiveDbRunId failed:', e.message); }
       }
       console.log(`State snapshot restored: baseline=${snap.baselineHistory?.length || 0} readings, speeds=${snap.nodeSpeedHistory?.length || 0} nodes, total=${state.totalNodes}, runMode=${state.runMode || 'none'}`);
-    } catch { }
+    } catch (e) { console.error('[boot] state snapshot restore failed:', e.message); }
 
     // Hydrate logBuffer from the IN-FLIGHT audit log (the file the run was
     // appending to before the bounce), so SSE init replays the actual run's
@@ -1111,6 +1146,10 @@ const PUBLIC_STATE_KEYS = [
   // "Plan #N / P2P / Test Run" badge the admin shows.
   'runMode',
   'runPlanId',
+  // Cumulative refund credited back to the wallet during the active run.
+  // Spend totals on /live derive from this; spentUdvpn itself is admin-only.
+  'refundedUdvpn',
+  'estimatedTotalCost',
 ];
 function sanitizePublicState(s) {
   if (!s || typeof s !== 'object') return {};
@@ -2239,6 +2278,12 @@ app.get('/health', (req, res) => {
 const LISTEN_HOST = process.env.LISTEN_HOST || '127.0.0.1';
 app.listen(PORT, LISTEN_HOST, async () => {
   console.log(`\nSentinel Node Audit Dashboard → http://${LISTEN_HOST === '0.0.0.0' ? 'localhost' : LISTEN_HOST}:${PORT}  (bound to ${LISTEN_HOST})\n`);
+  // Deferred WG safety sweep — non-blocking, runs after the port is bound so
+  // a slow Service Control Manager can never gate startup.
+  setImmediate(() => {
+    try { emergencyCleanupSync(); }
+    catch (e) { console.error('[boot] emergencyCleanupSync failed:', e.message); }
+  });
   if (!IS_ADMIN) {
     if (process.platform === 'win32') {
       console.warn('⚠  NOT running as Administrator — WireGuard tests will be skipped.');
