@@ -20,6 +20,31 @@ Standalone tool for stress-testing every node on the Sentinel chain. Runs sessio
 
 If `docs/archive/HANDOFF-2026-04-11.md`, `docs/archive/CONTEXT-2026-04-10.md`, or any other archived doc contradicts what's above it in this list, the higher item wins.
 
+## Git Workflow — MASTER IS THE TRUNK
+
+**We own this repo. We push to master directly. There is no upstream review gate.**
+
+This rule exists because we burned ~2 hours on 2026-04-30 untangling a 3-week-old feature branch (`stop-and-error-popup`) that drifted from master while master got squash-merges of subsets of its commits. The branch and master ended up with the same code under different SHAs, every rebase/merge produced false conflicts, and the PR was perpetually `CONFLICTING`. Don't repeat it.
+
+### Rules
+
+1. **Default workflow: commit on master, push on master.** No PR, no branch. The repo is ours.
+2. **Branch only for risky multi-day work** (e.g. SDK version bump, schema migration that needs staged rollout). Branch lifetime cap: 24 hours. If it's still alive after 24 hours, merge whatever's done back to master and continue work there.
+3. **Never let a branch sit while master moves.** If you must branch and master gets a commit before you merge, your first action is `git pull --rebase origin master` BEFORE doing more work — not at merge time.
+4. **No long-running PRs.** PRs are for code review by humans we don't have. Open one only if a collaborator explicitly asks for review. Otherwise: commit, push, done.
+5. **If a branch already exists and has drifted, the disk wins.** The currently-checked-out working tree is the truth. Use `git push --force-with-lease origin <branch>:master` to set master to the branch tip if you've verified the tree is what you want shipped. This destroys divergent commits on master that aren't in your branch — only do it after confirming master has nothing the branch lacks (`git log master..HEAD` on the branch should be empty after a manual cherry-pick of any genuine master-only commits).
+6. **Squash-merge is forbidden when commit history matters.** Either merge with `--no-ff` (preserves the commit SHAs) or push directly. The squash-merge of PR #1 to master under a different SHA than the branch's `4100ce0` is exactly what created today's confusion.
+7. **Branches that ARE created get deleted the moment they merge.** No `backup/*`, no `wip/*`, no abandoned feature branches sitting around. `git branch -D` and `git push origin --delete` immediately on merge.
+8. **`master` is always deployable.** No half-finished features behind feature flags counts — if it's on master, it ships. Use a runtime setting (like the `onchainEnabled` toggle) for opt-in features, NOT branch isolation.
+
+### Allowed gh accounts
+Repo `Sentinel-Autonomybuilder/sentinel-node-tester` requires `gh auth switch --user Sentinel-Autonomybuilder` before push (default `non-org-account` gets 403).
+
+### When something gets weird
+- "Branch has 11 commits ahead of master, 2 behind, won't merge cleanly" → STOP. Ask before any rebase/merge. The right answer is usually "force-set master to branch tip and delete the branch," not "spend an hour resolving fake conflicts."
+- "I rebased and now my working tree is missing changes" → `git rebase --abort` immediately. The rebase has not yet rewritten any pushed commits unless you've force-pushed. Disk + reflog still has everything.
+- Always create a `backup/<branch>-pre-<op>-<date>` local branch before any rebase or force-push. Delete it after the operation succeeds.
+
 ## Hard Rules — Public Dashboard
 
 **The public dashboard MUST have ZERO user-facing action buttons.**
