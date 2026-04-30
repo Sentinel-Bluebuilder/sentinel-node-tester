@@ -370,6 +370,19 @@
     }
     .btn-help:hover { border-color: rgba(68, 138, 255, 0.5); color: var(--accent); background: rgba(68, 138, 255, 0.06); }
 
+    .btn-onchain-toggle {
+      background: transparent;
+      color: var(--text-dim);
+      border: 1px solid var(--border);
+    }
+    .btn-onchain-toggle:hover:not(:disabled) { border-color: var(--border-hover); color: var(--text); }
+    .btn-onchain-toggle.is-on {
+      background: var(--accent-green);
+      color: var(--bg);
+      border-color: var(--accent-green);
+    }
+    .btn-onchain-toggle.is-on:hover:not(:disabled) { opacity: 0.85; }
+
     .btn:disabled { opacity: 0.3; cursor: not-allowed; transform: none; }
 
     /* Stats Grid */
@@ -825,10 +838,10 @@
     <div class="glass-panel controls">
       <button class="btn btn-start" id="btnStart" onclick="startAudit()" title="Start a new test using the selected Testing Mode.">Start Test</button>
       <button class="btn btn-start" id="btnResume" onclick="resumeAudit()" style="background:var(--accent);color:var(--bg)">Resume</button>
-      <button class="btn btn-rescan" id="btnRescan" onclick="rescanNodes()" title="Re-fetch node list from chain to verify current total">Rescan</button>
       <button class="btn btn-start" id="btnRetestFails" onclick="retestFails()" style="background:var(--red);color:#fff;border-color:var(--red)">Retest Failed</button>
       <button class="btn btn-stop" id="btnStop" disabled onclick="stopAudit()">Stop</button>
       <div style="margin-left:auto; display:flex; gap:10px; align-items:center">
+        <button class="btn btn-onchain-toggle" id="btnOnchainToggle" onclick="openOnchainPopup()" title="Open on-chain reporting settings — toggle on/off, configure batch size & region, view recent reports.">On-Chain Reporting</button>
         <button class="btn-help" onclick="showInfoPopup()" title="Dashboard guide">?</button>
       </div>
       <!-- Hidden DOM stubs: mode/pricing/loop UI moved into the New Test chooser popup.
@@ -970,26 +983,14 @@
 
     <!-- ─── Task #18: NODE SEARCH card ─── -->
     <div class="glass-panel" id="nodeSearchCard" style="padding:0;overflow:hidden;">
-      <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-        <div style="font-family:var(--font-display);font-size:12px;font-weight:700;letter-spacing:1.5px;color:var(--text);text-transform:uppercase;flex-shrink:0;">Node Search</div>
-        <input id="nsQuery" type="text" placeholder="Moniker, sentnode address, or country…"
-          oninput="nsDebounce()"
-          style="flex:1;min-width:200px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);padding:6px 12px;font-size:12px;font-family:var(--font-display);">
-        <select id="nsCountry" onchange="nsSearch()" class="subheader-select" style="min-width:120px;">
-          <option value="">All Countries</option>
-        </select>
-        <select id="nsService" onchange="nsSearch()" class="subheader-select">
-          <option value="">All Services</option>
-          <option value="wireguard">WireGuard</option>
-          <option value="v2ray">V2Ray</option>
-        </select>
-        <select id="nsSort" onchange="nsSearch()" class="subheader-select">
-          <option value="">Sort: Default</option>
-          <option value="speed_desc">Fastest</option>
-          <option value="tested_desc">Recently Tested</option>
-          <option value="pass_rate_desc">Best Pass Rate</option>
-        </select>
+      <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;">
+        <span style="font-size:11px;letter-spacing:1.2px;color:var(--text-muted);font-weight:600;flex-shrink:0;">SEARCH</span>
+        <input id="nsQuery" type="search" placeholder="Filter nodes by moniker, address, or country…"
+          autocomplete="off" spellcheck="false" oninput="nsDebounce()"
+          style="flex:1;background:var(--bg-input);border:1px solid var(--border);border-radius:5px;color:var(--text);padding:7px 10px;font-size:12px;outline:none;">
         <span id="nsResultCount" style="font-size:11px;color:var(--text-dim);white-space:nowrap;"></span>
+        <button type="button" id="nsClearBtn" onclick="nsClear()"
+          style="display:none;background:transparent;border:1px solid var(--border);border-radius:5px;color:var(--text-muted);padding:6px 10px;font-size:11px;letter-spacing:0.5px;cursor:pointer;">CLEAR</button>
       </div>
 
       <div id="nsTableWrap" style="overflow-x:auto;">
@@ -1268,7 +1269,7 @@
 
     function applyState() {
       const running = state.status === 'running';
-      const paused = state.status === 'paused';
+      const paused = state.status === 'paused' || state.status === 'paused_internet' || state.status === 'paused_balance';
       const active = running || paused;
       document.getElementById('headerDot').className = 'pulse-dot' + (running ? ' running' : paused ? ' paused' : '');
 
@@ -1291,8 +1292,8 @@
             detail = 'sample data — no real measurements, no payments';
             color = 'var(--accent)';
           } else if (state.runMode === 'subscription' && state.runPlanId) {
-            label = 'Plan #' + state.runPlanId;
-            detail = 'subscription-allocated sessions, plan-scoped node set';
+            label = 'On-Chain Subscription Plan Test';
+            detail = '';
             color = 'var(--green)';
           } else {
             label = 'P2P';
@@ -1346,6 +1347,7 @@
         btnStart.classList.add('loading');
         btnStop.textContent = 'Stop Test';
         btnStop.classList.remove('loading');
+        if (btnResume) { btnResume.textContent = 'Resume'; btnResume.classList.remove('loading'); }
       } else {
         btnStart.textContent = 'New Test';
         btnStart.classList.remove('loading');
@@ -1409,7 +1411,7 @@
       } else if (t > 0 && t <= processed) {
         document.getElementById('statTestedSub').textContent = 'complete';
       } else {
-        document.getElementById('statTestedSub').textContent = processed > 0 ? `${processed} tested | hit Rescan for total` : 'no data yet';
+        document.getElementById('statTestedSub').textContent = processed > 0 ? `${processed} tested` : 'no data yet';
       }
 
       // TEST RUN detection — mirrors /live's logic so SLA-derived tiles can
@@ -1492,14 +1494,14 @@
         fill.className = 'progress-fill' + (state.status === 'done' ? ' done' : paused ? ' paused' : '');
         const statusLabel = paused ? `PAUSED — ${state.pauseReason || 'VPN interference'}`
           : t > 0 ? pct + '% Complete'
-          : processed > 0 ? `${processed} tested — hit Rescan for total`
+          : processed > 0 ? `${processed} tested`
           : 'Ready';
         document.getElementById('progressPctLabel').textContent = statusLabel;
         if (t > 0) {
           const rem = Math.max(0, t - processed);
           document.getElementById('progressCount').textContent = processed + ' / ' + t + ' Nodes' + (rem > 0 ? ` — ${rem} remaining` : ' — complete') + (retryCount > 0 ? ` (${retryCount} retries)` : '');
         } else {
-          document.getElementById('progressCount').textContent = processed > 0 ? processed + ' nodes tested — Rescan to see remaining' : 'No scan data';
+          document.getElementById('progressCount').textContent = processed > 0 ? processed + ' nodes tested' : 'No scan data';
         }
 
         if (state.status === 'error' && state.errorMessage) {
@@ -1767,7 +1769,9 @@
       else if (/error|fail|ERR/i.test(msg)) cls = 'log-err';
       div.className = 'log-entry ' + cls;
       const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-      div.innerHTML = `<span class="log-time">${ts}</span>` + msg.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const escaped = String(msg).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const linkified = escaped.replace(/(https?:\/\/[^\s<]+)/g, (u) => `<a href="${u}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">${u}</a>`);
+      div.innerHTML = `<span class="log-time">${ts}</span>` + linkified;
       body.appendChild(div);
       body.scrollTop = body.scrollHeight;
       if (body.children.length > 500) body.removeChild(body.firstChild);
@@ -1866,6 +1870,39 @@
         if (current.startsWith(v)) { sel.value = k; break; }
       }
     }).catch(() => {});
+
+    function _renderOnchainToggle(isOn) {
+      const btn = document.getElementById('btnOnchainToggle');
+      if (!btn) return;
+      btn.classList.toggle('is-on', !!isOn);
+      btn.textContent = isOn ? 'On-Chain Reporting: ON' : 'On-Chain Reporting';
+    }
+    fetch('/api/settings').then(r => r.json()).then(d => {
+      _renderOnchainToggle(!!(d && d.onchainEnabled));
+    }).catch(() => {});
+    async function toggleOnchainReporting() {
+      const btn = document.getElementById('btnOnchainToggle');
+      if (!btn || btn.disabled) return;
+      btn.disabled = true;
+      try {
+        const cur = await fetch('/api/settings').then(r => r.json()).catch(() => ({}));
+        const next = !cur.onchainEnabled;
+        const res = await fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Admin-Request': '1' },
+          body: JSON.stringify({ onchainEnabled: next }),
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const out = await res.json();
+        const finalOn = !!(out.settings && out.settings.onchainEnabled);
+        _renderOnchainToggle(finalOn);
+        appendLog('On-chain reporting: ' + (finalOn ? 'ON' : 'OFF'));
+      } catch (err) {
+        appendLog('On-chain toggle failed: ' + (err && err.message ? err.message : err));
+      } finally {
+        btn.disabled = false;
+      }
+    }
 
     let _pricingMode = 'gigabytes';
     function setPricingMode(mode) {
@@ -1981,6 +2018,361 @@
       openModeChooser();
     }
 
+    async function openP2pSettingsDrawer() {
+      // Tear down any previous drawer
+      const existing = document.getElementById('p2pSettingsBackdrop');
+      if (existing) existing.remove();
+
+      let payload = { settings: {}, defaults: {} };
+      try {
+        const res = await fetch('/api/settings');
+        if (res.ok) payload = await res.json();
+      } catch {}
+      const s = payload.settings || {};
+      const d = payload.defaults || {};
+
+      const backdrop = document.createElement('div');
+      backdrop.id = 'p2pSettingsBackdrop';
+      backdrop.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);';
+
+      const panel = document.createElement('div');
+      panel.style.cssText = 'background:var(--bg-card-solid);border:1px solid var(--border-hover);border-radius:12px;padding:20px;width:min(520px,92vw);max-height:88vh;overflow:auto;color:var(--text);font-family:var(--font-display)';
+
+      const close = () => backdrop.remove();
+      const _esc = (v) => String(v).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+
+      panel.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <div style="font-size:18px;font-weight:700;letter-spacing:0.6px">P2P Payment Settings</div>
+          <button id="p2pSettingsClose" style="background:transparent;border:0;color:var(--text-dim);font-size:22px;cursor:pointer;line-height:1">×</button>
+        </div>
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:16px;font-weight:400;letter-spacing:0.3px">
+          Tunables read by the audit pipeline at run start. Changes persist to disk and apply to the next audit run.
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:14px;font-size:12px">
+
+          <label style="display:flex;flex-direction:column;gap:4px">
+            <span style="font-weight:700;letter-spacing:0.4px">Gigabytes per node
+              <span style="color:var(--text-muted);font-weight:400">(deposit size; 1–100, default ${_esc(d.gigabytes ?? 1)})</span></span>
+            <input id="setGigs" type="number" min="1" max="100" step="1" value="${_esc(s.gigabytes ?? 1)}"
+              style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font:inherit;font-size:12px"/>
+          </label>
+
+          <label style="display:flex;flex-direction:column;gap:4px">
+            <span style="font-weight:700;letter-spacing:0.4px">Batch size
+              <span style="color:var(--text-muted);font-weight:400">(messages per TX; 1–5, default ${_esc(d.batchSize ?? 5)})</span></span>
+            <input id="setBatch" type="number" min="1" max="5" step="1" value="${_esc(s.batchSize ?? 5)}"
+              style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font:inherit;font-size:12px"/>
+          </label>
+
+          <label style="display:flex;flex-direction:column;gap:4px">
+            <span style="font-weight:700;letter-spacing:0.4px">Max price (udvpn / GB)
+              <span style="color:var(--text-muted);font-weight:400">(0 = no cap)</span></span>
+            <input id="setMaxPrice" type="number" min="0" max="1000000000" step="1" value="${_esc(s.maxPriceUdvpn ?? 0)}"
+              style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font:inherit;font-size:12px"/>
+            <span style="color:var(--text-muted);font-weight:400;font-size:11px">Skips any node priced above this. Real cheapest mainnet node is ≈ 4,000,000 udvpn/GB.</span>
+          </label>
+
+          <label style="display:flex;align-items:flex-start;gap:8px;padding:10px;border:1px solid var(--border);border-radius:6px;cursor:pointer">
+            <input id="setAutoCancel" type="checkbox" ${s.autoCancelAfterTest ? 'checked' : ''} style="accent-color:var(--accent);margin-top:2px;cursor:pointer"/>
+            <span style="display:flex;flex-direction:column;gap:3px">
+              <span style="font-weight:700;letter-spacing:0.4px">Auto-cancel sessions after each batch</span>
+              <span style="color:var(--text-muted);font-weight:400;font-size:11px">After a batch finishes testing, broadcast a single TX with up to ${_esc(s.batchSize ?? 5)} <code style="color:var(--accent)">MsgCancelSession</code> messages so the chain settles each session and refunds any unused balance to this wallet. Verified live (Apr 2026 mainnet): the cancel TX emits only <code style="color:var(--accent)">EventUpdateStatus</code>; the chain sets <code style="color:var(--accent)">inactive_at = status_at + 2h</code>, refund is credited at that block. If the node never reported usage, 100% of the deposit is refundable.</span>
+            </span>
+          </label>
+
+          <div style="margin-top:6px;padding-top:14px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:14px">
+            <div>
+              <div style="font-size:13px;font-weight:700;letter-spacing:0.5px">On-Chain Reporting</div>
+              <div style="font-size:11px;color:var(--text-muted);font-weight:400;margin-top:3px">
+                Periodically commits compact binary node-test reports to the Sentinel chain via TX memo (self-send, magic prefix <code style="color:var(--accent)">SNTR1</code>). Any consumer can ingest performance + concurrency data via RPC <code style="color:var(--accent)">tx_search</code>.
+              </div>
+            </div>
+
+            <label style="display:flex;align-items:flex-start;gap:8px;padding:10px;border:1px solid var(--border);border-radius:6px;cursor:pointer">
+              <input id="setOnchainEnabled" type="checkbox" ${s.onchainEnabled ? 'checked' : ''} style="accent-color:var(--accent);margin-top:2px;cursor:pointer"/>
+              <span style="display:flex;flex-direction:column;gap:3px">
+                <span style="font-weight:700;letter-spacing:0.4px">Enable on-chain reporting</span>
+                <span style="color:var(--text-muted);font-weight:400;font-size:11px">Off by default. When on, the tester self-sends 1 udvpn with an encoded batch every <code style="color:var(--accent)">N</code> nodes. Each TX costs ~200,000 udvpn gas.</span>
+              </span>
+            </label>
+
+            <label style="display:flex;flex-direction:column;gap:4px">
+              <span style="font-weight:700;letter-spacing:0.4px">Nodes per report
+                <span style="color:var(--text-muted);font-weight:400">(1–6, default ${_esc(d.onchainBatchSize ?? 6)})</span></span>
+              <input id="setOnchainBatchSize" type="number" min="1" max="6" step="1" value="${_esc(s.onchainBatchSize ?? 6)}"
+                style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font:inherit;font-size:12px"/>
+              <span style="color:var(--text-muted);font-weight:400;font-size:11px">Capped at 6: Sentinel's chain enforces a 256-character TX memo limit. 6 records = 244 base64 chars; 7 would overflow and the chain rejects with code 12.</span>
+            </label>
+
+            <label style="display:flex;flex-direction:column;gap:4px">
+              <span style="font-weight:700;letter-spacing:0.4px">Region (ISO-3166)
+                <span style="color:var(--text-muted);font-weight:400">(2-letter; blank = auto)</span></span>
+              <input id="setOnchainRegion" type="text" maxlength="2" value="${_esc(s.onchainRegion ?? '')}" placeholder="e.g. US"
+                style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font:inherit;font-size:12px;text-transform:uppercase"/>
+              <span style="color:var(--text-muted);font-weight:400;font-size:11px">Identifies the tester's vantage point in each report header. Consumers use this + baseline Mbps to contextualize per-node speeds.</span>
+            </label>
+
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
+              <div style="font-size:11px;color:var(--text-muted)">Recent reports</div>
+              <button id="onchainRefreshBtn" type="button" style="background:transparent;color:var(--text-dim);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font:inherit;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer">REFRESH</button>
+            </div>
+            <div id="onchainReportsList" style="max-height:180px;overflow:auto;font-size:11px;color:var(--text-dim);border:1px solid var(--border);border-radius:6px;padding:8px;background:var(--bg-input)">— click REFRESH to load —</div>
+          </div>
+
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
+            <button id="p2pSettingsReset" type="button" style="background:transparent;color:var(--text-dim);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font:inherit;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer">RESET DEFAULTS</button>
+            <button id="p2pSettingsSave" type="button" style="background:var(--accent);color:var(--bg-card-solid);border:0;border-radius:6px;padding:6px 14px;font:inherit;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer">SAVE</button>
+          </div>
+
+          <div id="p2pSettingsMsg" style="font-size:11px;color:var(--text-muted);min-height:14px"></div>
+        </div>
+      `;
+
+      backdrop.appendChild(panel);
+      document.body.appendChild(backdrop);
+
+      const msg = panel.querySelector('#p2pSettingsMsg');
+      const setMsg = (text, isErr) => { msg.textContent = text || ''; msg.style.color = isErr ? 'var(--red)' : 'var(--green)'; };
+
+      panel.querySelector('#p2pSettingsClose').addEventListener('click', close);
+      backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+
+      panel.querySelector('#p2pSettingsReset').addEventListener('click', () => {
+        panel.querySelector('#setGigs').value = d.gigabytes ?? 1;
+        panel.querySelector('#setBatch').value = d.batchSize ?? 5;
+        panel.querySelector('#setMaxPrice').value = d.maxPriceUdvpn ?? 0;
+        panel.querySelector('#setAutoCancel').checked = !!d.autoCancelAfterTest;
+        panel.querySelector('#setOnchainEnabled').checked = !!d.onchainEnabled;
+        panel.querySelector('#setOnchainBatchSize').value = d.onchainBatchSize ?? 6;
+        panel.querySelector('#setOnchainRegion').value = d.onchainRegion ?? '';
+        setMsg('Defaults loaded — click SAVE to persist.', false);
+      });
+
+      panel.querySelector('#p2pSettingsSave').addEventListener('click', async () => {
+        const body = {
+          gigabytes: parseInt(panel.querySelector('#setGigs').value, 10),
+          batchSize: parseInt(panel.querySelector('#setBatch').value, 10),
+          maxPriceUdvpn: parseInt(panel.querySelector('#setMaxPrice').value, 10),
+          autoCancelAfterTest: !!panel.querySelector('#setAutoCancel').checked,
+          onchainEnabled: !!panel.querySelector('#setOnchainEnabled').checked,
+          onchainBatchSize: parseInt(panel.querySelector('#setOnchainBatchSize').value, 10),
+          onchainRegion: String(panel.querySelector('#setOnchainRegion').value || '').trim().toUpperCase(),
+        };
+        try {
+          const res = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Admin-Request': '1' },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const out = await res.json();
+          const ns = out.settings || {};
+          panel.querySelector('#setGigs').value = ns.gigabytes;
+          panel.querySelector('#setBatch').value = ns.batchSize;
+          panel.querySelector('#setMaxPrice').value = ns.maxPriceUdvpn;
+          panel.querySelector('#setAutoCancel').checked = !!ns.autoCancelAfterTest;
+          panel.querySelector('#setOnchainEnabled').checked = !!ns.onchainEnabled;
+          panel.querySelector('#setOnchainBatchSize').value = ns.onchainBatchSize;
+          panel.querySelector('#setOnchainRegion').value = ns.onchainRegion || '';
+          setMsg('Saved. Effective on next audit run start.', false);
+        } catch (err) {
+          setMsg('Save failed: ' + (err && err.message ? err.message : err), true);
+        }
+      });
+
+      panel.querySelector('#onchainRefreshBtn').addEventListener('click', async () => {
+        const list = panel.querySelector('#onchainReportsList');
+        list.textContent = 'loading…';
+        try {
+          const r = await fetch('/api/onchain-reports?limit=10');
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const data = await r.json();
+          if (!data.reports || data.reports.length === 0) {
+            list.textContent = 'No reports found for ' + (data.address || 'this wallet') + '.';
+            return;
+          }
+          list.innerHTML = data.reports.map(rep => {
+            const p = rep.payload || {};
+            const okCount = (p.records || []).filter(x => x.ok).length;
+            const tx = rep.txhash || '';
+            const link = tx ? `<a href="https://p2pscan.com/transactions/${_esc(tx)}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">${_esc(tx)} ↗</a>` : '—';
+            return `<div style="padding:6px 0;border-bottom:1px dashed var(--border)">
+              <div style="color:var(--text)"><b>h${_esc(rep.height)}</b> · ${_esc(p.region || '—')} · baseline ${_esc(p.baselineMbps)}Mbps · ${_esc(p.count)} nodes (${okCount} ok)</div>
+              <div style="font-size:10px;color:var(--text-muted);font-family:monospace;word-break:break-all">${link}</div>
+            </div>`;
+          }).join('');
+        } catch (err) {
+          list.textContent = 'Load failed: ' + (err && err.message ? err.message : err);
+        }
+      });
+    }
+
+    async function openOnchainPopup() {
+      const existing = document.getElementById('onchainPopupBackdrop');
+      if (existing) existing.remove();
+
+      let payload = { settings: {}, defaults: {} };
+      try {
+        const res = await fetch('/api/settings');
+        if (res.ok) payload = await res.json();
+      } catch {}
+      const s = payload.settings || {};
+      const d = payload.defaults || {};
+
+      const backdrop = document.createElement('div');
+      backdrop.id = 'onchainPopupBackdrop';
+      backdrop.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);';
+
+      const panel = document.createElement('div');
+      panel.style.cssText = 'background:var(--bg-card-solid);border:1px solid var(--border-hover);border-radius:12px;padding:20px;width:min(520px,92vw);max-height:88vh;overflow:auto;color:var(--text);font-family:var(--font-display)';
+
+      const close = () => backdrop.remove();
+      const _esc = (v) => String(v).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+
+      const _section = 'display:flex;flex-direction:column;gap:14px;padding:16px;border:1px solid var(--border);border-radius:8px;background:var(--bg-input)';
+      const _sectionTitle = 'font-size:10px;font-weight:700;letter-spacing:1.4px;text-transform:uppercase;color:var(--text-dim);margin:0;padding-bottom:8px;border-bottom:1px solid var(--border)';
+      const _fieldLabel = 'font-size:13px;font-weight:700;letter-spacing:0.2px;color:var(--text);margin:0';
+      const _fieldHint = 'font-size:11px;line-height:1.5;color:var(--text-muted);font-weight:400;margin:0';
+      const _input = 'background:var(--bg-card-solid);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:8px 10px;font:inherit;font-size:13px;width:100%;box-sizing:border-box';
+      const _field = 'display:flex;flex-direction:column;gap:6px';
+
+      panel.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding-bottom:14px;border-bottom:1px solid var(--border);margin-bottom:18px">
+          <div style="display:flex;flex-direction:column;gap:4px">
+            <div style="font-size:18px;font-weight:700;letter-spacing:0.6px;line-height:1.2">On-Chain Reporting</div>
+            <div style="font-size:11px;color:var(--text-muted);font-weight:400;letter-spacing:0.3px">Sentinel chain · TX memo · prefix <code style="color:var(--accent)">SNTR1</code></div>
+          </div>
+          <button id="onchainPopupClose" style="background:transparent;border:0;color:var(--text-dim);font-size:22px;cursor:pointer;line-height:1;padding:0 4px">×</button>
+        </div>
+
+        <div style="font-size:12px;line-height:1.55;color:var(--text-dim);margin-bottom:18px;font-weight:400;letter-spacing:0.2px">
+          Periodically commits compact binary node-test reports to the Sentinel chain via TX memo (self-send). Any consumer can ingest performance + concurrency data via RPC <code style="color:var(--accent)">tx_search</code>.
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:14px">
+
+          <section style="${_section}">
+            <h3 style="${_sectionTitle}">Status</h3>
+            <div style="${_field}">
+              <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0">
+                <input id="ocEnabled" type="checkbox" ${s.onchainEnabled ? 'checked' : ''} style="accent-color:var(--accent);cursor:pointer;flex-shrink:0;width:16px;height:16px;margin:0"/>
+                <span style="${_fieldLabel}">Enable on-chain reporting</span>
+              </label>
+              <p style="${_fieldHint}">Off by default. When on, the tester self-sends 1 udvpn with an encoded batch every <code style="color:var(--accent)">N</code> nodes. Each TX costs ~200,000 udvpn gas.</p>
+            </div>
+          </section>
+
+          <section style="${_section}">
+            <h3 style="${_sectionTitle}">Configuration</h3>
+
+            <div style="${_field}">
+              <label for="ocBatchSize" style="${_fieldLabel}">Nodes per report</label>
+              <input id="ocBatchSize" type="number" min="1" max="6" step="1" value="${_esc(s.onchainBatchSize ?? 6)}" style="${_input}"/>
+              <p style="${_fieldHint}">Range 1–6. Default ${_esc(d.onchainBatchSize ?? 6)}. Sentinel's chain enforces a 256-character TX memo limit; 6 records = 244 base64 chars (the maximum that fits). 7 would overflow and the chain rejects the TX with code 12 "memo too large".</p>
+            </div>
+
+            <div style="${_field}">
+              <label for="ocRegion" style="${_fieldLabel}">Region (ISO-3166)</label>
+              <input id="ocRegion" type="text" maxlength="2" value="${_esc(s.onchainRegion ?? '')}" placeholder="e.g. US" style="${_input};text-transform:uppercase"/>
+              <p style="${_fieldHint}">2-letter code; blank = auto. Identifies the tester's vantage point in each report header. Consumers use this + baseline Mbps to contextualize per-node speeds.</p>
+            </div>
+          </section>
+
+          <section style="${_section}">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding-bottom:8px;border-bottom:1px solid var(--border)">
+              <h3 style="font-size:10px;font-weight:700;letter-spacing:1.4px;text-transform:uppercase;color:var(--text-dim);margin:0">Recent Reports</h3>
+              <button id="ocRefreshBtn" type="button" style="background:transparent;color:var(--text-dim);border:1px solid var(--border);border-radius:6px;padding:5px 12px;font:inherit;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer">REFRESH</button>
+            </div>
+            <div id="ocReportsList" style="max-height:180px;overflow:auto;font-size:11px;line-height:1.5;color:var(--text-dim);border:1px solid var(--border);border-radius:6px;padding:10px;background:var(--bg-card-solid)">— click REFRESH to load —</div>
+          </section>
+
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding-top:6px;border-top:1px solid var(--border);margin-top:4px">
+            <div id="ocMsg" style="font-size:11px;color:var(--text-muted);min-height:14px;flex:1"></div>
+            <button id="ocSaveBtn" type="button" style="background:var(--accent);color:var(--bg-card-solid);border:0;border-radius:6px;padding:8px 20px;font:inherit;font-size:11px;font-weight:700;letter-spacing:0.6px;cursor:pointer;flex-shrink:0">SAVE</button>
+          </div>
+        </div>
+      `;
+
+      backdrop.appendChild(panel);
+      document.body.appendChild(backdrop);
+
+      const msg = panel.querySelector('#ocMsg');
+      const setMsg = (text, isErr) => { msg.textContent = text || ''; msg.style.color = isErr ? 'var(--red)' : 'var(--green)'; };
+
+      panel.querySelector('#onchainPopupClose').addEventListener('click', close);
+      backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+
+      panel.querySelector('#ocSaveBtn').addEventListener('click', async () => {
+        const body = {
+          onchainEnabled: !!panel.querySelector('#ocEnabled').checked,
+          onchainBatchSize: parseInt(panel.querySelector('#ocBatchSize').value, 10),
+          onchainRegion: String(panel.querySelector('#ocRegion').value || '').trim().toUpperCase(),
+        };
+        try {
+          const res = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Admin-Request': '1' },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const out = await res.json();
+          const ns = out.settings || {};
+          const finalOn = !!ns.onchainEnabled;
+          panel.querySelector('#ocEnabled').checked = finalOn;
+          panel.querySelector('#ocBatchSize').value = ns.onchainBatchSize;
+          panel.querySelector('#ocRegion').value = ns.onchainRegion || '';
+          _renderOnchainToggle(finalOn);
+          setMsg('Saved. On-chain reporting: ' + (finalOn ? 'ON' : 'OFF') + '.', false);
+          appendLog('On-chain reporting: ' + (finalOn ? 'ON' : 'OFF'));
+        } catch (err) {
+          setMsg('Save failed: ' + (err && err.message ? err.message : err), true);
+        }
+      });
+
+      panel.querySelector('#ocRefreshBtn').addEventListener('click', async () => {
+        const list = panel.querySelector('#ocReportsList');
+        const btn = panel.querySelector('#ocRefreshBtn');
+        list.textContent = 'Loading…';
+        btn.disabled = true;
+        btn.style.opacity = '0.6';
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 25000);
+        try {
+          const r = await fetch('/api/onchain-reports?limit=10', { signal: ctrl.signal });
+          clearTimeout(t);
+          if (!r.ok) {
+            let detail = '';
+            try { const j = await r.json(); detail = j.error || ''; } catch {}
+            throw new Error('HTTP ' + r.status + (detail ? ' — ' + detail : ''));
+          }
+          const data = await r.json();
+          if (!data.reports || data.reports.length === 0) {
+            list.innerHTML = `<div style="color:var(--text-muted);text-align:center;padding:14px 4px">No reports found for this wallet.<br><span style="font-size:10px">Reports appear here after the first batch is committed on-chain.</span></div>`;
+            return;
+          }
+          list.innerHTML = data.reports.map(rep => {
+            const p = rep.payload || {};
+            const okCount = (p.records || []).filter(x => x.ok).length;
+            const tx = rep.txhash || '';
+            const link = tx ? `<a href="https://p2pscan.com/transactions/${_esc(tx)}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">${_esc(tx)} ↗</a>` : '—';
+            return `<div style="padding:6px 0;border-bottom:1px dashed var(--border)">
+              <div style="color:var(--text)"><b>h${_esc(rep.height)}</b> · ${_esc(p.region || '—')} · baseline ${_esc(p.baselineMbps)}Mbps · ${_esc(p.count)} nodes (${okCount} ok)</div>
+              <div style="font-size:10px;color:var(--text-muted);font-family:monospace;word-break:break-all">${link}</div>
+            </div>`;
+          }).join('');
+        } catch (err) {
+          clearTimeout(t);
+          const aborted = err && err.name === 'AbortError';
+          list.innerHTML = `<div style="color:var(--red);padding:6px 4px">${aborted ? 'Request timed out — RPC tx_search did not respond within 25s.' : 'Load failed: ' + _esc(err && err.message ? err.message : String(err))}</div>`;
+        } finally {
+          btn.disabled = false;
+          btn.style.opacity = '';
+        }
+      });
+    }
+
     function openModeChooser() {
       // Tear down any previous chooser
       const existing = document.getElementById('modeChooserBackdrop');
@@ -2020,6 +2412,7 @@
               <span style="font-size:10px;color:var(--text-muted);letter-spacing:0.5px">PRICING:</span>
               <button type="button" id="p2pPriceGB" data-pm="gigabytes" style="background:var(--accent);color:var(--bg-card-solid);border:0;border-radius:4px;padding:4px 10px;font:inherit;font-size:10px;font-weight:700;letter-spacing:0.5px;cursor:pointer">PER GB</button>
               <button type="button" id="p2pPriceHr" data-pm="hours" style="background:transparent;color:var(--text-dim);border:1px solid var(--border);border-radius:4px;padding:3px 9px;font:inherit;font-size:10px;font-weight:700;letter-spacing:0.5px;cursor:pointer">PER HOUR</button>
+              <button type="button" id="p2pSettingsBtn" title="P2P payment settings" style="margin-left:auto;background:transparent;color:var(--text-dim);border:1px solid var(--border);border-radius:4px;padding:3px 8px;font:inherit;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer;line-height:1">⚙ SETTINGS</button>
             </div>
             <div style="font-size:10px;color:var(--text-muted);font-weight:400;line-height:1.5;font-style:italic">Note: refund-on-disconnect (closing the locked escrow with the node after each connection) is under research — current behavior locks the per-session quote until the chain settles it.</div>
           </div>
@@ -2058,6 +2451,11 @@
       syncPm();
       pmGB.addEventListener('click', (e) => { e.stopPropagation(); chooserPricingMode = 'gigabytes'; syncPm(); });
       pmHr.addEventListener('click', (e) => { e.stopPropagation(); chooserPricingMode = 'hours'; syncPm(); });
+
+      const settingsBtn = modal.querySelector('#p2pSettingsBtn');
+      if (settingsBtn) {
+        settingsBtn.addEventListener('click', (e) => { e.stopPropagation(); openP2pSettingsDrawer(); });
+      }
 
       // Sync chooser's ∞ LOOP into the hidden #infiniteLoop the start path reads.
       const syncLoop = () => {
@@ -2200,26 +2598,6 @@
         btn.textContent = 'Retest Failed';
         btn.disabled = false;
         document.getElementById('btnStart').disabled = false;
-      }
-    }
-
-    async function rescanNodes() {
-      const btn = document.getElementById('btnRescan');
-      btn.textContent = 'Scanning...';
-      btn.disabled = true;
-      try {
-        const res = await fetch('/api/rescan', { method: 'POST', headers: { 'X-Admin-Request': '1' } });
-        const data = await res.json();
-        if (data.error) {
-          appendLog('Rescan failed: ' + data.error);
-        } else {
-          appendLog('Rescan: ' + data.total + ' nodes on chain, ' + data.tested + ' tested, ' + data.remaining + ' remaining');
-        }
-      } catch (e) {
-        appendLog('Rescan failed: ' + e.message);
-      } finally {
-        btn.textContent = 'Rescan Nodes';
-        btn.disabled = false;
       }
     }
 
@@ -2522,11 +2900,6 @@ CMD ["serve", "--port", "3001"]</div>
           </div>
 
           <div style="margin-bottom:18px">
-            <div style="color:var(--accent);font-weight:600;font-size:14px;margin-bottom:4px">Rescan Nodes</div>
-            Re-fetches the current node list from the blockchain without starting a test. Updates the total count and remaining nodes. Use to verify how many nodes are left to test.
-          </div>
-
-          <div style="margin-bottom:18px">
             <div style="color:var(--text);font-weight:600;font-size:14px;margin-bottom:4px">Retest Failed</div>
             Re-tests only the nodes that previously failed. Useful after fixing bugs or when chain conditions change. Does not touch passed nodes.
           </div>
@@ -2556,7 +2929,7 @@ CMD ["serve", "--port", "3001"]</div>
             Save the current results as a named test run. Switch between previous runs to compare results across scans.
           </div>
 
-          <div style="margin-bottom:8px">
+          <div style="margin-bottom:18px">
             <div style="color:var(--text);font-weight:600;font-size:14px;margin-bottom:4px">Stats Cards</div>
             <b>Tested</b> — nodes with completed tests (pass or fail) and how many remain.<br>
             <b>Total Failed</b> — nodes that could not connect or failed speed test.<br>
@@ -2564,6 +2937,46 @@ CMD ["serve", "--port", "3001"]</div>
             <b>Dead Plan Nodes</b> — plan-linked nodes that failed (operator alert).<br>
             <b>Not Online</b> — nodes with 0 peers (genuinely offline).<br>
             <b>Pass Rate</b> — percentage of tested nodes that connected successfully.
+          </div>
+
+          <div style="margin-bottom:8px">
+            <div style="color:var(--accent);font-weight:600;font-size:14px;margin-bottom:6px">On-Chain Reporting</div>
+            Opt-in publisher (off by default). When enabled, every N tested nodes the tester self-sends <b>1 udvpn</b> with a compact binary memo so any consumer can ingest results via RPC <code style="font-family:var(--font-mono);font-size:11px">tx_search</code> — no off-chain API needed. Sentinel's chain enforces a 256-character TX memo limit, so each batch carries up to <b>6 records</b> (244 base64 chars) and costs ~200,000 udvpn gas.
+            <div style="margin-top:10px;font-size:11px;color:var(--text-muted);font-weight:600;letter-spacing:0.4px;text-transform:uppercase">Wire format (binary memo, base64-encoded)</div>
+            <div style="margin-top:6px;padding:10px 12px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;font-family:var(--font-mono);font-size:10.5px;line-height:1.6;color:var(--text-dim);overflow-x:auto;white-space:pre">Header (13 bytes)
+  magic         5B   'SNTR1'
+  version       1B   uint8
+  region        2B   ASCII (e.g. 'US')
+  baselineMbps  2B   uint16 BE
+  startedAt     4B   uint32 BE (unix s)
+  count         1B   uint8 (1–6, chain memo cap)
+
+Record (28 bytes × count)
+  address       20B  bech32 data part
+  ok            1B   0|1
+  actualMbps×10 2B   uint16 BE
+  peers         2B   uint16 BE
+  latencyMs     2B   uint16 BE
+  errCode       1B   uint8</div>
+            <div style="margin-top:10px;font-size:11px;color:var(--text-muted);font-weight:600;letter-spacing:0.4px;text-transform:uppercase">Decoded example</div>
+            <div style="margin-top:6px;padding:10px 12px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;font-family:var(--font-mono);font-size:10.5px;line-height:1.55;color:var(--text-dim);overflow-x:auto;white-space:pre">{
+  "version": 1,
+  "region": "US",
+  "baselineMbps": 215,
+  "startedAt": "2026-04-29T22:14:33.000Z",
+  "count": 2,
+  "records": [
+    { "address": "sent1qxnz7l4q8m5...rk3hf",
+      "ok": true,  "actualMbps": 47.3,
+      "peers": 12, "latencyMs": 184, "errCode": 0 },
+    { "address": "sent1ph8x2yg9j2v...8wu0p",
+      "ok": false, "actualMbps": 0,
+      "peers": 0,  "latencyMs": 0,   "errCode": 7 }
+  ]
+}</div>
+            <div style="margin-top:10px;font-size:11.5px;color:var(--text-dim);line-height:1.6">
+              <b>TX shape:</b> <code style="font-family:var(--font-mono);font-size:11px">MsgSend</code> wallet → wallet (1 udvpn) with the encoded memo. Query via <code style="font-family:var(--font-mono);font-size:11px">message.sender='&lt;wallet&gt;' AND transfer.recipient='&lt;wallet&gt;'</code>. See <b>core/onchain-report.js</b> for encoder/decoder/<code style="font-family:var(--font-mono);font-size:11px">commitBatch</code>/<code style="font-family:var(--font-mono);font-size:11px">queryReports</code>.
+            </div>
           </div>
         </div>
 
@@ -2622,16 +3035,19 @@ CMD ["serve", "--port", "3001"]</div>
           return;
         }
         list.innerHTML = data.plans.map(p => {
-          const badge = p.feeGrantActive
-            ? '<span class="mono-tag-green" style="font-size:9px;padding:2px 8px;letter-spacing:1px">FEE GRANT ACTIVE</span>'
-            : '<span class="mono-tag-red" style="font-size:9px;padding:2px 8px;letter-spacing:1px">NO FEE GRANT</span>';
+          const badge = p.selfGranter
+            ? '<span class="mono-tag-green" style="font-size:9px;padding:2px 8px;letter-spacing:1px">SELF-PAYS GAS</span>'
+            : p.feeGrantActive
+              ? '<span class="mono-tag-green" style="font-size:9px;padding:2px 8px;letter-spacing:1px">FEE GRANT ACTIVE</span>'
+              : '<span class="mono-tag-red" style="font-size:9px;padding:2px 8px;letter-spacing:1px">NO FEE GRANT</span>';
           const allocBadge = p.viaAllocation
             ? '<span class="mono-tag" style="font-size:9px;padding:2px 8px;letter-spacing:1px;border:1px solid var(--accent);color:var(--accent)">ALLOCATION</span>'
             : '';
-          const disabled = !p.feeGrantActive || p.nodeCount === 0 || !p.ownerSentAddr;
+          const canTest = p.selfGranter || p.feeGrantActive;
+          const disabled = !canTest || p.nodeCount === 0 || !p.ownerSentAddr;
           const reason = !p.ownerSentAddr ? 'Plan owner unknown'
             : p.nodeCount === 0 ? 'No active nodes in this plan'
-            : !p.feeGrantActive ? 'Plan owner has not granted gas to this wallet'
+            : !canTest ? 'Plan owner has not granted gas to this wallet'
             : '';
           const expiryStr = p.expiry ? new Date(p.expiry).toLocaleDateString() : '—';
           const btnClass = disabled ? 'btn-ghost btn-sm' : 'btn-primary btn-sm';
@@ -2649,15 +3065,15 @@ CMD ["serve", "--port", "3001"]</div>
                   <span>Nodes <span style="color:var(--text);font-weight:600">${p.nodeCount}</span></span>
                   <span>Expires <span style="color:var(--text)">${expiryStr}</span></span>
                 </div>
-                <div style="font-size:10px;color:var(--text-muted);margin-top:6px;font-family:var(--font-mono);word-break:break-all">${p.ownerSentAddr || 'unknown granter'}</div>
-                ${reason ? `<div style="font-size:10px;color:var(--red);margin-top:8px;display:flex;align-items:center;gap:4px"><span style="opacity:0.8">⚠</span> ${reason}</div>` : ''}
+                <div style="font-size:10px;color:var(--text-muted);margin-top:6px;font-family:var(--font-mono);word-break:break-all">${escHtml(p.ownerSentAddr || 'unknown granter')}</div>
+                ${reason ? `<div style="font-size:10px;color:var(--red);margin-top:8px;display:flex;align-items:center;gap:4px"><span style="opacity:0.8">⚠</span> ${escHtml(reason)}</div>` : ''}
               </div>
-              <button class="${btnClass}" ${btnExtra} onclick="runSubPlanTest('${p.planId}','${p.subscriptionId}','${p.ownerSentAddr || ''}')">Test Plan</button>
+              <button class="${btnClass}" ${btnExtra} data-plan-id="${escHtml(p.planId)}" data-sub-id="${escHtml(p.subscriptionId)}" data-granter="${escHtml(p.ownerSentAddr || '')}" onclick="runSubPlanTest(this.dataset.planId,this.dataset.subId,this.dataset.granter)">Test Plan</button>
             </div>
           `;
         }).join('');
       } catch (err) {
-        document.getElementById('subPlanList').innerHTML = `<div style="padding:20px;text-align:center;color:var(--red);background:var(--red-dim);border:1px solid rgba(255,23,68,0.22);border-radius:var(--radius-sm);font-size:12px">Failed to load plans: ${err.message}</div>`;
+        document.getElementById('subPlanList').innerHTML = `<div style="padding:20px;text-align:center;color:var(--red);background:var(--red-dim);border:1px solid rgba(255,23,68,0.22);border-radius:var(--radius-sm);font-size:12px">Failed to load plans: ${escHtml(err.message || String(err))}</div>`;
       }
     }
 
@@ -2673,18 +3089,15 @@ CMD ["serve", "--port", "3001"]</div>
     async function runSubPlanTest(planId, subscriptionId, granter) {
       const overlay = document.getElementById('subPlanOverlay');
       if (overlay) overlay.remove();
-      // Reflect the chosen plan in the MODE picker so the operator sees "PLAN #N"
-      // both before pressing Start Test and while the run is live.
+      // Picking a plan from the picker is an EXPLICIT subscription-plan request.
+      // It must always route to /api/test-sub-plan, regardless of any leftover
+      // _testingMode='testrun' or server state.testRun=true from a previous run.
+      // (Earlier code fell through to devStart(true) here when isTestRunMode()
+      // was true, hijacking sub-plan runs into TEST_RUN_SKIP rows. Removed.)
       _selectedPlanId = planId;
       _selectedSubscriptionId = subscriptionId;
       _selectedGranter = granter;
       setTestingMode('plan', { fromPick: true });
-
-      if (isTestRunMode()) {
-        if (state.status === 'running' || state.status === 'paused') { stopAudit(); return; }
-        await devStart(true);
-        return;
-      }
 
       // Fire the start request FIRST. Don't wipe the dashboard until the
       // server has accepted the run — otherwise a 4xx (FEE_GRANT_MISSING,
@@ -2806,30 +3219,27 @@ CMD ["serve", "--port", "3001"]</div>
     let _nsCurrentErrors = [];
     let _nsCurrentMoniker = '';
 
-    fetch('/api/public/countries').then(function(r) { return r.json(); }).then(function(data) {
-      const sel = document.getElementById('nsCountry');
-      for (const c of (data.countries || [])) {
-        const opt = document.createElement('option');
-        opt.value = c; opt.textContent = c;
-        sel.appendChild(opt);
-      }
-    }).catch(function() {});
-
     function nsDebounce() {
       clearTimeout(_nsTimer);
+      const q = document.getElementById('nsQuery').value;
+      const clearBtn = document.getElementById('nsClearBtn');
+      if (clearBtn) clearBtn.style.display = q ? '' : 'none';
       _nsTimer = setTimeout(nsSearch, 250);
     }
+
+    function nsClear() {
+      const input = document.getElementById('nsQuery');
+      if (input) input.value = '';
+      const clearBtn = document.getElementById('nsClearBtn');
+      if (clearBtn) clearBtn.style.display = 'none';
+      nsSearch();
+    }
+    window.nsClear = nsClear;
 
     async function nsSearch() {
       const params = new URLSearchParams({ limit: 20 });
       const q = document.getElementById('nsQuery').value.trim();
-      const country = document.getElementById('nsCountry').value;
-      const service = document.getElementById('nsService').value;
-      const sort = document.getElementById('nsSort').value;
       if (q) params.set('q', q);
-      if (country) params.set('country', country);
-      if (service) params.set('service', service);
-      if (sort) params.set('sort', sort);
       try {
         const res = await fetch('/api/public/nodes?' + params.toString());
         _nsAllNodes = (await res.json()).nodes || [];
@@ -3069,6 +3479,7 @@ CMD ["serve", "--port", "3001"]</div>
         const res = await fetch('/api/public/node/' + encodeURIComponent(addr) + '/errors?limit=1', {
           credentials: 'same-origin'
         });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         const errs = (data && data.errors) || [];
         if (!errs.length) {
@@ -3145,6 +3556,7 @@ CMD ["serve", "--port", "3001"]</div>
         const res = await fetch('/api/public/node/' + encodeURIComponent(addr) + '/errors?limit=1', {
           credentials: 'same-origin',
         });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         const errs = (data && data.errors) || [];
         const body = document.getElementById('errorPopupBody');
@@ -3156,42 +3568,170 @@ CMD ["serve", "--port", "3001"]</div>
         const er = errs[0];
         const escapeHtml = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
         const captured = _fmtCapturedUtc(er.captured_at);
+        let raw = {}; let diag = {};
+        try { raw = er.raw_json ? JSON.parse(er.raw_json) : {}; } catch {}
+        diag = (raw && raw.diag) || {};
+        const svcType = (raw.type != null)
+          ? (String(raw.type).toLowerCase().includes('wire') || raw.type === 1 ? 'WireGuard' : 'V2Ray')
+          : (er.service_type === 1 ? 'WireGuard' : er.service_type === 2 ? 'V2Ray' : '—');
+        const yn = (v) => v === true || v === 1 ? '✓ yes' : v === false || v === 0 ? '✗ no' : '—';
+        const num = (v, suffix = '') => (v == null || Number.isNaN(Number(v))) ? '—' : (Number(v) + suffix);
+        const monoVal = (v) => v == null || v === '' ? '—' : `<span style="font-family:var(--font-mono);font-size:12px">${escapeHtml(v)}</span>`;
+        const sectionTitle = (t) => `<div style="margin:18px 0 6px;color:var(--text);font-weight:700;font-size:11px;letter-spacing:1.4px;text-transform:uppercase;padding-bottom:6px;border-bottom:1px solid var(--border)">${t}</div>`;
         const row = (label, value) => `
-          <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+          <div style="display:grid;grid-template-columns:140px 1fr;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
             <div style="color:var(--text-muted);font-size:12px">${label}</div>
-            <div style="color:var(--text);word-break:break-all">${value || '—'}</div>
+            <div style="color:var(--text);word-break:break-all;font-size:12.5px">${value == null || value === '' ? '—' : value}</div>
           </div>`;
+
+        const wgDiag = [];
+        if (diag.wgAssignedAddrs) wgDiag.push(row('WG Assigned Addrs', monoVal(Array.isArray(diag.wgAssignedAddrs) ? diag.wgAssignedAddrs.join(', ') : diag.wgAssignedAddrs)));
+        if (diag.wgServerEndpoint) wgDiag.push(row('WG Server Endpoint', monoVal(diag.wgServerEndpoint)));
+        if (diag.wgSplitIPs) wgDiag.push(row('WG Split IPs', monoVal(Array.isArray(diag.wgSplitIPs) ? diag.wgSplitIPs.join(', ') : diag.wgSplitIPs)));
+
+        const v2Diag = [];
+        if (diag.v2rayProto) v2Diag.push(row('V2Ray Protocol', monoVal(diag.v2rayProto)));
+        if (diag.v2rayTransport) v2Diag.push(row('V2Ray Transport', monoVal(diag.v2rayTransport)));
+        if (diag.v2raySecurity) v2Diag.push(row('V2Ray Security', monoVal(diag.v2raySecurity)));
+        if (diag.v2rayPort != null) v2Diag.push(row('V2Ray Port', monoVal(diag.v2rayPort)));
+        if (diag.v2rayUUID) v2Diag.push(row('V2Ray UUID', monoVal(diag.v2rayUUID)));
+        if (diag.v2rayMetadataCount != null) v2Diag.push(row('V2Ray Metadata Count', num(diag.v2rayMetadataCount)));
+        if (diag.statusPortFallback) v2Diag.push(row('Status-Port Fallback', '✓ used (advertised port unusable)'));
+        if (diag.discoveredPorts && diag.discoveredPorts.length) v2Diag.push(row('Discovered Open Ports', monoVal(diag.discoveredPorts.join(', '))));
+        if (diag.discoveredPortUsed) v2Diag.push(row('Discovered Port Used', monoVal(diag.discoveredPortUsed)));
+        if (diag.portScanAttempted) v2Diag.push(row('Port Scan Attempted', '✓ yes'));
+
+        const sessDiag = [];
+        if (diag.sessionId) sessDiag.push(row('Session ID', monoVal(diag.sessionId)));
+        if (diag.remoteUrl) sessDiag.push(row('Remote URL', monoVal(diag.remoteUrl)));
+        if (diag.serverHost) sessDiag.push(row('Server Host', monoVal(diag.serverHost)));
+        if (diag.clockDriftSec != null) sessDiag.push(row('Clock Drift', num(diag.clockDriftSec, ' s') + (diag.clockDriftWarning ? ' <span style="color:var(--red);font-size:11px">⚠ exceeded tolerance</span>' : '')));
+        if (diag.googleAccessible != null) sessDiag.push(row('Google Reachable (via tunnel)', yn(diag.googleAccessible) + (diag.googleLatencyMs ? ' · ' + diag.googleLatencyMs + ' ms' : '') + (diag.googleError ? ' · <span style="color:var(--text-muted)">' + escapeHtml(diag.googleError) + '</span>' : '')));
+        if (diag.speedtestMethod) sessDiag.push(row('Speedtest Method', monoVal(diag.speedtestMethod)));
+
+        const sideCar = [];
+        if (diag.v2rayStdout) sideCar.push(['V2Ray stdout', diag.v2rayStdout]);
+        if (diag.v2rayStderr) sideCar.push(['V2Ray stderr', diag.v2rayStderr]);
+        if (diag.v2rayConfig) sideCar.push(['V2Ray config (sanitized)', typeof diag.v2rayConfig === 'string' ? diag.v2rayConfig : JSON.stringify(diag.v2rayConfig, null, 2)]);
+        if (diag.hsConfig) sideCar.push(['Handshake config (truncated)', diag.hsConfig]);
+        if (diag.v2rayRawMeta) sideCar.push(['V2Ray raw metadata', JSON.stringify(diag.v2rayRawMeta, null, 2)]);
+
+        const block = (title, content) => `
+          <div style="margin-top:10px">
+            <div style="color:var(--text-muted);font-size:11px;margin-bottom:4px;letter-spacing:0.5px">${title}</div>
+            <pre style="background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:10px 12px;color:var(--text);font-family:var(--font-mono);font-size:11px;line-height:1.5;max-height:240px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0">${escapeHtml(content)}</pre>
+          </div>`;
+
         body.innerHTML = `
+          ${sectionTitle('Summary')}
           ${row('Node', escapeHtml(moniker))}
-          ${row('Address', `<span style="font-family:var(--font-mono);font-size:12px">${escapeHtml(addr)}</span>`)}
+          ${row('Address', monoVal(addr))}
+          ${row('Country', escapeHtml(er.country || ''))}
+          ${row('City', escapeHtml(er.city))}
+          ${row('Service', svcType)}
           ${row('Stage', escapeHtml(er.stage))}
-          ${row('Error Code', `<span style="font-family:var(--font-mono);font-size:12px">${escapeHtml(er.error_code)}</span>`)}
+          ${row('Error Code', monoVal(er.error_code))}
           ${row('Captured', escapeHtml(captured))}
           ${row('Message', `<span style="font-family:var(--font-mono);font-size:12px;white-space:pre-wrap">${escapeHtml(er.error_message)}</span>`)}
-          ${er.log_snippet ? `
-            <div style="margin-top:14px">
-              <div style="color:var(--text-muted);font-size:12px;margin-bottom:6px">Log Snippet</div>
-              <pre style="background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:10px 12px;color:var(--text);font-family:var(--font-mono);font-size:11.5px;line-height:1.5;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0">${escapeHtml(er.log_snippet)}</pre>
-            </div>` : ''}
-          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
-            <button onclick="(function(b){const t=[
-              'Sentinel Node Tester — Failure Log',
-              '──────────────────────────────────',
-              'Node:       ' + ${JSON.stringify(moniker || '—')},
-              'Address:    ' + ${JSON.stringify(addr)},
-              'Stage:      ' + ${JSON.stringify(er.stage || '—')},
-              'Error Code: ' + ${JSON.stringify(er.error_code || '—')},
-              'Message:    ' + ${JSON.stringify(er.error_message || '—')},
-              'Captured:   ' + ${JSON.stringify(_fmtCapturedUtc(er.captured_at))},
-              '',
-              ${er.log_snippet ? `'Log Snippet:', ${JSON.stringify(er.log_snippet)}` : ''}
-            ].filter(x=>x!=null&&x!==undefined).join('\\n');navigator.clipboard&&navigator.clipboard.writeText(t).then(()=>{b.textContent='✓ Copied';setTimeout(()=>b.textContent='⎘ Copy',1500)}).catch(()=>{const ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();b.textContent='✓ Copied';setTimeout(()=>b.textContent='⎘ Copy',1500)})})(this)" class="row-copy-btn" style="padding:6px 14px">⎘ Copy</button>
+
+          ${sectionTitle('Network State at Fail Time')}
+          ${row('Peers', num(raw.peers != null ? raw.peers : null))}
+          ${row('Max Peers', num(raw.maxPeers != null ? raw.maxPeers : null))}
+          ${row('Advertised Mbps', num(er.advertised_mbps, ' Mbps'))}
+          ${row('Tester Baseline', raw.baselineAtTest != null ? num(raw.baselineAtTest, ' Mbps') : '—')}
+          ${row('Dynamic Threshold (50%)', raw.dynamicThreshold != null ? num(raw.dynamicThreshold, ' Mbps') : '—')}
+          ${row('SLA Applicable', yn(raw.slaApplicable))}
+          ${row('Timed Out', yn(raw.timedOut))}
+          ${row('Latency', num(er.latency_ms, ' ms'))}
+
+          ${sectionTitle('Tester Environment')}
+          ${row('Tester SDK', monoVal(er.sdk || raw.sdk))}
+          ${row('Tester OS', monoVal(er.tester_os || raw.os))}
+          ${row('Run ID', monoVal(er.run_id))}
+          ${row('Continent', escapeHtml(er.continent))}
+
+          ${wgDiag.length ? sectionTitle('WireGuard Diagnostics') + wgDiag.join('') : ''}
+          ${v2Diag.length ? sectionTitle('V2Ray Diagnostics') + v2Diag.join('') : ''}
+          ${sessDiag.length ? sectionTitle('Session / Tunnel Diagnostics') + sessDiag.join('') : ''}
+
+          ${sideCar.length ? sectionTitle('Sidecar Output') + sideCar.map(([t, c]) => block(t, c)).join('') : ''}
+
+          ${er.log_snippet ? sectionTitle('Tester Log Snippet') + `
+            <pre style="background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:10px 12px;color:var(--text);font-family:var(--font-mono);font-size:11.5px;line-height:1.5;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0">${escapeHtml(er.log_snippet)}</pre>` : ''}
+
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">
+            <button id="errorPopupCopyBtn" class="row-copy-btn" style="padding:6px 14px">⎘ Copy Full Report</button>
             <button onclick="document.getElementById('errorPopupOverlay').remove()" class="row-copy-btn" style="padding:6px 14px">Close</button>
           </div>
         `;
+        const _copyBtn = document.getElementById('errorPopupCopyBtn');
+        if (_copyBtn) {
+          _copyBtn.onclick = async () => {
+            const lines = [
+              'Sentinel Node Tester — Failure Log',
+              '══════════════════════════════════',
+              '[Summary]',
+              'Node:        ' + (moniker || '—'),
+              'Address:     ' + addr,
+              'Country:     ' + (er.country || '—'),
+              'City:        ' + (er.city || '—'),
+              'Service:     ' + svcType,
+              'Stage:       ' + (er.stage || '—'),
+              'Error Code:  ' + (er.error_code || '—'),
+              'Message:     ' + (er.error_message || '—'),
+              'Captured:    ' + captured,
+              '',
+              '[Network State at Fail Time]',
+              'Peers:              ' + (raw.peers != null ? raw.peers : '—'),
+              'Max Peers:          ' + (raw.maxPeers != null ? raw.maxPeers : '—'),
+              'Advertised Mbps:    ' + (er.advertised_mbps != null ? er.advertised_mbps + ' Mbps' : '—'),
+              'Tester Baseline:    ' + (raw.baselineAtTest != null ? raw.baselineAtTest + ' Mbps' : '—'),
+              'Dynamic Threshold:  ' + (raw.dynamicThreshold != null ? raw.dynamicThreshold + ' Mbps' : '—'),
+              'SLA Applicable:     ' + (raw.slaApplicable === true ? 'yes' : raw.slaApplicable === false ? 'no' : '—'),
+              'Timed Out:          ' + (raw.timedOut === true ? 'yes' : raw.timedOut === false ? 'no' : '—'),
+              'Latency:            ' + (er.latency_ms != null ? er.latency_ms + ' ms' : '—'),
+              '',
+              '[Tester Environment]',
+              'SDK:    ' + (er.sdk || raw.sdk || '—'),
+              'OS:     ' + (er.tester_os || raw.os || '—'),
+              'Run ID: ' + (er.run_id || '—'),
+              '',
+            ];
+            const diagKeys = Object.keys(diag || {});
+            if (diagKeys.length) {
+              lines.push('[Diagnostics]');
+              for (const k of diagKeys) {
+                const v = diag[k];
+                if (v == null) continue;
+                const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+                lines.push(k + ':'.padEnd(Math.max(2, 22 - k.length), ' ') + ' ' + s);
+              }
+              lines.push('');
+            }
+            if (er.log_snippet) { lines.push('[Tester Log Snippet]'); lines.push(er.log_snippet); }
+            const txt = lines.join('\n');
+            const original = _copyBtn.innerHTML;
+            _copyBtn.disabled = true;
+            try {
+              try {
+                await navigator.clipboard.writeText(txt);
+              } catch (_) {
+                const ta = document.createElement('textarea');
+                ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
+                document.body.appendChild(ta); ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+              }
+              _copyBtn.innerHTML = '✓ Copied';
+            } catch {
+              _copyBtn.innerHTML = '! Failed';
+            }
+            setTimeout(() => { _copyBtn.innerHTML = original; _copyBtn.disabled = false; }, 1500);
+          };
+        }
       } catch (err) {
         const body = document.getElementById('errorPopupBody');
-        if (body) body.innerHTML = '<div style="color:var(--red)">Failed to load: ' + (err.message || 'unknown') + '</div>';
+        if (body) body.innerHTML = '<div style="color:var(--red)">Failed to load: ' + escHtml(err.message || 'unknown') + '</div>';
       }
     }
 

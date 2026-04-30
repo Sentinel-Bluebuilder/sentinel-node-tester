@@ -116,18 +116,21 @@
     .live-header-stat {
       display: flex; flex-direction: column; gap: 2px;
       padding: 0 16px;
+      align-items: center; text-align: center;
     }
     .live-header-stat-label {
       font-family: var(--font-display);
       font-size: 9px; letter-spacing: 1.5px;
       color: var(--text-muted); text-transform: uppercase;
       font-weight: 600;
+      text-align: center;
     }
     .live-header-stat-value {
       font-family: var(--font-display);
       font-size: 14px; letter-spacing: 0.5px;
       color: var(--text); font-weight: 700;
       font-variant-numeric: tabular-nums;
+      text-align: center;
     }
     .live-header-divider {
       width: 1px; height: 28px; background: var(--border);
@@ -141,7 +144,9 @@
       font-size: 22px; font-weight: 700;
       letter-spacing: 2.5px; text-transform: uppercase;
       color: var(--text); margin: 0; line-height: 1.1;
+      display: inline-flex; align-items: center; flex-wrap: wrap; gap: 10px;
     }
+    #liveModeBadge { align-items: center; line-height: 1; margin-left: 0 !important; }
     .live-page-sub {
       font-family: var(--font-display);
       font-size: 11px; letter-spacing: 1.2px;
@@ -165,6 +170,8 @@
       padding: 12px 14px;
       display: flex; flex-direction: column; gap: 4px;
       min-height: 64px;
+      align-items: center; justify-content: center;
+      text-align: center;
     }
     .stat-label {
       font-family: var(--font-display);
@@ -172,6 +179,7 @@
       letter-spacing: 1.4px;
       text-transform: uppercase;
       color: var(--text-dim);
+      text-align: center;
     }
     .stat-value {
       font-family: var(--font-display);
@@ -179,6 +187,7 @@
       font-weight: 700;
       color: var(--text);
       line-height: 1.05;
+      text-align: center;
     }
     .stat-value.pass { color: var(--green); }
     .stat-value.fail { color: var(--red); }
@@ -188,6 +197,7 @@
       font-size: 10px;
       color: var(--text-muted);
       letter-spacing: 0.6px;
+      text-align: center;
     }
 
     /* ─── Current Batch panel ─── */
@@ -307,6 +317,11 @@
     td.td-num, th.th-num { font-variant-numeric: tabular-nums; text-align: right; }
     td.td-moniker { max-width: 180px; }
     td.td-error { max-width: 240px; }
+    /* Tighten the gap between Peers (col 6) and Speed (col 7) */
+    table thead th:nth-child(6),
+    table tbody td:nth-child(6) { padding-right: 2px; }
+    table thead th:nth-child(7),
+    table tbody td:nth-child(7) { padding-left: 2px; }
 
     .pager .btn-paginate {
       background: var(--bg-input);
@@ -549,6 +564,14 @@
     /* Mobile desktop gate */
     .mobile-gate { display: none; }
     .mobile-gate-inner { max-width: 420px; padding: 32px 24px; text-align: center; }
+    .mobile-gate-logo {
+      width: 96px; height: 96px; border-radius: 50%;
+      object-fit: cover;
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      margin: 0 auto 20px;
+      display: block;
+    }
     .mobile-gate-title {
       font-family: var(--font-display); font-size: 22px; font-weight: 700;
       letter-spacing: 1px; text-transform: uppercase; color: var(--text);
@@ -589,13 +612,14 @@
       </div>
       <p class="paused-sub">Sentinel Node Tester</p>
       <h1 class="paused-title">Testing Has Been Paused</h1>
-      <p class="paused-body">Live testing will resume automatically when the operator starts a new batch.</p>
+      <p class="paused-body">Live testing will resume automatically when a test is started</p>
     </div>
   </div>
 
   <!-- Mobile desktop gate -->
   <div class="mobile-gate" id="mobileGate" aria-hidden="true">
     <div class="mobile-gate-inner">
+      <img src="/logo.jpg" alt="Sentinel" class="mobile-gate-logo">
       <h1 class="mobile-gate-title">View on Desktop</h1>
       <p class="mobile-gate-body">Sentinel Node Tester is desktop-only for now — the live view needs a wide screen. Open this page on a desktop browser.</p>
       <div class="mobile-gate-url" id="mobileGateUrl">sentinel-p2p.com/live</div>
@@ -723,6 +747,25 @@
       <div class="cb-complete-msg" id="cbCompleteMsg"></div>
     </div>
 
+    <!-- Search bar — filters dVPN Node Connections by moniker, address, country, or city -->
+    <div class="glass-panel" id="liveSearchBar" style="padding:10px 14px;margin-bottom:16px;display:flex;align-items:center;gap:10px;">
+      <span style="font-size:11px;letter-spacing:1.2px;color:var(--text-muted);font-weight:600;">SEARCH</span>
+      <input
+        type="search"
+        id="liveSearchInput"
+        placeholder="Filter nodes by moniker, address, country, or city…"
+        autocomplete="off"
+        spellcheck="false"
+        style="flex:1;background:var(--bg-input);border:1px solid var(--border);border-radius:5px;color:var(--text);padding:7px 10px;font-size:12px;outline:none;"
+      />
+      <button
+        type="button"
+        id="liveSearchClear"
+        onclick="clearLiveSearch()"
+        style="display:none;background:transparent;border:1px solid var(--border);border-radius:5px;color:var(--text-muted);padding:6px 10px;font-size:11px;letter-spacing:0.5px;cursor:pointer;"
+      >CLEAR</button>
+    </div>
+
     <!-- Data grid — dVPN Node Connections + Live Log -->
     <div class="data-grid">
       <div class="glass-panel table-container">
@@ -847,6 +890,8 @@
       const _liveResultsNext = document.getElementById('liveResultsNext');
       if (_liveResultsPrev) _liveResultsPrev.addEventListener('click', () => liveGoPage(-1));
       if (_liveResultsNext) _liveResultsNext.addEventListener('click', () => liveGoPage(1));
+      const _liveSearchInput = document.getElementById('liveSearchInput');
+      if (_liveSearchInput) _liveSearchInput.addEventListener('input', (e) => setLiveSearch(e.target.value));
       renderTable();
       renderLiveStats();
       // Resolve broadcast state BEFORE loading the current batch — otherwise
@@ -975,6 +1020,7 @@
     // ─── State ───
     let resultsArr = [];
     let activeFilter = 'all';
+    let activeSearch = '';
     const LIVE_PAGE_SIZE = 50;
     let _livePage = 1;
     const MAX_LOG  = 400;
@@ -1056,16 +1102,47 @@
       renderTable();
     }
     function applyFilter(arr) {
-      if (activeFilter === 'all') return arr;
-      return arr.filter(r => {
-        const isWg = (r.type || '').toLowerCase().includes('wire');
-        if (activeFilter === 'pass') return r.actualMbps != null && r.actualMbps >= 10;
-        if (activeFilter === 'fail') return r.actualMbps == null && !r.skipped;
-        if (activeFilter === 'slow') return r.actualMbps != null && r.actualMbps < 10;
-        if (activeFilter === 'wg')   return isWg;
-        if (activeFilter === 'v2')   return !isWg;
-        return true;
-      });
+      const q = activeSearch;
+      let out = arr;
+      if (activeFilter !== 'all') {
+        out = out.filter(r => {
+          const isWg = (r.type || '').toLowerCase().includes('wire');
+          const isFail = r.actualMbps == null && !r.skipped;
+          // PASS = everything that didn't fail (FAST + SLOW + SKIPPED) per spec
+          if (activeFilter === 'pass') return !isFail;
+          if (activeFilter === 'fail') return isFail;
+          if (activeFilter === 'slow') return r.actualMbps != null && r.actualMbps < 10;
+          if (activeFilter === 'wg')   return isWg;
+          if (activeFilter === 'v2')   return !isWg;
+          return true;
+        });
+      }
+      if (q) {
+        out = out.filter(r => {
+          const hay = (
+            (r.moniker || '') + ' ' +
+            (r.address || '') + ' ' +
+            (r.country || '') + ' ' +
+            (r.city || '')
+          ).toLowerCase();
+          return hay.includes(q);
+        });
+      }
+      return out;
+    }
+
+    // ─── Search ───
+    function setLiveSearch(value) {
+      activeSearch = (value || '').trim().toLowerCase();
+      _livePage = 1;
+      const clearBtn = document.getElementById('liveSearchClear');
+      if (clearBtn) clearBtn.style.display = activeSearch ? 'inline-block' : 'none';
+      renderTable();
+    }
+    function clearLiveSearch() {
+      const input = document.getElementById('liveSearchInput');
+      if (input) input.value = '';
+      setLiveSearch('');
     }
 
     // ─── Table render ───
@@ -1240,12 +1317,26 @@
 
       let o;
       if (typeof opts === 'string') {
-        o = { msg: opts, status: klass === 'log-ok' ? 'ok' : klass === 'log-err' ? 'fail' : klass === 'log-warn' ? 'warn' : null, cat: 'sys', tag: 'SYS' };
-        if (!o.status) {
-          if (/⚠|warn|pause|insufficient/i.test(opts)) o.status = 'warn';
-          else if (/complete|success/i.test(opts)) o.status = 'ok';
-          else if (/error|fail|ERR/i.test(opts)) o.status = 'fail';
+        // Derive cat/tag from the message shape so historical/backfilled
+        // string-only lines (init.logs replay, /api/public/logs seed) also
+        // honour the NODE / FAIL / SYS filter buttons.
+        const txt = opts;
+        let cat = 'sys', tag = 'SYS';
+        const isFail   = /\b(?:✗|FAIL|ERROR|ERR_|TIMEOUT|insufficient|failed|UNAVAILABLE|REFUSED|UNKNOWN)\b/.test(txt);
+        const isPass   = /\b(?:✓|PASS|Speed:\s*[\d.]+\s*Mbps|✔)\b/.test(txt) && !isFail;
+        const isNode   = /\bsent1[a-z0-9]{8,}/i.test(txt) || /^\s*\[\d+\/\d+\]/.test(txt) || /\bTesting\s+sent1/i.test(txt);
+        if (isFail) { cat = 'fail'; tag = 'FAIL'; }
+        else if (isPass) { cat = 'node'; tag = 'PASS'; }
+        else if (isNode) { cat = 'node'; tag = 'NODE'; }
+        else if (/^Round\b|^Iteration\b|^Batch\b|✅\s*Round/i.test(txt)) { tag = 'ROUND'; }
+        let status = klass === 'log-ok' ? 'ok' : klass === 'log-err' ? 'fail' : klass === 'log-warn' ? 'warn' : null;
+        if (!status) {
+          if (isFail) status = 'fail';
+          else if (isPass) status = 'pass';
+          else if (/⚠|warn|pause|insufficient/i.test(txt)) status = 'warn';
+          else if (/complete|success|done/i.test(txt)) status = 'ok';
         }
+        o = { msg: txt, status, cat, tag };
       } else {
         o = opts || {};
       }
@@ -1295,7 +1386,11 @@
 
       if (o.errCode) parts.push(`<span class="log-err-code">${escHtml(o.errCode)}</span>`);
 
-      if (o.msg) parts.push(`<span class="log-msg">${escHtml(o.msg)}</span>`);
+      if (o.msg) {
+        const escaped = escHtml(o.msg);
+        const linkified = escaped.replace(/(https?:\/\/[^\s<]+)/g, (u) => `<a href="${u}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">${u}</a>`);
+        parts.push(`<span class="log-msg">${linkified}</span>`);
+      }
 
       if (o.cat === 'fail' && o.addr) {
         parts.push(`<button class="log-copy" title="Copy failure log" data-addr="${escHtml(o.addr)}" data-moniker="${escHtml(o.moniker || '')}" onclick="copyRowFailure(event)">⎘</button>`);
@@ -1705,7 +1800,7 @@
         color = 'var(--accent)';
       } else if (_liveState && _liveState.runMode === 'subscription' && _liveState.runPlanId) {
         label = 'Plan #' + _liveState.runPlanId;
-        detail = 'Subscription-allocated sessions, plan-scoped node set';
+        detail = 'On-Chain Subscription Plan Test';
         color = 'var(--green)';
       } else {
         label = 'P2P';
@@ -1993,9 +2088,7 @@
             const newRunNum = d.state.activeRunNumber != null ? d.state.activeRunNumber : null;
             const newStatus = d.state.status || null;
             const runChanged = newRunNum != null && _prevActiveRunNumber != null && newRunNum !== _prevActiveRunNumber;
-            const statusStartedRun = newStatus === 'running'
-              && (_prevStatus === 'done' || _prevStatus === 'error' || _prevStatus === 'idle' || _prevStatus === 'stopped');
-            if (runChanged || statusStartedRun) {
+            if (runChanged) {
               resetLiveForNewRun();
             }
             _prevActiveRunNumber = newRunNum;
@@ -2182,6 +2275,7 @@
         const res = await fetch('/api/public/node/' + encodeURIComponent(addr) + '/errors?limit=1', {
           credentials: 'same-origin',
         });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         const errs = (data && data.errors) || [];
         if (!errs.length) {
@@ -2248,6 +2342,7 @@
 
       try {
         const res = await fetch('/api/public/node/' + encodeURIComponent(addr) + '/errors?limit=1', { credentials: 'same-origin' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         const errs = (data && data.errors) || [];
         const body = document.getElementById('errorPopupBody');
@@ -2259,30 +2354,184 @@
         const er = errs[0];
         const eh = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
         const captured = er.captured_at ? fmtUtc(er.captured_at) : '—';
+        // Parse the persisted raw result so we can surface every diagnostic
+        // field the pipeline captured at fail time (peers, transport, diag).
+        let raw = {}; let diag = {};
+        try { raw = er.raw_json ? JSON.parse(er.raw_json) : {}; } catch {}
+        diag = (raw && raw.diag) || {};
+        const svcType = (raw.type != null)
+          ? (String(raw.type).toLowerCase().includes('wire') || raw.type === 1 ? 'WireGuard' : 'V2Ray')
+          : (er.service_type === 1 ? 'WireGuard' : er.service_type === 2 ? 'V2Ray' : '—');
+        const yn = (v) => v === true || v === 1 ? '✓ yes' : v === false || v === 0 ? '✗ no' : '—';
+        const num = (v, suffix = '') => (v == null || Number.isNaN(Number(v))) ? '—' : (Number(v) + suffix);
         const row = (label, value) => `
-          <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+          <div style="display:grid;grid-template-columns:140px 1fr;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
             <div style="color:var(--text-muted);font-size:12px">${label}</div>
-            <div style="color:var(--text);word-break:break-all">${value || '—'}</div>
+            <div style="color:var(--text);word-break:break-all;font-size:12.5px">${value == null || value === '' ? '—' : value}</div>
           </div>`;
+        const monoVal = (v) => v == null || v === '' ? '—' : `<span style="font-family:var(--font-mono);font-size:12px">${eh(v)}</span>`;
+        const sectionTitle = (t) => `<div style="margin:18px 0 6px;color:var(--text);font-weight:700;font-size:11px;letter-spacing:1.4px;text-transform:uppercase;padding-bottom:6px;border-bottom:1px solid var(--border)">${t}</div>`;
+        const cc = (er.country_code && er.country_code.length === 2)
+          ? er.country_code.toUpperCase()
+          : _countryToCode(er.country || '');
+        const flagHtml = cc ? flagFor(cc) : '';
+        const countryName = er.country && er.country.length !== 2 ? er.country : (cc || er.country || '');
+        const countryCell = (flagHtml || countryName)
+          ? `<span style="display:inline-flex;align-items:center;gap:8px">${flagHtml}<span>${eh(countryName) || '—'}</span></span>`
+          : '—';
+
+        // Per-stage diagnostics — pull every diag.* the pipeline writes
+        const wgDiag = [];
+        if (diag.wgAssignedAddrs) wgDiag.push(row('WG Assigned Addrs', monoVal(Array.isArray(diag.wgAssignedAddrs) ? diag.wgAssignedAddrs.join(', ') : diag.wgAssignedAddrs)));
+        if (diag.wgServerEndpoint) wgDiag.push(row('WG Server Endpoint', monoVal(diag.wgServerEndpoint)));
+        if (diag.wgSplitIPs) wgDiag.push(row('WG Split IPs', monoVal(Array.isArray(diag.wgSplitIPs) ? diag.wgSplitIPs.join(', ') : diag.wgSplitIPs)));
+
+        const v2Diag = [];
+        if (diag.v2rayProto) v2Diag.push(row('V2Ray Protocol', monoVal(diag.v2rayProto)));
+        if (diag.v2rayTransport) v2Diag.push(row('V2Ray Transport', monoVal(diag.v2rayTransport)));
+        if (diag.v2raySecurity) v2Diag.push(row('V2Ray Security', monoVal(diag.v2raySecurity)));
+        if (diag.v2rayPort != null) v2Diag.push(row('V2Ray Port', monoVal(diag.v2rayPort)));
+        if (diag.v2rayUUID) v2Diag.push(row('V2Ray UUID', monoVal(diag.v2rayUUID)));
+        if (diag.v2rayMetadataCount != null) v2Diag.push(row('V2Ray Metadata Count', num(diag.v2rayMetadataCount)));
+        if (diag.statusPortFallback) v2Diag.push(row('Status-Port Fallback', '✓ used (advertised port unusable)'));
+        if (diag.discoveredPorts && diag.discoveredPorts.length) v2Diag.push(row('Discovered Open Ports', monoVal(diag.discoveredPorts.join(', '))));
+        if (diag.discoveredPortUsed) v2Diag.push(row('Discovered Port Used', monoVal(diag.discoveredPortUsed)));
+        if (diag.portScanAttempted) v2Diag.push(row('Port Scan Attempted', '✓ yes'));
+
+        const sessDiag = [];
+        if (diag.sessionId) sessDiag.push(row('Session ID', monoVal(diag.sessionId)));
+        if (diag.remoteUrl) sessDiag.push(row('Remote URL', monoVal(diag.remoteUrl)));
+        if (diag.serverHost) sessDiag.push(row('Server Host', monoVal(diag.serverHost)));
+        if (diag.clockDriftSec != null) sessDiag.push(row('Clock Drift', num(diag.clockDriftSec, ' s') + (diag.clockDriftWarning ? ' <span style="color:var(--red);font-size:11px">⚠ exceeded tolerance</span>' : '')));
+        if (diag.googleAccessible != null) sessDiag.push(row('Google Reachable (via tunnel)', yn(diag.googleAccessible) + (diag.googleLatencyMs ? ' · ' + diag.googleLatencyMs + ' ms' : '') + (diag.googleError ? ' · <span style="color:var(--text-muted)">' + eh(diag.googleError) + '</span>' : '')));
+        if (diag.speedtestMethod) sessDiag.push(row('Speedtest Method', monoVal(diag.speedtestMethod)));
+
+        // V2Ray sidecar stdout/stderr — most useful for operator triage
+        const sideCar = [];
+        if (diag.v2rayStdout) sideCar.push(['V2Ray stdout', diag.v2rayStdout]);
+        if (diag.v2rayStderr) sideCar.push(['V2Ray stderr', diag.v2rayStderr]);
+        if (diag.v2rayConfig) sideCar.push(['V2Ray config (sanitized)', typeof diag.v2rayConfig === 'string' ? diag.v2rayConfig : JSON.stringify(diag.v2rayConfig, null, 2)]);
+        if (diag.hsConfig) sideCar.push(['Handshake config (truncated)', diag.hsConfig]);
+        if (diag.v2rayRawMeta) sideCar.push(['V2Ray raw metadata', JSON.stringify(diag.v2rayRawMeta, null, 2)]);
+
+        const block = (title, content) => `
+          <div style="margin-top:10px">
+            <div style="color:var(--text-muted);font-size:11px;margin-bottom:4px;letter-spacing:0.5px">${title}</div>
+            <pre style="background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:10px 12px;color:var(--text);font-family:var(--font-mono);font-size:11px;line-height:1.5;max-height:240px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0">${eh(content)}</pre>
+          </div>`;
+
         body.innerHTML = `
+          ${sectionTitle('Summary')}
           ${row('Node', eh(moniker))}
-          ${row('Address', `<span style="font-family:var(--font-mono);font-size:12px">${eh(addr)}</span>`)}
+          ${row('Address', monoVal(addr))}
+          ${row('Country', countryCell)}
+          ${row('City', eh(er.city))}
+          ${row('Service', svcType)}
           ${row('Stage', eh(er.stage))}
-          ${row('Error Code', `<span style="font-family:var(--font-mono);font-size:12px">${eh(er.error_code)}</span>`)}
+          ${row('Error Code', monoVal(er.error_code))}
           ${row('Captured', eh(captured))}
           ${row('Message', `<span style="font-family:var(--font-mono);font-size:12px;white-space:pre-wrap">${eh(er.error_message)}</span>`)}
-          ${er.log_snippet ? `
-            <div style="margin-top:14px">
-              <div style="color:var(--text-muted);font-size:12px;margin-bottom:6px">Log Snippet</div>
-              <pre style="background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:10px 12px;color:var(--text);font-family:var(--font-mono);font-size:11.5px;line-height:1.5;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0">${eh(er.log_snippet)}</pre>
-            </div>` : ''}
-          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+
+          ${sectionTitle('Network State at Fail Time')}
+          ${row('Peers', num(raw.peers != null ? raw.peers : null))}
+          ${row('Max Peers', num(raw.maxPeers != null ? raw.maxPeers : null))}
+          ${row('Advertised Mbps', num(er.advertised_mbps, ' Mbps'))}
+          ${row('Tester Baseline', raw.baselineAtTest != null ? num(raw.baselineAtTest, ' Mbps') : '—')}
+          ${row('Dynamic Threshold (50%)', raw.dynamicThreshold != null ? num(raw.dynamicThreshold, ' Mbps') : '—')}
+          ${row('SLA Applicable', yn(raw.slaApplicable))}
+          ${row('Timed Out', yn(raw.timedOut))}
+          ${row('Latency', num(er.latency_ms, ' ms'))}
+
+          ${sectionTitle('Tester Environment')}
+          ${row('Tester SDK', monoVal(er.sdk || raw.sdk))}
+          ${row('Tester OS', monoVal(er.tester_os || raw.os))}
+          ${row('Run ID', monoVal(er.run_id))}
+          ${row('Continent', eh(er.continent))}
+
+          ${wgDiag.length ? sectionTitle('WireGuard Diagnostics') + wgDiag.join('') : ''}
+          ${v2Diag.length ? sectionTitle('V2Ray Diagnostics') + v2Diag.join('') : ''}
+          ${sessDiag.length ? sectionTitle('Session / Tunnel Diagnostics') + sessDiag.join('') : ''}
+
+          ${sideCar.length ? sectionTitle('Sidecar Output') + sideCar.map(([t, c]) => block(t, c)).join('') : ''}
+
+          ${er.log_snippet ? sectionTitle('Tester Log Snippet') + `
+            <pre style="background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:10px 12px;color:var(--text);font-family:var(--font-mono);font-size:11.5px;line-height:1.5;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0">${eh(er.log_snippet)}</pre>` : ''}
+
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">
+            <button id="errorPopupCopyBtn" class="row-copy-btn" style="padding:6px 14px">⎘ Copy Full Report</button>
             <button onclick="document.getElementById('errorPopupOverlay').remove()" class="row-copy-btn" style="padding:6px 14px">Close</button>
           </div>
         `;
+        const copyBtn = document.getElementById('errorPopupCopyBtn');
+        if (copyBtn) {
+          copyBtn.onclick = async () => {
+            const lines = [
+              'Sentinel Node Tester — Failure Log',
+              '══════════════════════════════════',
+              '[Summary]',
+              'Node:        ' + (moniker || '—'),
+              'Address:     ' + addr,
+              'Country:     ' + (countryName || cc || '—'),
+              'City:        ' + (er.city || '—'),
+              'Service:     ' + svcType,
+              'Stage:       ' + (er.stage || '—'),
+              'Error Code:  ' + (er.error_code || '—'),
+              'Message:     ' + (er.error_message || '—'),
+              'Captured:    ' + captured,
+              '',
+              '[Network State at Fail Time]',
+              'Peers:              ' + (raw.peers != null ? raw.peers : '—'),
+              'Max Peers:          ' + (raw.maxPeers != null ? raw.maxPeers : '—'),
+              'Advertised Mbps:    ' + (er.advertised_mbps != null ? er.advertised_mbps + ' Mbps' : '—'),
+              'Tester Baseline:    ' + (raw.baselineAtTest != null ? raw.baselineAtTest + ' Mbps' : '—'),
+              'Dynamic Threshold:  ' + (raw.dynamicThreshold != null ? raw.dynamicThreshold + ' Mbps' : '—'),
+              'SLA Applicable:     ' + (raw.slaApplicable === true ? 'yes' : raw.slaApplicable === false ? 'no' : '—'),
+              'Timed Out:          ' + (raw.timedOut === true ? 'yes' : raw.timedOut === false ? 'no' : '—'),
+              'Latency:            ' + (er.latency_ms != null ? er.latency_ms + ' ms' : '—'),
+              '',
+              '[Tester Environment]',
+              'SDK:    ' + (er.sdk || raw.sdk || '—'),
+              'OS:     ' + (er.tester_os || raw.os || '—'),
+              'Run ID: ' + (er.run_id || '—'),
+              '',
+            ];
+            const diagKeys = Object.keys(diag || {});
+            if (diagKeys.length) {
+              lines.push('[Diagnostics]');
+              for (const k of diagKeys) {
+                const v = diag[k];
+                if (v == null) continue;
+                const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+                lines.push(k + ':'.padEnd(Math.max(2, 22 - k.length), ' ') + ' ' + s);
+              }
+              lines.push('');
+            }
+            if (er.log_snippet) { lines.push('[Tester Log Snippet]'); lines.push(er.log_snippet); }
+            const txt = lines.join('\n');
+            const original = copyBtn.innerHTML;
+            copyBtn.disabled = true;
+            try {
+              try {
+                await navigator.clipboard.writeText(txt);
+              } catch (_) {
+                const ta = document.createElement('textarea');
+                ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
+                document.body.appendChild(ta); ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+              }
+              copyBtn.innerHTML = '✓ Copied';
+              showToast('Failure log copied');
+            } catch (err) {
+              copyBtn.innerHTML = '! Failed';
+              showToast('Copy failed: ' + (err.message || 'unknown'));
+            }
+            setTimeout(() => { copyBtn.innerHTML = original; copyBtn.disabled = false; }, 1500);
+          };
+        }
       } catch (err) {
         const body = document.getElementById('errorPopupBody');
-        if (body) body.innerHTML = '<div style="color:var(--red)">Failed to load: ' + (err.message || 'unknown') + '</div>';
+        if (body) body.innerHTML = '<div style="color:var(--red)">Failed to load: ' + eh(err.message || 'unknown') + '</div>';
       }
     }
   </script>

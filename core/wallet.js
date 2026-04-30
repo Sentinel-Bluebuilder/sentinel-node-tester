@@ -88,35 +88,51 @@ export async function forceReconnect() {
   return getOrReconnectClient();
 }
 
+// ─── Wallet broadcast mutex ────────────────────────────────────────────────
+// Cosmos accounts have a single sequence counter. If two broadcasts from this
+// wallet are in flight simultaneously (e.g. an SNTR1 self-send + a session
+// start), they grab the same sequence → "expected N+1, got N". Serialize all
+// signAndBroadcast calls behind this chained promise so only one TX is in
+// flight at a time per process.
+let _broadcastChain = Promise.resolve();
+function _broadcastSerialized(fn) {
+  const next = _broadcastChain.then(fn, fn);
+  _broadcastChain = next.catch(() => {});
+  return next;
+}
+
 // ─── signAndBroadcast with retry + reconnect ────────────────────────────────
-export async function signAndBroadcastRetry(client, address, messages, fee, broadcast, maxRetries = 3) {
+export async function signAndBroadcastRetry(client, address, messages, fee, broadcast, maxRetries = 3, opts = {}) {
   // Fee validation (M-6 pattern from SDK)
   if (!fee || typeof fee !== 'object' || !fee.gas) {
     fee = { amount: [{ denom: 'udvpn', amount: '200000' }], gas: '800000' };
   }
-  let activeClient = client;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      const result = await activeClient.signAndBroadcast(address, messages, fee);
-      if (activeClient !== client) _managedClient = activeClient;
-      return result;
-    } catch (err) {
-      const isRetryable = /sequence mismatch/i.test(err.message)
-        || /wrong number of signers/i.test(err.message)
-        || /Query failed/i.test(err.message);
-      if (attempt < maxRetries && isRetryable) {
-        const label = /sequence/i.test(err.message) ? 'Sequence mismatch' : 'RPC/chain error';
-        if (broadcast) broadcast('log', { msg: `  ⚡ ${label} — retrying with fresh RPC (${attempt + 1}/${maxRetries})...` });
-        if (/Query failed|wrong number of signers/i.test(err.message)) {
-          try { activeClient = await forceReconnect(); }
-          catch (e) { if (broadcast) broadcast('log', { msg: `  ⚠ Reconnect failed: ${e.message}` }); }
+  const memo = typeof opts.memo === 'string' ? opts.memo : '';
+  return _broadcastSerialized(async () => {
+    let activeClient = client;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const result = await activeClient.signAndBroadcast(address, messages, fee, memo);
+        if (activeClient !== client) _managedClient = activeClient;
+        return result;
+      } catch (err) {
+        const isRetryable = /sequence mismatch/i.test(err.message)
+          || /wrong number of signers/i.test(err.message)
+          || /Query failed/i.test(err.message);
+        if (attempt < maxRetries && isRetryable) {
+          const label = /sequence/i.test(err.message) ? 'Sequence mismatch' : 'RPC/chain error';
+          if (broadcast) broadcast('log', { msg: `  ⚡ ${label} — retrying with fresh RPC (${attempt + 1}/${maxRetries})...` });
+          if (/Query failed|wrong number of signers/i.test(err.message)) {
+            try { activeClient = await forceReconnect(); }
+            catch (e) { if (broadcast) broadcast('log', { msg: `  ⚠ Reconnect failed: ${e.message}` }); }
+          }
+          await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+          continue;
         }
-        await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
-        continue;
+        throw err;
       }
-      throw err;
     }
-  }
+  });
 }
 
 export { assertIsDeliverTxSuccess, createSafeBroadcaster, SDK_VERSION };

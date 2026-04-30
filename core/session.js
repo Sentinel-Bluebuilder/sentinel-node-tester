@@ -9,7 +9,7 @@
 
 import { DENOM, GIGS, SESSION_MAP_TTL, V3_MSG_TYPE } from './constants.js';
 import { signAndBroadcastRetry, assertIsDeliverTxSuccess } from './wallet.js';
-import { getActiveLcd, getRpcClient } from './chain.js';
+import { getActiveLcd, getRpcClient, withFreshRpc } from './chain.js';
 import { sleep } from '../protocol/speedtest.js';
 import {
   extractAllSessionIds as sdkExtractAllSessionIds,
@@ -19,6 +19,7 @@ import {
   loadCredentials as sdkLoadCredentials,
   clearCredentials as sdkClearCredentials,
   clearAllCredentials as sdkClearAllCredentials,
+  buildMsgCancelSession,
 } from 'blue-js-sdk';
 
 // ─── Session Credential Cache (SDK encrypted store: ~/.sentinel-sdk/) ──────
@@ -96,10 +97,13 @@ export function addToSessionMap(nodeAddr, sessionId) {
 // next_key, so a single large request returns the full set.
 
 async function rpcFetchAllSessions(walletAddress) {
-  const client = await getRpcClient();
-  if (!client) return null;
+  // RPC-first per global rule. withFreshRpc rotates on a wedged endpoint
+  // before giving up and signalling LCD fallback to the caller.
   try {
-    return await rpcQuerySessionsForAccount(client, walletAddress, { limit: 2000 });
+    return await withFreshRpc(
+      (client) => rpcQuerySessionsForAccount(client, walletAddress, { limit: 2000 }),
+      'rpcFetchAllSessions',
+    );
   } catch {
     return null;
   }
@@ -356,6 +360,42 @@ export async function submitBatchPayment(client, account, denom, gigabytes, batc
 }
 
 /**
+ * Submit one tx with up to N MsgCancelSession messages.
+ *
+ * Refund mechanics (verified live on mainnet 2026-04-27):
+ *   - Cancel TX flips session.status from active(1) → inactive_pending(2).
+ *     Only events emitted in the cancel TX itself are `coin_spent/received/transfer`
+ *     (the gas fee), `message`, `tx`, and `sentinel.session.v3.EventUpdateStatus`.
+ *   - There is NO `NodeEventRefund` in the cancel TX. The refund (unused-bandwidth
+ *     deposit minus consumed_bytes) is applied AFTER the inactive_pending settlement
+ *     window closes — at which point the chain emits `sentinel.node.v3.EventRefund`
+ *     in the settlement block (NOT in the operator's TX).
+ *   - There is NO minimum session duration before cancel is accepted (verified by
+ *     0-second and 5-second cancel tests both succeeding).
+ *   - Up to N cancels CAN be batched in one TX (verified with N=5).
+ *
+ * @returns {Promise<{ txHash: string, count: number }>} | null on no-op
+ */
+export async function submitBatchCancel(client, account, sessionIds, broadcast) {
+  const ids = sessionIds.filter(Boolean);
+  if (ids.length === 0) return null;
+  const messages = ids.map(id => buildMsgCancelSession({ from: account.address, id }));
+  const fee = {
+    amount: [{ denom: DENOM, amount: String(20_000 * ids.length) }],
+    gas: String(200_000 * ids.length),
+  };
+  try {
+    const txResult = await signAndBroadcastRetry(client, account.address, messages, fee, broadcast);
+    assertIsDeliverTxSuccess(txResult);
+    if (broadcast) broadcast('log', { msg: `  ↩ Cancelled ${ids.length} session(s) in tx ${txResult.transactionHash.slice(0, 12)}… (refund settles after the inactive-pending window).` });
+    return { txHash: txResult.transactionHash, count: ids.length };
+  } catch (err) {
+    if (broadcast) broadcast('log', { msg: `  ⚠ Batch cancel failed (${ids.length} sessions): ${err.message}. Sessions will fall through to natural settlement.` });
+    return null;
+  }
+}
+
+/**
  * Poll until all node sessions appear on chain, or timeout.
  * Uses RPC primary, LCD fallback.
  */
@@ -395,10 +435,13 @@ export async function waitForBatchSessions(nodeAddrs, walletAddr, maxWaitMs = 20
  * Returns decoded session object or null.
  */
 async function rpcQuerySession(sessionId) {
-  const client = await getRpcClient();
-  if (!client) return null;
+  // RPC-first per global rule. withFreshRpc rotates on a wedged endpoint
+  // before signalling LCD fallback to the caller.
   try {
-    return await sdkRpcQuerySession(client, sessionId);
+    return await withFreshRpc(
+      (client) => sdkRpcQuerySession(client, sessionId),
+      `rpcQuerySession(${sessionId})`,
+    );
   } catch {
     return null;
   }

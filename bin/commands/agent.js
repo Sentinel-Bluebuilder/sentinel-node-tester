@@ -118,7 +118,7 @@ const ENDPOINTS = [
   { sub: 'test-plan',       method: 'POST', path: '/api/test-plan',                   auth: true,  desc: 'Run a plan-mode audit',
     bodyFromFlags: (f) => ({ planId: f['--plan-id'] }) },
   { sub: 'test-sub-plan',   method: 'POST', path: '/api/test-sub-plan',               auth: true,  desc: 'Run a subscription-plan-mode audit',
-    bodyFromFlags: (f) => ({ subscriptionId: f['--sub-id'], planId: f['--plan-id'], subscriptionGranter: f['--sub-granter'] }) },
+    bodyFromFlags: (f) => ({ subscriptionId: f['--sub-id'], planId: f['--plan-id'], granter: f['--sub-granter'] }) },
 
   // Chain queries
   { sub: 'chain-nodes',     method: 'GET',  path: '/api/chain/nodes',                 auth: true,  desc: 'Direct chain node fetch' },

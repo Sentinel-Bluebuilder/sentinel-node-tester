@@ -36,7 +36,7 @@ const _handles = { real: null };
 export function getDb(which) {
   // Path-override path (test/back-compat): caller passed an actual file path
   // or ':memory:'. Don't cache; behave like the old getDb(dbPath) signature.
-  if (typeof which === 'string' && (which === ':memory:' || which.includes('/') || which.includes('\\') || which.endsWith('.db'))) {
+  if (typeof which === 'string' && (which === ':memory:' || path.isAbsolute(which) || which.endsWith('.db'))) {
     return _openHandle(which, /*cache*/ false);
   }
 
@@ -100,6 +100,10 @@ function isTestEnv() {
  * @param {string} [which] - Ignored (back-compat).
  */
 export function useDb(db, which) {
+  // Match the pragmas _openHandle sets so test/in-memory DBs get the same
+  // semantics as the prod handle (WAL is a no-op on :memory: but harmless).
+  try { db.pragma('journal_mode = WAL'); } catch {}
+  try { db.pragma('foreign_keys = ON'); } catch {}
   _handles.real = db;
 }
 
@@ -280,6 +284,28 @@ function runMigrations(db) {
     db.prepare('UPDATE schema_version SET version = 7').run();
     })();
   }
+
+  if (current < 8) {
+    db.transaction(() => {
+    // ── Migration v8: composite indexes + error_logs(captured_at) ──────────
+    // Speeds up the latest-per-node + window scans that drive searchNodes /
+    // getLatestResultPerNode / getNetworkStats. SQLite's CREATE INDEX IF NOT
+    // EXISTS makes this safe on dev DBs that already have manual indexes.
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_results_addr_tested
+        ON results(node_addr, tested_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_results_run_addr_tested
+        ON results(run_id, node_addr, tested_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_runs_finished_at
+        ON runs(finished_at);
+      CREATE INDEX IF NOT EXISTS idx_batch_results_batch_tested
+        ON batch_results(batch_id, tested_at);
+      CREATE INDEX IF NOT EXISTS idx_error_logs_result_captured
+        ON error_logs(result_id, captured_at);
+    `);
+    db.prepare('UPDATE schema_version SET version = 8').run();
+    })();
+  }
 }
 
 // ─── Run Mutations ───────────────────────────────────────────────────────────
@@ -343,10 +369,27 @@ function deriveStage(r) {
 }
 
 function mapResultToRow(run_id, r) {
-  const handshake_ok = r.diag?.handshakeOk != null ? (r.diag.handshakeOk ? 1 : 0) : null;
+  // handshake_ok is best-effort: pipeline rarely sets r.diag.handshakeOk in
+  // prod, so we infer success from a positive speed measurement when absent.
+  // Without this, every prod row had handshake_ok=null → pass=0 forever.
+  const handshake_ok = r.diag?.handshakeOk != null
+    ? (r.diag.handshakeOk ? 1 : 0)
+    : (r.actualMbps != null && r.actualMbps > 0 ? 1 : null);
   const session_ok   = r.actualMbps != null ? 1 : 0;
-  const pass         = (handshake_ok === 1 && session_ok === 1 && r.actualMbps != null && r.actualMbps > 0) ? 1 : 0;
+  // A node passes when it actually moved bytes. handshake_ok is informational
+  // only — it's never set in the prod node-test path.
+  const pass         = (r.actualMbps != null && r.actualMbps > 0 && !r.errorCode && !r.error) ? 1 : 0;
   const stage        = deriveStage(r);
+
+  // Tolerate malformed timestamps: `new Date(garbage).getTime()` returns NaN
+  // which SQLite stores as null and breaks every downstream ORDER BY tested_at.
+  let tested_at;
+  if (r.timestamp != null) {
+    const t = typeof r.timestamp === 'number' ? r.timestamp : new Date(r.timestamp).getTime();
+    tested_at = Number.isFinite(t) ? t : Date.now();
+  } else {
+    tested_at = Date.now();
+  }
 
   return {
     run_id,
@@ -364,13 +407,13 @@ function mapResultToRow(run_id, r) {
     session_ok,
     error_code:      r.errorCode || null,
     error_message:   r.error || null,
-    tested_at:       r.timestamp ? new Date(r.timestamp).getTime() : Date.now(),
+    tested_at,
     raw_json:        JSON.stringify(r),
     pass,
     stage,
     sdk:             r.sdk || null,
     continent:       countryToContinent(r.country) || null,
-    tester_os:       r.testerOs || process.platform || null,
+    tester_os:       r.testerOs ?? r.os ?? process.platform ?? null,
   };
 }
 
@@ -583,7 +626,7 @@ export function getNetworkStats(which) {
   // Latest result per node (MAX(id) tiebreaker for equal tested_at).
   // No mode filter needed: real and test data live in separate DB files.
   const rows = db.prepare(`
-    SELECT r.actual_mbps, r.session_ok
+    SELECT r.actual_mbps, r.pass
     FROM results r
     INNER JOIN (
       SELECT r2.node_addr, MAX(r2.id) AS max_id
@@ -598,7 +641,7 @@ export function getNetworkStats(which) {
   `).all();
 
   const totalNodes = rows.length;
-  const passing = rows.filter(r => r.session_ok === 1).length;
+  const passing = rows.filter(r => r.pass === 1).length;
   const passingPct = totalNodes > 0 ? Math.round((passing / totalNodes) * 100) : 0;
 
   const speeds = rows
@@ -659,18 +702,6 @@ export function insertErrorLog({
 }
 
 // ─── Extended Search Helpers ──────────────────────────────────────────────────
-
-/**
- * Classify a failure-stage string from a result row (mirrors deriveStage but
- * operates on DB rows rather than raw pipeline objects).
- *
- * @param {object} row - DB results row
- * @returns {string|null}
- */
-function _stageFromRow(row) {
-  if (row.stage) return row.stage;
-  return null;
-}
 
 /**
  * Search nodes with per-node pass statistics over the last `window` tests.
@@ -783,6 +814,7 @@ export function searchNodes({
           ORDER BY r.tested_at DESC
         ) AS rn
       FROM results r
+      ${runId != null ? 'WHERE r.run_id = @runId' : ''}
     ),
     node_stats AS (
       SELECT
@@ -825,11 +857,13 @@ export function searchNodes({
   addrs.forEach((a, i) => { histParams[`a${i}`] = a; });
   histParams.win = win;
 
+  if (runId != null) histParams.runId = runId;
   const histRows = db.prepare(`
     SELECT node_addr, pass, tested_at,
       ROW_NUMBER() OVER (PARTITION BY node_addr ORDER BY tested_at DESC) AS rn
     FROM results
     WHERE node_addr IN (${placeholders})
+      ${runId != null ? 'AND run_id = @runId' : ''}
     ORDER BY node_addr, tested_at DESC
   `).all(histParams);
 
@@ -921,7 +955,21 @@ export function getNodeErrors(addr, { limit = 50, stage = null } = {}, which) {
     params.stage = stage;
   }
   return db.prepare(`
-    SELECT el.*, r.tested_at, r.actual_mbps, r.node_addr, r.moniker
+    SELECT el.*, r.tested_at, r.actual_mbps, r.node_addr, r.moniker,
+           r.country AS country,
+           r.city    AS city,
+           CASE WHEN r.country IS NOT NULL AND length(r.country) = 2 THEN r.country END AS country_code,
+           r.service_type      AS service_type,
+           r.advertised_mbps   AS advertised_mbps,
+           r.latency_ms        AS latency_ms,
+           r.handshake_ok      AS handshake_ok,
+           r.session_ok        AS session_ok,
+           r.pass              AS pass,
+           r.sdk               AS sdk,
+           r.continent         AS continent,
+           r.tester_os         AS tester_os,
+           r.run_id            AS run_id,
+           r.raw_json          AS raw_json
     FROM error_logs el
     INNER JOIN results r ON el.result_id = r.id
     WHERE r.node_addr = @addr ${stageClause}
@@ -1058,6 +1106,26 @@ export function updateBatchOnFinish(batchId, { finished_at, passed, failed }, wh
 }
 
 /**
+ * Re-open a previously-closed batch so a resume can keep writing into it.
+ * Sets finished_at back to NULL — getActiveBatch() will return this row again.
+ */
+export function reopenBatch(batchId, which) {
+  getDb(which).prepare(`
+    UPDATE batches SET finished_at = NULL WHERE id = @id
+  `).run({ id: batchId });
+}
+
+/**
+ * Look up a single batch row by id (no joined results).
+ */
+export function getBatchById(batchId, which) {
+  return getDb(which).prepare(`
+    SELECT id, started_at, finished_at, snapshot_size, passed, failed, mode
+    FROM batches WHERE id = @id
+  `).get({ id: batchId }) || null;
+}
+
+/**
  * Insert a single batch_results row (called as each node finishes).
  *
  * @param {number} batch_id
@@ -1168,6 +1236,42 @@ export function getActiveBatch(which) {
 }
 
 /**
+ * Return a specific batch by id plus its node results, in the same shape
+ * as getActiveBatch(). Used for the stop→refresh hydration path: when an
+ * operator stops a run and reloads /live, the batch row has finished_at
+ * set so getActiveBatch() returns null — but state.activeBatchId still
+ * points at it for the eventual resume, so /live should keep painting it.
+ *
+ * @returns {{ batch: object, nodes: object[] }|null}
+ */
+export function getBatchWithNodes(batchId, which) {
+  const db = getDb(which);
+  const batch = db.prepare(`
+    SELECT id, started_at, finished_at, snapshot_size, passed, failed, mode
+    FROM batches
+    WHERE id = @id
+  `).get({ id: batchId });
+  if (!batch) return null;
+  const nodes = db.prepare(`
+    SELECT node_address AS address,
+           moniker, country, country_code AS countryCode, city, type,
+           actual_mbps AS actualMbps, peers, max_peers AS maxPeers,
+           error, error_code AS errorCode, tested_at AS testedAt
+    FROM batch_results
+    WHERE batch_id = @batch_id
+    ORDER BY tested_at ASC
+  `).all({ batch_id: batch.id });
+  let passed = 0, failed = 0;
+  for (const n of nodes) {
+    if (n.actualMbps != null && n.actualMbps > 0 && !n.error) passed++;
+    else failed++;
+  }
+  batch.passed = passed;
+  batch.failed = failed;
+  return { batch, nodes };
+}
+
+/**
  * Return the most-recent finished batch plus its node results. Mirrors
  * getActiveBatch() shape so /live's refresh-fallback path can hydrate from
  * the last completed sweep when no batch is currently running.
@@ -1204,5 +1308,11 @@ export function getLastBatch(which) {
  * @param {string} [which] - Ignored (back-compat).
  */
 export function closeDb(which) {
-  if (_handles.real) { _handles.real.close(); _handles.real = null; }
+  if (_handles.real) {
+    // Force a checkpoint so WAL changes land in the main DB file before close.
+    // Without this, an aborted shutdown can leave audit.db-wal multi-GB on disk.
+    try { _handles.real.pragma('wal_checkpoint(TRUNCATE)'); } catch {}
+    _handles.real.close();
+    _handles.real = null;
+  }
 }

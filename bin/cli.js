@@ -24,6 +24,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
 const commandsDir = path.join(__dirname, 'commands');
 
+// Make the project-local bin/ directory (which holds the downloaded v2ray
+// binary) the first thing on PATH so spawned children find it before any
+// system v2ray. Mirrors what server.js does at startup.
+process.env.PATH = path.join(rootDir, 'bin') + path.delimiter + (process.env.PATH || '');
+
 // Load .env from the installed package root too (when run via npx/global bin,
 // cwd may not be the package dir). dotenv's default already picked up cwd/.env.
 try {
@@ -51,7 +56,7 @@ function getVersion() {
 const COMMAND_GROUPS = {
   Discovery: ['list', 'functions', 'verify-sdks'],
   Read: ['nodes', 'node', 'balance', 'subscriptions', 'plans'],
-  Action: ['speed', 'test', 'audit', 'serve'],
+  Action: ['speed', 'test', 'audit', 'serve', 'universal-test'],
   Agent: ['agent'],
 };
 
@@ -95,6 +100,7 @@ function printHelp() {
       test <addr>       End-to-end test one node (paid — uses real tokens)
       audit             Run full audit loop across all nodes
       serve             Start the browser dashboard server
+      universal-test    Run every subsystem end-to-end with per-phase pass/fail
 
     Agent
       agent             End-to-end driver hitting every server function over HTTP

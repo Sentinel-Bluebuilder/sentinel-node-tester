@@ -1,16 +1,42 @@
-# Setup Guide -- New Machine
+# Setup Guide
 
-Step-by-step instructions to get the Sentinel Node Auditor running on a fresh Windows 11 machine.
+Get the Sentinel Node Tester running on Windows, macOS, or Linux. Pick your
+platform below — every step covers all three.
+
+---
+
+## 0. Build prerequisites (native modules)
+
+`better-sqlite3` is a native addon. On Windows, prebuilt binaries are bundled
+and you can skip this section. On Linux and macOS, prebuilds may be missing
+for your Node major version, in which case `npm install` will fall back to
+compiling from source — which needs a working toolchain:
+
+| Platform | Command |
+|----------|---------|
+| macOS    | `xcode-select --install` |
+| Debian/Ubuntu | `sudo apt install -y python3 make g++` |
+| Fedora   | `sudo dnf install -y python3 make gcc-c++` |
+| Arch     | `sudo pacman -S --needed base-devel python` |
+| Alpine   | `sudo apk add python3 make g++` |
+
+If `npm install` later complains about `node-gyp`, this section is what you
+missed. Once a prebuilt binary exists for your Node major version, the install
+skips compilation entirely.
 
 ---
 
 ## 1. Install Node.js 20+
 
-```powershell
-winget install OpenJS.NodeJS.LTS
-```
+| Platform | Command |
+|----------|---------|
+| Windows  | `winget install OpenJS.NodeJS.LTS` |
+| macOS    | `brew install node@20` |
+| Debian/Ubuntu | `curl -fsSL https://deb.nodesource.com/setup_20.x \| sudo -E bash - && sudo apt install -y nodejs` |
+| Fedora   | `sudo dnf install -y nodejs npm` |
+| Arch     | `sudo pacman -S nodejs npm` |
 
-Or download from [nodejs.org](https://nodejs.org/). Verify:
+Or grab a binary from [nodejs.org](https://nodejs.org/). Verify:
 
 ```bash
 node --version   # v20.x or higher
@@ -21,139 +47,141 @@ npm --version    # v10.x or higher
 
 ## 2. Install WireGuard
 
-```powershell
-winget install WireGuard.WireGuard
-```
+WireGuard is required to test ~30% of Sentinel nodes (the rest use V2Ray, which
+the postinstall step downloads automatically). Skip this only if you accept
+that those nodes will be marked failed.
 
-Or download from [wireguard.com/install](https://www.wireguard.com/install/).
+| Platform | Command |
+|----------|---------|
+| Windows  | `winget install WireGuard.WireGuard` |
+| macOS    | `brew install wireguard-tools` |
+| Debian/Ubuntu | `sudo apt install -y wireguard-tools` |
+| Fedora   | `sudo dnf install -y wireguard-tools` |
+| Arch     | `sudo pacman -S wireguard-tools` |
 
-Verify the binary exists at `C:\Program Files\WireGuard\wireguard.exe`. The auditor requires Administrator privileges to manage WireGuard tunnel services.
-
----
-
-## 3. Install .NET 8 SDK (for C# bridge)
-
-```powershell
-winget install Microsoft.DotNet.SDK.8
-```
-
-Or download from [dotnet.microsoft.com](https://dotnet.microsoft.com/download/dotnet/8.0). Verify:
+Verify:
 
 ```bash
-dotnet --version   # 8.x
+# Linux/macOS
+which wg-quick
+
+# Windows
+"C:\Program Files\WireGuard\wireguard.exe" --version
 ```
 
-Skip this step if you only plan to use the JavaScript SDK for testing.
+> **Note (macOS):** the App Store WireGuard.app does *not* include `wg-quick`.
+> Install `wireguard-tools` via Homebrew or MacPorts.
 
 ---
 
-## 4. Get the Project
-
-Clone or copy `sentinel-node-tester/` to your machine. The expected location is `Desktop\sentinel-node-tester\`.
-
----
-
-## 5. Install Dependencies
+## 3. Clone the project
 
 ```bash
+git clone https://github.com/Sentinel-Autonomybuilder/sentinel-node-tester
 cd sentinel-node-tester
+```
+
+---
+
+## 4. Install dependencies
+
+```bash
 npm install
 ```
 
+The postinstall step (`scripts/postinstall.js`) downloads the V2Ray binary
+matching your platform/arch into `bin/`. If your machine is air-gapped or
+behind a firewall that blocks GitHub releases, set `SKIP_POSTINSTALL=1` and
+drop the binary in `bin/v2ray` (`bin/v2ray.exe` on Windows) yourself.
+
 ---
 
-## 6. Create `.env`
+## 5. Configure `.env`
 
-Create a `.env` file in the project root with your Sentinel wallet mnemonic:
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and set at minimum:
 
 ```env
-MNEMONIC=word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12
-RPC=https://rpc.sentinel.co:443
-DENOM=udvpn
-GAS_PRICE=0.2udvpn
-GIGABYTES_PER_NODE=1
-TEST_MB=10
-MAX_NODES=0
-NODE_DELAY_MS=5000
+MNEMONIC=word1 word2 ... word12
 ```
 
-| Variable | Required | Notes |
-|----------|----------|-------|
-| `MNEMONIC` | Yes | Your Sentinel wallet mnemonic. Wallet must have P2P tokens. |
-| `RPC` | No | Defaults to `https://rpc.sentinel.co:443`. |
-| `DENOM` | No | Always `udvpn`. Do not change. |
-| `GAS_PRICE` | No | `0.2udvpn` is the standard gas price. |
-| `GIGABYTES_PER_NODE` | No | 1 GB per session is sufficient for speed testing. |
-| `TEST_MB` | No | 10 MB download per test. Higher = more accurate, slower. |
-| `MAX_NODES` | No | 0 tests all nodes. Set to e.g. 10 for a quick validation run. |
-| `NODE_DELAY_MS` | No | 5000 ms between tests. Lower = faster audit, more load. |
+The full variable list lives in `.env.example` with inline comments. Most users
+only need `MNEMONIC`. Other commonly-tuned values:
 
-**Funding:** Each node test costs ~0.04 P2P. A full audit of ~950 nodes costs ~50 P2P. Gas per batch transaction: 0.2 P2P. Get P2P tokens via [Osmosis DEX](https://app.osmosis.zone/).
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `PORT` | `3001` | HTTP port |
+| `LISTEN_HOST` | `127.0.0.1` | `0.0.0.0` to expose on the network (set `ADMIN_TOKEN` first) |
+| `MAX_NODES` | `0` (all) | Cap for quick smoke runs (e.g. `10`) |
+| `TEST_MB` | `10` | Speed-test sample size in MB |
+| `ADMIN_TOKEN` | unset | Required when `PUBLIC_MODE=true` |
+
+> **Funding:** each node test costs ~0.04 P2P. A full ~950-node audit runs
+> ~50 P2P plus ~0.2 P2P gas per batch. Get P2P via
+> [Osmosis DEX](https://app.osmosis.zone/).
 
 ---
 
-## 7. Build C# Bridge (optional)
+## 6. Launch
 
-```bash
-cd csharp-bridge
-dotnet build
-```
+WireGuard tunnels need elevated privileges. V2Ray-only audits don't.
 
-This builds the `SentinelBridge` console app that wraps the Sentinel C# SDK. It references SDK projects at `..\..\Sentinel SDK\csharp-sdk\src\` -- make sure that directory exists.
+### Windows
 
-If you only need JavaScript SDK testing, skip this step. The server defaults to `activeSDK = 'js'`.
-
----
-
-## 8. Launch
-
-```bash
+```cmd
+:: Recommended — auto-elevates, opens browser
 cscript //nologo SentinelAudit.vbs
+
+:: Or one-shot
+start.bat
+
+:: Or in an already-Admin terminal
+node server.js
 ```
 
-This will:
-1. Trigger a UAC prompt for Administrator elevation (required for WireGuard)
-2. Start the Node.js server on port 3001
-3. Open http://localhost:3001 in your default browser after 4 seconds
+### macOS / Linux
 
-### Alternative launchers
+```bash
+# WireGuard nodes — requires root, -E preserves .env
+sudo -E node server.js
 
-| Method | Command | Notes |
-|--------|---------|-------|
-| VBS (recommended) | `cscript //nologo SentinelAudit.vbs` | Handles admin elevation + browser open |
-| Batch file | `start.bat` | Auto-elevates, kills existing port 3001 process |
-| Scheduled task | `SentinelAudit.exe` | No UAC popup (run `Setup (Run Once As Admin).bat` first) |
-| Direct | `node server.js` | Must already be in an admin terminal |
+# V2Ray-only audit — no sudo needed
+node server.js
+```
+
+The server listens on http://localhost:3001 by default.
 
 ---
 
-## 9. Verify
+## 7. Verify
 
-1. Open http://localhost:3001 -- you should see the dashboard with your wallet address and P2P balance
-2. Click **Start Audit** -- the live log should show node discovery, then batch payments, then individual node tests
-3. Check `results/results.json` after a few nodes complete -- should contain test result objects
+1. Open http://localhost:3001 — dashboard should load with your wallet
+   address and P2P balance.
+2. Click **Start Audit** (admin view only) — the live log shows node
+   discovery → batch payments → individual node tests.
+3. Health check:
 
-### Health check
+   ```bash
+   curl http://localhost:3001/health
+   ```
 
-```bash
-curl http://localhost:3001/health
-```
+   Expected: `{ "status": "ok", "uptime": ... }`.
 
-Expected: `{ "status": "ok", "uptime": ... }`
+4. Results land in `results/results.json` and the SQLite DB at `data/audit.db`.
 
 ---
 
 ## Checklist
 
-| Step | Done |
-|------|------|
-| Node.js 20+ installed | |
-| WireGuard installed at default path | |
-| .NET 8 SDK installed (if using C# bridge) | |
-| `npm install` completed | |
-| `.env` created with valid mnemonic | |
-| Wallet funded with P2P tokens | |
-| C# bridge built (if using C# SDK) | |
-| `cscript //nologo SentinelAudit.vbs` launches successfully | |
-| Dashboard loads at http://localhost:3001 | |
-| Audit starts and tests nodes | |
+- [ ] Node.js 20+
+- [ ] WireGuard installed (or accept ~30% failures)
+- [ ] `npm install` completed without errors
+- [ ] `.env` has a valid `MNEMONIC`
+- [ ] Wallet funded with P2P
+- [ ] Server reachable at `http://localhost:3001`
+- [ ] Audit starts and produces results
+
+If anything fails, see `TROUBLESHOOTING.md`.

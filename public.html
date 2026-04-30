@@ -1038,7 +1038,7 @@
     }
 
     .error-copy-btn {
-      display: flex;
+      display: inline-flex;
       align-items: center;
       gap: 5px;
       background: none;
@@ -1047,8 +1047,8 @@
       color: var(--text-dim);
       cursor: pointer;
       font-size: 10px;
-      padding: 3px 9px;
-      margin-top: 8px;
+      line-height: 1;
+      padding: 4px 9px;
       font-family: var(--font-display);
       transition: all 0.18s;
     }
@@ -1071,7 +1071,7 @@
     .row-copy-btn:disabled { opacity: 0.6; cursor: wait; }
 
     /* ─── Copy/download button row ─── */
-    .error-action-row { display: flex; gap: 6px; flex-wrap: wrap; }
+    .error-action-row { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
     /* ─── Copy toast ─── */
     #copyToast {
@@ -2102,7 +2102,11 @@
         if (n.address === selectedAddr) tr.classList.add('selected');
         const city = n.city ? ` · ${escHtml(n.city)}` : '';
         const countryFull = `${ctry}${city}`;
-        const isFail = n.handshake_ok === false;
+        // Show copy button for any row without a successful speedtest. Covers:
+        //   handshake_ok === false (handshake explicitly failed)
+        //   latest_mbps == null    (skipped, timeout, or pre-handshake failure)
+        // Excludes only confirmed-pass rows where a real Mbps reading exists.
+        const isFail = n.handshake_ok === false || n.latest_mbps == null;
         const rowCopy = isFail
           ? `<button class="row-copy-btn" title="Copy latest failure log" data-addr="${escHtml(n.address)}" data-moniker="${escHtml(n.moniker || '')}" onclick="copyRowFailure(event)">⎘</button>
              <button class="row-copy-btn" title="View error details" data-addr="${escHtml(n.address)}" data-moniker="${escHtml(n.moniker || '')}" onclick="showRowFailurePopup(event)" style="margin-left:4px">👁</button>`
@@ -2165,6 +2169,7 @@
       btn.disabled = true;
       try {
         const res = await fetch('/api/public/node/' + encodeURIComponent(addr) + '/errors?limit=1');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         const errs = (data && data.errors) || [];
         if (!errs.length) {
@@ -2232,6 +2237,7 @@
 
       try {
         const res = await fetch('/api/public/node/' + encodeURIComponent(addr) + '/errors?limit=1');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         const errs = (data && data.errors) || [];
         const body = document.getElementById('errorPopupBody');
@@ -2266,7 +2272,7 @@
         `;
       } catch (err) {
         const body = document.getElementById('errorPopupBody');
-        if (body) body.innerHTML = '<div style="color:var(--red)">Failed to load: ' + (err.message || 'unknown') + '</div>';
+        if (body) body.innerHTML = '<div style="color:var(--red)">Failed to load: ' + eh(err.message || 'unknown') + '</div>';
       }
     }
 
@@ -2459,7 +2465,7 @@
               ? `<div class="error-snippet">${escHtml(snippet)}</div>`
               : `<div style="font-size:10px;color:var(--text-dim);margin-top:6px;font-style:italic">Full logs coming soon — log_snippet field not yet in API response</div>`
             }
-            <button class="error-copy-btn" data-err-idx="${idx}">⎘ Copy</button>
+            <button class="error-copy-btn" data-err-idx="${idx}" style="align-self:flex-start;margin-top:8px">⎘ Copy</button>
           </div>
         `;
 

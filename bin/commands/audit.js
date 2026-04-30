@@ -88,7 +88,15 @@ export async function run({ positional, flags: f }) {
 
   // ─── Run audit ───────────────────────────────────────────────────────────
   console.error(`[audit] Starting audit (resume=${resume}, sdk=${sdk}, max=${process.env.MAX_NODES || '0'})...`);
-  await runAudit(resume, state, broadcast);
+  try {
+    await runAudit(resume, state, broadcast);
+  } catch (err) {
+    // runAudit failed mid-run — tunnels/sessions may still be open. Force
+    // emergency cleanup before propagating so tunnels don't leak across exit.
+    try { if (typeof emergencyCleanupSync === 'function') emergencyCleanupSync(); }
+    catch (cleanupErr) { console.error(`[audit] emergencyCleanupSync failed: ${cleanupErr.message}`); }
+    throw err;
+  }
 
   const results = getResults();
   const filtered = country

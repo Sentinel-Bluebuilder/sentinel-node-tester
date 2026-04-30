@@ -10,7 +10,6 @@ import { createServer } from 'http';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
-import { execSync } from 'child_process';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -225,21 +224,18 @@ async function runHttpTests(port) {
 async function runPublicModeStartupTest() {
   console.log('\n3. PUBLIC_MODE=true + ADMIN_TOKEN empty → process.exit(1)...');
 
-  try {
-    execSync(`node -e "
-      process.env.PUBLIC_MODE = 'true';
-      process.env.ADMIN_TOKEN = '';
-      // Simulate the startup check inline (mirrors server.js logic)
-      if (process.env.PUBLIC_MODE === 'true' && !process.env.ADMIN_TOKEN) {
-        process.exit(1);
-      }
-      process.exit(0);
-    "`, { stdio: 'pipe' });
-    assert(false, 'PUBLIC_MODE=true + ADMIN_TOKEN empty → should have exited 1');
-  } catch (err) {
-    // execSync throws when exit code !== 0
-    assert(err.status === 1, 'PUBLIC_MODE=true + ADMIN_TOKEN empty → exits with code 1');
-  }
+  // Spawn a child node process with argv (cross-platform — no shell quoting).
+  const { spawnSync } = await import('child_process');
+  const result = spawnSync(
+    process.execPath,
+    ['-e', 'if (process.env.PUBLIC_MODE === "true" && !process.env.ADMIN_TOKEN) { process.exit(1); } process.exit(0);'],
+    {
+      env: { ...process.env, PUBLIC_MODE: 'true', ADMIN_TOKEN: '' },
+      stdio: 'pipe',
+      shell: false,
+    },
+  );
+  assert(result.status === 1, `PUBLIC_MODE=true + ADMIN_TOKEN empty → exits with code 1 (got ${result.status})`);
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────

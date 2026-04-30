@@ -1,7 +1,24 @@
 # Sentinel Node Tester — Project Instructions
 
-## Role
-Standalone tool for stress-testing every node on the Sentinel chain. Runs sessions, measures speed/latency, persists results. Type 1 deployment (CLI/browser) per the global CLAUDE.md categorization.
+> **New Claude session: read this file first, then `memory/handoff-node-tester.md` (current state), then `ARCH.md` (module map). Stop there.** Everything under `docs/` is reference material — open only when the task needs it. Files in `docs/archive/` are historical and may contradict current code; treat them as read-only context, never as source of truth. The user is `rahul@norselabs.io` (Sentinel founder); the tester is their primary network audit instrument.
+
+## What this is
+Standalone tool for stress-testing every node on the Sentinel chain. Runs sessions, measures speed/latency, persists results in `audit.db` (SQLite). Type 1 deployment (Node.js server + browser dashboard) per global CLAUDE.md categorization. Published to npm as `sentinel-node-tester`. Canonical repo: `Sentinel-Autonomybuilder/sentinel-node-tester`.
+
+**Key purpose: on-chain performance oracle.** The tester is a primary publisher of node performance + concurrent-user data to the Sentinel chain. Every N tested nodes, the tester self-sends 1 udvpn with a compact binary memo (`SNTR1` magic prefix) so any consumer can ingest results via RPC `tx_search` — no off-chain API needed. See `core/onchain-report.js` (encoder/decoder/broadcaster/querier) and the "On-Chain Reporting" section in the admin settings drawer. Opt-in (off by default); batch size 1–6 (default 6) — capped because Sentinel's chain enforces a 256-char TX memo limit and 7 binary records would overflow base64. Region 2-letter ISO + tester baseline Mbps included in every batch header.
+
+## Port
+3001 (per global dashboard).
+
+## Source-of-truth hierarchy (when docs disagree)
+1. The code itself (especially `server.js`, `audit/pipeline.js`, `audit/node-test.js`).
+2. This file (`CLAUDE.md`).
+3. `memory/handoff-node-tester.md` — most recent session state.
+4. `ARCH.md`, `DECISIONS.md`, `README.md`, `SETUP.md`, `TROUBLESHOOTING.md`.
+5. `docs/*.md` — feature/integration references.
+6. `docs/archive/*` — historical, often stale.
+
+If `docs/archive/HANDOFF-2026-04-11.md`, `docs/archive/CONTEXT-2026-04-10.md`, or any other archived doc contradicts what's above it in this list, the higher item wins.
 
 ## Hard Rules — Public Dashboard
 
@@ -25,7 +42,7 @@ Every failure in a batch must produce a durable, user-copyable log. This is non-
 
 Remove or downgrade any of these and the product regresses to opaque — do not do it.
 
-## Single Mode + Broadcast Live (2026-04-25)
+## Single Mode + Broadcast Live (current architecture, since 2026-04-25)
 
 The dual-mode (dev/bundled/public) system has been collapsed. There is now **one mode**. There is **one database** (`audit.db`).
 
@@ -41,8 +58,9 @@ The dual-mode (dev/bundled/public) system has been collapsed. There is now **one
 - Toggled by the admin via `POST /api/broadcast` (`adminOnly`). Body ignored; it flips the current value.
 - Read via `GET /api/broadcast` — returns `{ broadcastLive: boolean }`.
 - No mode cookie, no `requireMode` middleware, no `_currentMode` client state. Those are gone.
+- `/api/admin/public-test/*` endpoints were removed in this collapse. If you find any reference to them in older docs, treat as stale.
 
-### TEST RUN (test run)
+### TEST RUN
 
 TEST RUN is an optional skip-only demo — it is NOT a separate mode and it does NOT use a separate database.
 
@@ -52,50 +70,83 @@ TEST RUN is an optional skip-only demo — it is NOT a separate mode and it does
 - The run row is written to `audit.db` with `mode='test'` so it is visually distinguishable in the admin table.
 - No second database. No `audit-dry.db`. One file on disk.
 
+## Route Isolation — P2P / TEST RUN / SUBSCRIPTION PLAN
+
+The tester has four start routes. Each MUST be reachable independently and MUST NOT bleed state into the others. State leakage caused issue 2026-04-29 (sub-plan picker hijacked into TEST_RUN_SKIP rows).
+
+### Routes
+
+| Route | Endpoint | Runner | Per-node behavior |
+|-------|----------|--------|-------------------|
+| Test Run (skip-only demo) | `POST /api/start` body `{testRun:true}` | `runAudit` | Short-circuits in `node-test.js` at `if (state.testRun)` → `TEST_RUN_SKIP` |
+| P2P per-GB | `POST /api/start` body `{pricingMode:'gigabytes'}` | `runAudit` | Pays each session per GB from this wallet |
+| P2P per-Hour | `POST /api/start` body `{pricingMode:'hours'}` | `runAudit` | Pays each session per hour from this wallet |
+| Subscription Plan | `POST /api/test-sub-plan` body `{planId, subscriptionId, granter}` | `runSubPlanTest` | Subscription-allocated sessions; plan owner pays gas via fee grant (or self-paid when wallet IS the plan owner) |
+
+### State pinning (server-side, in each runner)
+
+Every runner MUST pin `state.testRun` and `state.runMode` at its top so prior-run state cannot leak in. Current invariants:
+
+- `runAudit` (pipeline.js): `state.testRun = !!opts.testRun`; `state.runMode = testRun ? 'test' : 'p2p'`. Clears `runPlanId / runSubscriptionId / runGranter` when not subscription.
+- `runSubPlanTest` (pipeline.js): forces `state.testRun = false`, `state.runMode = 'subscription'`, sets `runPlanId / runSubscriptionId / runGranter` from args.
+- `runPlanTest` (pipeline.js, legacy): forces `state.testRun = false`, `state.runMode = 'subscription'`.
+- `runRetestSkips` (pipeline.js): inherits the prior run's mode — never starts fresh.
+
+### Client-side picker (admin.html)
+
+`runSubPlanTest()` (the JS function called when the operator picks a plan from the modal) MUST always POST to `/api/test-sub-plan`. It MUST NOT branch on `isTestRunMode()` and fall through to `devStart(true)` — picking a specific plan is an explicit subscription request and overrides any leftover `_testingMode='testrun'` or `state.testRun=true` from a prior run.
+
+### Don't-touch list
+
+- Don't add an `if (isTestRunMode())` shortcut inside the client `runSubPlanTest()` function — it hijacks the route.
+- Don't remove the `state.testRun = false` line at the top of `runSubPlanTest` / `runPlanTest` — it's the server-side guard.
+- Don't move the `if (state.testRun)` short-circuit out of `node-test.js` — see TEST RUN don't-touch rules below.
+
 ## Theme (Dark/Light)
-- Toggle exists on BOTH `admin.html` and `public.html` (and `/live` when built).
+- Toggle exists on BOTH `admin.html` and `public.html` (and `/live`).
 - Tokens live in `sentinel.css` under `:root` and `html[data-theme="light"]` at ~line 66.
 - **NEVER hardcode `rgba(0,0,0,...)`, `rgba(255,255,255,...)`, `#fff`, `#000` in HTML/inline styles.** Always use tokens: `--bg`, `--bg-card`, `--bg-card-solid`, `--bg-input`, `--border`, `--border-hover`, `--text`, `--text-dim`, `--text-muted`, `--accent`, `--red`, `--green`.
 - When fixing light-mode regressions, search for `rgba\(0,0,0|rgba\(255,255,255|#fff|#000|background:var\(--white\)` and swap to tokens.
 - `--white` token exists but resolves to `#111` in light mode — do NOT use it for backgrounds expected to be white.
 
-## Port
-- 3001 (per global dashboard).
-
 ## Key Files
 - `server.js` — Express app, all routes, SSE fan-out.
 - `audit/continuous.js` — recursive loop runner, emits `loop:*` / `iteration:*` events.
 - `audit/pipeline.js` — single-pass audit engine (called by continuous).
-- `core/chain.js` — LCD v3 queries, `querySubscriptions`, `queryFeeGrant`, `discoverPlans`.
+- `audit/node-test.js` — per-node test (status → price → payment → handshake → tunnel → speed).
+- `core/chain.js` — chain queries (`querySubscriptions`, `queryFeeGrant`, `discoverPlans`). RPC-first per global rule; LCD only as fallback.
+- `core/db.js` — SQLite schema + migrations + helpers (`insertErrorLog`, `searchNodes`, etc.).
+- `core/onchain-report.js` — on-chain report wire format (`SNTR1` magic, 28-byte records, **≤6/batch**, capped by Sentinel's 256-character TX memo limit — 7+ records overflow base64 and the chain rejects with code 12 "memo too large"), `commitBatch` (memo TX), `queryReports` (RPC `tx_search`).
+- `core/settings.js` — runtime-mutable settings: `onchainEnabled` / `onchainBatchSize` (1–6) / `onchainRegion` (2-char) live alongside P2P payment tunables.
 - `public.html` — public directory (no action buttons).
 - `admin.html` — admin control panel.
-- `live.html` — NOT YET BUILT. Public live-testing view. See architecture doc.
+- `live.html` — public live-testing view (built; do NOT regenerate without reading first).
 - `sentinel.css` — design tokens + theme.
+- `bin/cli.js` + `bin/commands/` — `sentinel-audit` CLI.
 
-## Existing Server Infrastructure (2026-04-25 audit)
-- `POST /api/start` (adminOnly) — body `{ planId?, subscriptionId?, subscriptionGranter? }`. Accepts optional `testRun: true` in body or `?testRun=1` query param to run a skip-only demo audit.
+## Server endpoints (current, post-2026-04-25 collapse)
+- `POST /api/start` (adminOnly) — body `{ planId?, subscriptionId?, subscriptionGranter?, testRun?, infiniteLoop?, pricingMode? }`. Accepts `?testRun=1` query.
+- `POST /api/stop` (adminOnly) — flips stop flag, wakes pending sleeps via `triggerPipelineStop()`.
 - `POST /api/broadcast` (adminOnly) — flips `state.broadcastLive`. No body required.
 - `GET  /api/broadcast` — returns `{ broadcastLive: boolean }`. Open.
 - `GET  /api/public/events` (SSE — forwards live events only when `broadcastLive=true`)
-- `GET  /api/public/nodes`, `/api/public/node/:addr`, `/api/public/countries`, `/api/public/runs/current|last`, `/api/public/stats`
+- `GET  /api/public/nodes`, `/api/public/node/:addr`, `/api/public/countries`, `/api/public/runs/current|last`, `/api/public/stats`, `/api/public/node/:addr/errors`
+- `GET  /api/onchain-reports?limit=20&fromHeight=0&address=…` — RPC `tx_search` of past report TXs from this tester (or any address). Open.
+- `GET/POST /api/settings` — runtime audit settings (read open, write `adminOnly`); on-chain reporting flags live here.
 
-## Build Order (current pending work)
-- DONE 2026-04-23: Fix remaining light-mode regressions (MUST-FIX items).
-- DONE 2026-04-23: Build admin search (#18) — prototype in `admin.html`.
-- DONE 2026-04-23: Port search to `public.html` (#20).
-- DONE 2026-04-23: Build `/live` page + route (Option B).
-- DONE 2026-04-25: Collapsed dual-mode (dev/bundled/public) → single mode + `broadcastLive` toggle. Removed mode cookie, `requireMode` middleware, `_currentMode`, `_applyModeUI`, `selectMode`, `switchMode`, mode overlay, public-test endpoints. Added `POST /GET /api/broadcast`.
-- DONE 2026-04-25: Consolidated the legacy `audit-test.db` into `audit.db`. TEST RUN is now `?testRun=1` on `/api/start`, writes `mode='test'` rows to the single DB.
-- DONE 2026-04-25: TEST RUN parity — runs the real pipeline end-to-end, short-circuits per-node after price discovery with `errorCode='TEST_RUN_SKIP'`. Stripped all `public-test:*` SSE prefixes, `_pipelinePublicMode`, three `/api/admin/public-test/*` endpoints, `TEST_RUN_SKIP` legacy code path, `test-run:log`, `#testRunLoop`. Broadcast Live toggle moved to top action cluster.
-- DONE 2026-04-26: Renamed every `dry`/`dryRun`/`dry-run`/`DRY_RUN` identifier in the project to the `test`/`testRun`/`test-run`/`TEST_RUN` family. There is no `dry` vocabulary anywhere in the tester. The flag is `state.testRun`, the API param is `testRun` / `?testRun=1`, the UI vars are `isTestRun`. The GitHub canonical version of `audit/pipeline.js` and `audit/node-test.js` is updated to match.
-- DONE: Theme toggle on `public.html` (#22) — `#btnTheme` + `toggleTheme()` already wired.
+## Release status
+- npm: `sentinel-node-tester@1.4.0` (latest).
+- GitHub: `Sentinel-Autonomybuilder/sentinel-node-tester` master + open PR #1 on `stop-and-error-popup`.
+- Pushes to that org require `gh auth switch --user Sentinel-Autonomybuilder` first (default `safelife4200-ship-it` gets 403).
 
 ## Don't
 - Don't add public-facing buttons. Ever.
-- Don't regenerate `audit/continuous.js` or `audit/pipeline.js` without reading first.
+- Don't regenerate `audit/continuous.js`, `audit/pipeline.js`, `audit/node-test.js`, `live.html`, `admin.html`, or `public.html` without reading them first.
 - Don't commit `.env` or `MNEMONIC=...`.
-- Don't `taskkill /F /IM node.exe` — kills Claude Code's own runtime.
+- Don't `taskkill /F /IM node.exe` — kills Claude Code's own runtime. Kill exact PIDs only.
 - Don't hide or remove the per-row failure copy button — the failure-log UX is a MUST, not a polish item.
+- Don't reach for LCD endpoints as the primary path. RPC-first per global rule.
+- Don't treat `docs/archive/*` as authoritative — those files are historical snapshots and may describe UI/routes/code that no longer exists.
 - **DON'T FUCK WITH TEST RUN.** Never modify TEST RUN code paths. The canonical implementation lives on GitHub at `Sentinel-Autonomybuilder/sentinel-node-tester` — that is the source of truth. This includes:
   - The `if (state.testRun)` short-circuit in `audit/node-test.js` (the block that returns early with `errorCode: 'TEST_RUN_SKIP'` after price discovery).
   - The TEST RUN branching in `audit/pipeline.js` (anything gated on `state.testRun`, including the batch-payment skip and `state.testRun = ...` assignment).

@@ -50,7 +50,11 @@ function _persistLoopConfig() {
       updatedAt: Date.now(),
     };
     writeFileSync(LOOP_CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf8');
-  } catch { /* non-fatal */ }
+  } catch (err) {
+    // Non-fatal: persistence is best-effort. Loop continues; auto-resume on
+    // restart simply won't trigger if write failed (acceptable degradation).
+    console.error(`[continuous] _persistLoopConfig failed: ${err.message}`);
+  }
 }
 
 /**
@@ -66,7 +70,10 @@ export function readPersistedLoopConfig() {
     if (!existsSync(LOOP_CONFIG_PATH)) return null;
     const raw = readFileSync(LOOP_CONFIG_PATH, 'utf8');
     return JSON.parse(raw);
-  } catch { return null; }
+  } catch (err) {
+    console.error(`[continuous] readPersistedLoopConfig failed: ${err.message}`);
+    return null;
+  }
 }
 
 /**
@@ -174,10 +181,12 @@ async function sleepInterruptible(ms) {
  * @returns {Promise<void>} Throws if no active allowance found.
  */
 async function verifyFeeGrant(granterAddr, granteeAddr) {
-  const { queryFeeGrantRpcFirst, getRpcClient, ensureLcd } = await import('../core/chain.js');
+  const { queryFeeGrantRpcFirst, withFreshRpc, ensureLcd } = await import('../core/chain.js');
   const lcd = await ensureLcd();
-  const rpcClient = await getRpcClient();
-  const grant = await queryFeeGrantRpcFirst(rpcClient, lcd, granterAddr, granteeAddr);
+  const grant = await withFreshRpc(
+    (client) => queryFeeGrantRpcFirst(client, lcd, granterAddr, granteeAddr),
+    'verifyFeeGrant',
+  );
   if (!grant) {
     throw new Error(
       `No active fee-grant from ${granterAddr} to ${granteeAddr}. ` +
@@ -237,7 +246,8 @@ async function _runOnePass(loopState, batchId, frozenNodes = null) {
   let _dbModule = null;
   const _getDb = async () => {
     if (!_dbModule && !_runnerFn) {
-      try { _dbModule = await import('../core/db.js'); } catch { /* non-fatal */ }
+      try { _dbModule = await import('../core/db.js'); }
+      catch (err) { console.error(`[continuous] db.js import failed: ${err.message}`); }
     }
     return _dbModule;
   };
@@ -269,7 +279,8 @@ async function _runOnePass(loopState, batchId, frozenNodes = null) {
     // Persist to batch_results (non-blocking, non-fatal)
     _getDb().then(db => {
       if (db) {
-        try { db.insertBatchResult(batchId, payload); } catch { /* non-fatal */ }
+        try { db.insertBatchResult(batchId, payload); }
+        catch (err) { console.error(`[continuous] insertBatchResult failed (batch ${batchId}, ${payload?.address}): ${err.message}`); }
       }
     }).catch(() => {});
   }
@@ -290,8 +301,10 @@ async function _runOnePass(loopState, batchId, frozenNodes = null) {
       : (st) => {
           const prev = getActiveDbRunId();
           setActiveDbRunId(null);
-          return pipeline.runAudit(false, st, batchBroadcast, frozenNodes)
-            .finally(() => setActiveDbRunId(prev));
+          return pipeline.runAudit(false, st, batchBroadcast, frozenNodes, {
+            testRun:     !!_ctrl.testRun,
+            pricingMode: _ctrl.pricingMode || null,
+          }).finally(() => setActiveDbRunId(prev));
         };
   }
 
@@ -410,7 +423,9 @@ async function _runLoop() {
               const scoped = getDb('real');
               const rows = scoped.prepare('SELECT node_address FROM batch_results WHERE batch_id = ?').all(currentBatchId);
               testedAddrs = rows.map(r => r.node_address).filter(Boolean);
-            } catch { /* non-fatal */ }
+            } catch (err) {
+              console.error(`[continuous] tested-addrs query failed (batch ${currentBatchId}): ${err.message}`);
+            }
           }
           _ctrl.pausedBatch = {
             batchId:              currentBatchId,
@@ -457,7 +472,7 @@ async function _runLoop() {
             currentBatchId = insertBatch({
               started_at:         iterStart,
               snapshot_size:      snapshotSize,
-              mode:               _ctrl.mode || 'p2p',
+              mode:               _ctrl.testRun ? 'test' : (_ctrl.mode || 'p2p'),
               snapshot_addresses: snapshotAddresses,
             }, 'real');
             _batchId = currentBatchId;
@@ -504,7 +519,9 @@ async function _runLoop() {
               const scoped = getDb('real');
               const rows = scoped.prepare('SELECT node_address FROM batch_results WHERE batch_id = ?').all(currentBatchId);
               testedAddrs = rows.map(r => r.node_address).filter(Boolean);
-            } catch { /* non-fatal */ }
+            } catch (err) {
+              console.error(`[continuous] tested-addrs query failed (batch ${currentBatchId}): ${err.message}`);
+            }
           }
           // Update testedAddrs now that the pipeline has settled; batchId + rest
           // were already seeded above so status() returned the correct batchId

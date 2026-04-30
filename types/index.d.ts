@@ -374,6 +374,7 @@ export function signAndBroadcastRetry(
   fee: { amount: Array<{ denom: string; amount: string }>; gas: string },
   broadcast?: BroadcastFn,
   maxRetries?: number,
+  opts?: { memo?: string },
 ): Promise<unknown>;
 
 /** Assert a tx result is successful (throws on failure). */

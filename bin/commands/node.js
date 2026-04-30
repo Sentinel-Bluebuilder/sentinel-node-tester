@@ -6,7 +6,7 @@
  */
 
 import {
-  getRpcClient,
+  withFreshRpc,
   ensureLcd,
 } from '../../core/chain.js';
 import { rpcQueryNode } from 'blue-js-sdk';
@@ -50,13 +50,13 @@ export async function run({ positional = [], flags: _f } = {}) {
   const addr = positional[0];
   if (!addr) throw new Error('node <address> required');
 
-  // RPC primary
+  // RPC primary — withFreshRpc rotates a wedged endpoint instead of hanging.
   try {
-    const client = await getRpcClient();
-    if (client) {
-      const node = await rpcQueryNode(client, addr);
-      if (node) return shape(node);
-    }
+    const node = await withFreshRpc(
+      (client) => rpcQueryNode(client, addr),
+      `rpcQueryNode(${addr})`,
+    );
+    if (node) return shape(node);
   } catch { }
 
   // LCD fallback
