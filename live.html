@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Sentinel — Live Node Testing</title>
   <link rel="stylesheet" href="/sentinel.css">
-  <script>document.documentElement.dataset.theme = localStorage.getItem('theme') || 'dark';</script>
+  <script>document.documentElement.dataset.theme = localStorage.getItem('theme') || 'light';</script>
   <style>
     :root {
       --text-primary: var(--text);
@@ -450,6 +450,12 @@
     .log-entry .log-addr {
       color: var(--text-muted); font-size: 10px; flex-shrink: 0;
     }
+    .addr-copy {
+      cursor: pointer;
+    }
+    .addr-copy:hover {
+      color: var(--accent);
+    }
     .log-entry .log-mbps {
       color: var(--green); font-weight: 700;
       flex-shrink: 0; min-width: 60px; text-align: right;
@@ -640,9 +646,9 @@
 
   <!-- Floating top-right -->
   <div class="top-right-controls">
-    <a href="/about" class="top-icon-btn" title="About" aria-label="About">
+    <button type="button" onclick="openAboutModal()" class="top-icon-btn" title="About" aria-label="About" style="background:transparent;border:1px solid var(--border);cursor:pointer;padding:0;color:inherit;display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:8px">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
-    </a>
+    </button>
     <button id="btnTheme" class="theme-toggle-btn" onclick="toggleTheme()" title="Toggle theme" aria-label="Toggle theme">
       <svg id="themeIconDark" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
       <svg id="themeIconLight" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>
@@ -681,18 +687,8 @@
         </div>
         <div class="live-header-divider"></div>
         <div class="live-header-stat">
-          <div class="live-header-stat-label">Network Nodes</div>
-          <div class="live-header-stat-value" id="hdrNetworkNodes">—</div>
-        </div>
-        <div class="live-header-divider"></div>
-        <div class="live-header-stat">
           <div class="live-header-stat-label">Network Median</div>
           <div class="live-header-stat-value" id="hdrNetworkMedian">—</div>
-        </div>
-        <div class="live-header-divider"></div>
-        <div class="live-header-stat">
-          <div class="live-header-stat-label">Network Pass Rate</div>
-          <div class="live-header-stat-value" id="hdrNetworkPass">—</div>
         </div>
       </div>
     </div>
@@ -947,6 +943,15 @@
       el.textContent = n.toFixed(1) + ' Mbps';
       el.style.color = n >= 30 ? '' : 'var(--red)';
     }
+    // Mean of baselineHistory (last-10 direct-connection speedtest readings).
+    // Falls back to the latest single reading when no history is forwarded yet.
+    function computeBaselineAvg(state) {
+      const hist = Array.isArray(state?.baselineHistory) ? state.baselineHistory : [];
+      const samples = hist.map(h => Number(h?.mbps)).filter(n => Number.isFinite(n) && n > 0);
+      if (samples.length > 0) return samples.reduce((a, b) => a + b, 0) / samples.length;
+      const latest = Number(state?.baselineMbps);
+      return Number.isFinite(latest) && latest > 0 ? latest : null;
+    }
     async function loadHeaderStats() {
       // Paint from REST first so the header tiles have values on a cold load
       // even before SSE init arrives.
@@ -979,6 +984,13 @@
         const j = await r.json();
         if (!j || !j.broadcastLive) return;
         if (j.state) mergeLiveState(j.state);
+        // Pin the active batch id BEFORE upserting rows so subsequent SSE
+        // events (batch:start in particular) don't see `_cb.batchId == null`
+        // alongside painted rows and treat the seeded data as stale.
+        if (j.activeBatchId != null) {
+          _cb.batchId = j.activeBatchId;
+          if (j.snapshotSize != null) _cb.snapshotSize = j.snapshotSize;
+        }
         if (Array.isArray(j.results)) {
           for (const r2 of j.results) {
             if (!r2 || !r2.address) continue;
@@ -1058,7 +1070,40 @@
     }
     function shortAddr(a) {
       if (!a) return '--';
-      return a.length > 22 ? a.slice(0, 12) + '…' + a.slice(-5) : a;
+      return a.length > 18 ? a.slice(0, 10) + '·' + a.slice(-4) : a;
+    }
+    // ─── Click-to-copy node address ────────────────────────────────────
+    // Wrap a truncated address so clicking it copies the full bech32 to
+    // the clipboard. Stops propagation so it doesn't trigger row clicks.
+    function addrCopySpan(addrFull) {
+      if (!addrFull) return '--';
+      const full = escHtml(addrFull);
+      const short = escHtml(shortAddr(addrFull));
+      return `<span class="addr-copy" data-addr="${full}" title="Click to copy ${full}" onclick="copyAddr(event, this)">${short}</span>`;
+    }
+    async function copyAddr(ev, el) {
+      ev.stopPropagation();
+      const addr = el?.dataset?.addr;
+      if (!addr) return;
+      let ok = false;
+      try { await navigator.clipboard.writeText(addr); ok = true; }
+      catch (_) {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = addr; ta.style.position = 'fixed'; ta.style.opacity = '0';
+          document.body.appendChild(ta); ta.select();
+          ok = document.execCommand('copy');
+          document.body.removeChild(ta);
+        } catch (_) {}
+      }
+      if (ok) {
+        const orig = el.textContent;
+        el.textContent = '✓ copied';
+        setTimeout(() => { el.textContent = orig; }, 900);
+        if (typeof showToast === 'function') showToast('Address copied');
+      } else if (typeof showToast === 'function') {
+        showToast('Copy failed');
+      }
     }
     // ─── Country name → ISO-2 (mirrors public.html _CC) ───
     const _CC = {
@@ -1235,9 +1280,7 @@
       ) + (r.errorCode === 'TEST_RUN_SKIP' ? '<span class="badge badge-dry">DRY</span>' : '');
       const addrFull = r.address || '';
       const monikerText = r.moniker || r.nodeName || '(unknown)';
-      const addr = addrFull
-        ? `<span title="${escHtml(addrFull)}">${escHtml(shortAddr(addrFull))}</span>`
-        : '--';
+      const addr = addrCopySpan(addrFull);
       const cc = r.countryCode || _countryToCode(r.country) || '';
       const flag = flagFor(cc);
       const countryName = escHtml(r.country || (cc ? cc : '—'));
@@ -1388,7 +1431,7 @@
 
       if (o.moniker) parts.push(`<span class="log-moniker" title="${escHtml(o.moniker)}">${escHtml(o.moniker)}</span>`);
 
-      if (o.addr) parts.push(`<span class="log-addr" title="${escHtml(o.addr)}">${escHtml(shortAddr(o.addr))}</span>`);
+      if (o.addr) parts.push(addrCopySpan(o.addr));
 
       if (o.mbps != null) {
         const v = Number(o.mbps);
@@ -1791,9 +1834,17 @@
     // never from chain-wide aggregates. Falls back to "—" when unknown.
     function applyHeaderStatsFromState() {
       const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-      // Server Baseline — from state.baselineMbps
-      if (_liveState && _liveState.baselineMbps != null) {
-        setHeaderBaseline(_liveState.baselineMbps);
+      // Server Baseline — mean of baselineHistory (last-10 readings) so the
+      // header tile shows a true rolling average, not a single sample. Only
+      // paint when a test is actually running; restored snapshot values from a
+      // prior session would otherwise look hardcoded on a fresh page load.
+      const liveStatus = (_liveState && _liveState.status) || '';
+      const isLive = liveStatus === 'running' || liveStatus === 'paused' || !!(_cb && _cb.batchId);
+      if (_liveState && isLive) {
+        const avg = computeBaselineAvg(_liveState);
+        if (avg != null) setHeaderBaseline(avg);
+      } else {
+        setHeaderBaseline(null);
       }
       // Network Nodes — total snapshot size for current batch (state.totalNodes
       // tracks scanned/online; fall back to _cb.snapshotSize, then resultsArr.)
@@ -1804,17 +1855,24 @@
       // Only overwrite if we actually have a live value; otherwise leave
       // whatever loadHeaderStats() painted from /api/public/stats.
       if (totalNodes) set('hdrNetworkNodes', Number(totalNodes).toLocaleString());
-      // Network Median — derive from passed nodes' actualMbps in current batch
-      const speeds = resultsArr
-        .map(r => Number(r.actualMbps))
-        .filter(n => Number.isFinite(n) && n > 0)
-        .sort((a, b) => a - b);
-      if (speeds.length) {
-        const mid = Math.floor(speeds.length / 2);
-        const median = speeds.length % 2 ? speeds[mid] : (speeds[mid - 1] + speeds[mid]) / 2;
-        set('hdrNetworkMedian', median.toFixed(1) + ' Mbps');
+      // Network Median — derive from passed nodes' actualMbps in current batch.
+      // Only paint when a test is live; otherwise the REST seed (which now
+      // returns null when no test is running) clears the tile to "—".
+      if (isLive) {
+        const speeds = resultsArr
+          .map(r => Number(r.actualMbps))
+          .filter(n => Number.isFinite(n) && n > 0)
+          .sort((a, b) => a - b);
+        if (speeds.length) {
+          const mid = Math.floor(speeds.length / 2);
+          const median = speeds.length % 2 ? speeds[mid] : (speeds[mid - 1] + speeds[mid]) / 2;
+          set('hdrNetworkMedian', median.toFixed(1) + ' Mbps');
+        } else {
+          set('hdrNetworkMedian', '—');
+        }
+      } else {
+        set('hdrNetworkMedian', '—');
       }
-      // else: leave the REST-painted value in place.
       // Network Pass Rate — passed / processed in current batch.
       // Excludes TEST_RUN_SKIP and explicit skips so the rate reflects real tests.
       const processed = resultsArr.filter(r =>
@@ -1826,6 +1884,29 @@
       if (processed > 0) set('hdrNetworkPass', Math.round(passed / processed * 100) + '%');
       // else: leave the REST-painted value in place.
       applyLiveModeBadge();
+    }
+
+    // SDK info cache for the badge sub-line. Refetched only when the active
+    // SDK key in state changes — public endpoint is unauth'd but cheap enough
+    // we don't want to hammer it on every SSE state tick.
+    let _sdkInfo = null;        // { active, name, version }
+    let _sdkInfoFetchedFor = null;
+    async function refreshSdkInfoIfNeeded() {
+      const want = (_liveState && _liveState.activeSDK) || null;
+      if (want && want === _sdkInfoFetchedFor && _sdkInfo) return;
+      try {
+        const r = await fetch('/api/public/sdk-info');
+        if (!r.ok) return;
+        const d = await r.json();
+        _sdkInfo = d;
+        _sdkInfoFetchedFor = d.active || want;
+        applyLiveModeBadge();
+      } catch {}
+    }
+    function sdkSuffix() {
+      if (!_sdkInfo || !_sdkInfo.name) return '';
+      const v = _sdkInfo.version ? ' v' + _sdkInfo.version : '';
+      return ' · ' + _sdkInfo.name + v;
     }
 
     // Mirror the admin "what's running" badge: Plan #N / P2P / Test Run with a
@@ -1843,6 +1924,7 @@
         if (subEl) subEl.textContent = 'Live public testing — Sentinel dVPN network';
         return;
       }
+      refreshSdkInfoIfNeeded();
       let label, detail, color;
       if ((_liveState && _liveState.testRun) || (_liveState && _liveState.runMode === 'test')) {
         label = 'Test Run';
@@ -1865,7 +1947,7 @@
       badge.style.borderColor = color;
       badge.style.color = color;
       labelEl.textContent = label;
-      if (subEl) subEl.textContent = detail;
+      if (subEl) subEl.textContent = detail + sdkSuffix();
     }
 
     // ─── SSE dispatcher ───
@@ -2306,14 +2388,22 @@
             });
           }
         } else if (isHistorical && _broadcastLive) {
-          // Broadcast ON but no live batch in DB yet (audit hasn't reached
-          // the snapshot phase) → wipe the table and counters so /live shows
-          // an empty "warming up" state instead of last-run rows.
-          resultsArr.length = 0;
-          const tbody = document.getElementById('resultsBody');
-          if (tbody) tbody.innerHTML = '';
-          _cb.batchId = null; _cb.tested = 0; _cb.passed = 0; _cb.failed = 0; _cb.snapshotSize = 0;
-          cbRender();
+          // Broadcast ON but no live batch in DB yet. Two cases:
+          //  (a) cold boot, no audit running   → wipe so /live shows empty.
+          //  (b) sub-plan/p2p run is mid-flight but withBatchTracking has
+          //      not yet flushed its first 'result' (online-scan/baseline
+          //      phase, or pre-first-result race) → seedLiveStateFromRest
+          //      already painted authoritative rows from in-memory
+          //      getResults(); wiping them blanks the dVPN Node Connections
+          //      table for the user. Let SSE take over instead.
+          const adminRunning = _liveState && (_liveState.status === 'running' || _liveState.status === 'paused');
+          if (!adminRunning) {
+            resultsArr.length = 0;
+            const tbody = document.getElementById('resultsBody');
+            if (tbody) tbody.innerHTML = '';
+            _cb.batchId = null; _cb.tested = 0; _cb.passed = 0; _cb.failed = 0; _cb.snapshotSize = 0;
+            cbRender();
+          }
         }
       } catch (_) {}
     }
@@ -2383,7 +2473,7 @@
 
       const overlay = document.createElement('div');
       overlay.id = 'errorPopupOverlay';
-      overlay.style.cssText = 'position:fixed;inset:0;background:var(--glass-bg);backdrop-filter:blur(8px);z-index:9999;display:flex;align-items:center;justify-content:center;';
+      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.35);z-index:9999;display:flex;align-items:center;justify-content:center;';
       overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
       const popup = document.createElement('div');
       popup.style.cssText = 'background:var(--bg-card-solid);border:1px solid var(--border);border-radius:16px;padding:24px 28px;max-width:780px;width:92%;max-height:85vh;overflow-y:auto;color:var(--text);font-family:var(--font-display);line-height:1.55';
@@ -2591,5 +2681,6 @@
       }
     }
   </script>
+  <script src="/about-modal.js"></script>
 </body>
 </html>

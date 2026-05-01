@@ -73,7 +73,16 @@ function logFailure(nodeAddr, error, context = {}) {
  * @returns {import('../core/types.js').TestResult|null}
  */
 export async function testNode(client, account, privkey, node, opts, preSessionId, broadcast, state) {
-  const { testMb, gigabytes, denom, v2rayAvailable, baselineMbps, onlineTimeoutMs = 6_000, nodeStatus = null } = opts;
+  const { testMb, gigabytes, denom, v2rayAvailable, baselineMbps, onlineTimeoutMs = 6_000, nodeStatus = null, pricingMode: optsPricingMode } = opts;
+  // Pay-per-hour parity with submitBatchPayment: caller passes pricingMode in
+  // opts; fallback to state.pricingMode only when caller did not specify.
+  // Explicit opts MUST win so subscription runners can pin 'gigabytes' even
+  // when state.pricingMode is 'hours' from a prior P2P run.
+  const pricingMode = (optsPricingMode === 'hours' || optsPricingMode === 'gigabytes')
+    ? optsPricingMode
+    : (state?.pricingMode === 'hours' ? 'hours' : 'gigabytes');
+  const sessionGigabytes = pricingMode === 'hours' ? 0 : gigabytes;
+  const sessionHours = pricingMode === 'hours' ? 1 : 0;
   const useCSharp = state.activeSDK === 'csharp' && BRIDGE_AVAILABLE;
   const useTkd = state.activeSDK === 'tkd' && TKD_AVAILABLE;
 
@@ -157,13 +166,17 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
   }
 
   // ─── Price check ──────────────────────────────────────────────────────────
-  const priceEntry = (node.gigabyte_prices || []).find(p => p.denom === denom);
+  // Hours mode reads node.hourly_prices; GB mode reads node.gigabyte_prices.
+  // Mirrors submitBatchPayment so the per-node fallback path agrees with
+  // the batched path on what each session costs and what the chain expects.
+  const priceList = pricingMode === 'hours' ? (node.hourly_prices || []) : (node.gigabyte_prices || []);
+  const priceEntry = priceList.find(p => p.denom === denom);
   if (!priceEntry) {
-    throw new Error('No udvpn pricing available');
+    throw new Error(pricingMode === 'hours' ? 'No udvpn hourly pricing available' : 'No udvpn pricing available');
   }
 
   const nodePriceUdvpn = Math.round(parseFloat(priceEntry.quote_value) || 0);
-  const thisCostUdvpn = nodePriceUdvpn * gigabytes;
+  const thisCostUdvpn = nodePriceUdvpn * (pricingMode === 'hours' ? sessionHours : gigabytes);
 
   if (state.testRun) {
     if (broadcast) broadcast('log', { msg: '  🧪 TEST RUN — skipping payment + handshake + speedtest.' });
@@ -250,7 +263,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
         typeUrl: V3_MSG_TYPE,
         value: {
           from: account.address, node_address: node.address,
-          gigabytes, hours: 0,
+          gigabytes: sessionGigabytes, hours: sessionHours,
           max_price: { denom: priceEntry.denom, base_value: priceEntry.base_value, quote_value: priceEntry.quote_value },
         },
       }], fee, broadcast);
@@ -273,7 +286,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
             typeUrl: V3_MSG_TYPE,
             value: {
               from: account.address, node_address: node.address,
-              gigabytes, hours: 0,
+              gigabytes: sessionGigabytes, hours: sessionHours,
               max_price: { denom: priceEntry.denom, base_value: priceEntry.base_value, quote_value: priceEntry.quote_value },
             },
           }], fee, broadcast);
@@ -288,7 +301,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
                 typeUrl: V3_MSG_TYPE,
                 value: {
                   from: account.address, node_address: node.address,
-                  gigabytes, hours: 0,
+                  gigabytes: sessionGigabytes, hours: sessionHours,
                   max_price: { denom: priceEntry.denom, base_value: priceEntry.base_value, quote_value: priceEntry.quote_value },
                 },
               }], fee, broadcast);
@@ -308,7 +321,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
             typeUrl: V3_MSG_TYPE,
             value: {
               from: account.address, node_address: node.address,
-              gigabytes, hours: 0,
+              gigabytes: sessionGigabytes, hours: sessionHours,
             },
           }], fee, broadcast);
           assertIsDeliverTxSuccess(txResult);
@@ -353,7 +366,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
         typeUrl: V3_MSG_TYPE,
         value: {
           from: account.address, node_address: node.address,
-          gigabytes, hours: 0,
+          gigabytes: sessionGigabytes, hours: sessionHours,
           max_price: { denom: priceEntry.denom, base_value: priceEntry.base_value, quote_value: priceEntry.quote_value },
         },
       }], fee, broadcast);
@@ -363,7 +376,7 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
         if (broadcast) broadcast('log', { msg: `  ⚠ "invalid price" — retrying fresh session without max_price...` });
         txResult = await signAndBroadcastRetry(client, account.address, [{
           typeUrl: V3_MSG_TYPE,
-          value: { from: account.address, node_address: node.address, gigabytes, hours: 0 },
+          value: { from: account.address, node_address: node.address, gigabytes: sessionGigabytes, hours: sessionHours },
         }], fee, broadcast);
         assertIsDeliverTxSuccess(txResult);
       } else {

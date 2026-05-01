@@ -215,7 +215,14 @@ async function _flushOnchainBatch(force = false) {
   const r = _onchainReporter;
   if (!r || !r.enabled) return;
   if (r.buffer.length === 0) return;
-  if (!force && r.buffer.length < r.batchSize) return;
+  // v2 CSV memos cap at ~3-4 records before the 256-char chain limit kicks in,
+  // so the legacy "wait for batchSize=6" trigger left half the buffer permanently
+  // un-flushed mid-run (committed only at finalize, lost on crash). Flush as soon
+  // as 2 records are queued — packBatch will greedily fit as many as the memo
+  // allows; leftovers go in the next TX. `batchSize` now caps memo records, not
+  // the flush threshold.
+  const FLUSH_AT = 2;
+  if (!force && r.buffer.length < FLUSH_AT) return;
   // Greedy pack: encoder fits as many records as the 256-char memo allows
   // (typically 4–6 depending on address/value lengths), then we splice exactly
   // that many off the buffer so leftovers go in the next TX.
@@ -251,10 +258,9 @@ function _bufferOnchainRecord(result) {
   const rec = resultToRecord(result);
   if (!rec) return;
   r.buffer.push(rec);
-  if (r.buffer.length >= r.batchSize) {
-    // Fire and forget — must not block the audit loop.
-    _flushOnchainBatch(false).catch(err => console.error(`[pipeline] _flushOnchainBatch failed: ${err?.message || err}`));
-  }
+  // Trigger a flush attempt on every push — _flushOnchainBatch internally
+  // gates on FLUSH_AT (2). Fire-and-forget; must not block the audit loop.
+  _flushOnchainBatch(false).catch(err => console.error(`[pipeline] _flushOnchainBatch failed: ${err?.message || err}`));
 }
 
 async function _finalizeOnchainReporter() {
@@ -691,10 +697,12 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   const onlineNodes = await scanNodesParallel(nodesToTest, 30, broadcast, state);
   broadcast('log', { msg: `Scan complete: ${onlineNodes.length}/${nodesToTest.length} online.` });
 
+  const _isHours = state.pricingMode === 'hours';
   const viableNodes = onlineNodes.filter(({ node, status }) => {
     if (status.type === 'wireguard' && !WG_AVAILABLE) return false;
     if (status.type === 'v2ray' && !v2rayAvailable) return false;
-    return (node.gigabyte_prices || []).some(p => p.denom === DENOM);
+    const priceList = _isHours ? (node.hourly_prices || []) : (node.gigabyte_prices || []);
+    return priceList.some(p => p.denom === DENOM);
   });
 
   // Resume mode: filter already-tested
@@ -724,7 +732,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
 
   state.totalNodes = (resume ? results.length : 0) + viableNodes.length;
   const estCostUdvpn = viableNodes.reduce(
-    (sum, { node }) => sum + parseNodePriceUdvpn(node.gigabyte_prices) * GIGS, 0
+    (sum, { node }) => sum + parseNodePriceUdvpn(_isHours ? node.hourly_prices : node.gigabyte_prices) * (_isHours ? 1 : GIGS), 0
   );
   const avgCostPerNode = viableNodes.length > 0 ? estCostUdvpn / viableNodes.length : 0;
   state.estimatedTotalCost = '0.0000 P2P';
@@ -840,13 +848,19 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
 
       await refreshBaseline();
 
-      // ─── Per-node log buffer (last 40 lines or 4 KB) ───────────────────
-      // Intercept broadcast('log') during the test to capture log lines for
-      // error_logs.log_snippet. The outer broadcast (SSE + file log) is
-      // still called — we add capture on top.
+      // ─── Per-node log buffer (full tester log) ─────────────────────────
+      // Intercept broadcast('log') during the test to capture every log line
+      // emitted for this node. Stored in error_logs.log_snippet and copied
+      // verbatim by buildFailureReport(). The outer broadcast (SSE + file
+      // log) is still called — we add capture on top.
+      //
+      // Caps are sized for the worst real cases (transport fallback +
+      // status-port scan + multi-retry + fresh-session payment can emit
+      // hundreds of lines) without blowing SQLite row size. 5000 lines /
+      // 512 KB gives operators the complete tester log without truncation.
       const _nodeLogLines = [];
-      const _MAX_LOG_LINES = 40;
-      const _MAX_LOG_BYTES = 4096;
+      const _MAX_LOG_LINES = 5000;
+      const _MAX_LOG_BYTES = 512 * 1024;
       const _capturingBroadcast = (type, data) => {
         broadcast(type, data);
         if (type === 'log' && data?.msg) {
@@ -858,13 +872,23 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
       let result, retried, error;
       ({ result, retried, error } = await testWithRetry(
         () => testNode(client, account, privkey, node,
-          { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps, nodeStatus: status },
+          { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps, nodeStatus: status, pricingMode: state.pricingMode },
           sessionId, _capturingBroadcast, state
         ),
         _capturingBroadcast, state, node.address,
       ));
 
-      // Build snippet: last 40 lines, trimmed to 4 KB from the tail
+      // Append the actual thrown error so the snippet never truncates BEFORE
+      // the failure cause — the capture stops when testNode returns, but the
+      // final errMsg is set in the catch path and would otherwise be missing.
+      if (!result && error) {
+        const _errLine = `✖ ERROR: ${(error.message || String(error)).split('\n').slice(0, 6).join(' | ')}`;
+        _nodeLogLines.push(_errLine);
+        if (error.code) _nodeLogLines.push(`  code: ${error.code}`);
+        if (error.stage) _nodeLogLines.push(`  stage: ${error.stage}`);
+      }
+
+      // Build snippet: last N lines, trimmed to byte cap from the tail
       const _rawSnippet = _nodeLogLines.join('\n');
       const _logSnippet = _rawSnippet.length > _MAX_LOG_BYTES
         ? _rawSnippet.slice(-_MAX_LOG_BYTES)
@@ -1052,7 +1076,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
 
       const { result, retried, error } = await testWithRetry(
         () => testNode(client, account, privkey, node,
-          { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps, nodeStatus: status },
+          { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps, nodeStatus: status, pricingMode: state.pricingMode },
           null, _irBroadcast, state
         ),
         _irBroadcast, state, node.address,
@@ -1118,7 +1142,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
 
       const { result, retried, error } = await testWithRetry(
         () => testNode(client, account, privkey, node,
-          { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps, nodeStatus: status },
+          { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps, nodeStatus: status, pricingMode: state.pricingMode },
           null, _ironBroadcast, state
         ),
         _ironBroadcast, state, node.address,
@@ -1296,7 +1320,7 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
 
     const { result, retried, error } = await testWithRetry(
       () => testNode(client, account, privkey, node,
-        { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps },
+        { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps, pricingMode: state.pricingMode },
         null, _rrBroadcast, state
       ),
       _rrBroadcast, state, node.address,
@@ -1601,9 +1625,12 @@ export async function runPlanTest(planId, state, broadcast) {
     }
 
     // Test with retry
+    // Subscription path: force gigabytes mode regardless of state.pricingMode.
+    // Subscription sessions are pre-allocated by the plan; the per-node price
+    // check in node-test.js shouldn't reject on missing hourly_prices.
     const { result, retried, error } = await testWithRetry(
       () => testNode(client, account, privkey, node,
-        { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps, nodeStatus: status },
+        { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps, nodeStatus: status, pricingMode: 'gigabytes' },
         BigInt(sessionId), _ptBroadcast, state
       ),
       _ptBroadcast, state, node.address,
@@ -1838,6 +1865,26 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
     broadcast('log', { msg: `  Dropped ${_droppedNoRemote} plan node(s) with empty/invalid remote_addrs` });
   }
 
+  // Authoritative plan-membership set. Pre-flight check before each session TX
+  // so chain-side eviction (operator unstaked, plan revoked the node) is caught
+  // locally as PLAN_EVICTED instead of "Session tx failed code=111".
+  let planNodeAddrSet = new Set(planNodes.map(n => n.address));
+  let _planSetRefreshedAt = Date.now();
+  const _refreshPlanNodeSet = async () => {
+    try {
+      const fresh = await withFreshRpc(
+        (rpc) => rpcFetchAllNodesForPlanPaginated(rpc, planId, () => {}),
+        `rpcFetchAllNodesForPlan(${planId}) refresh`,
+      );
+      planNodeAddrSet = new Set((fresh || []).map(n => n.address));
+      _planSetRefreshedAt = Date.now();
+      return true;
+    } catch (e) {
+      broadcast('log', { msg: `  Plan-node refresh failed: ${_sanitizeSnippet(e.message)}` });
+      return false;
+    }
+  };
+
   broadcast('log', { msg: `  Found ${planNodes.length} nodes in plan ${planId}` });
   if (planNodes.length === 0) {
     state.status = 'done';
@@ -1927,6 +1974,47 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
       }
     };
 
+    // Pre-flight: skip the node if the chain has evicted it from the plan since
+    // we fetched the list. Refresh the cached set every 5min OR on first miss.
+    if (!planNodeAddrSet.has(node.address)) {
+      const _refreshAge = Date.now() - _planSetRefreshedAt;
+      if (_refreshAge < 60_000) {
+        // Just refreshed and node still missing — skip without another chain hit.
+        _spBroadcast('log', { msg: `  ⊘ Skipping ${node.address.slice(0, 20)}… — no longer in plan ${planId} (PLAN_EVICTED)` });
+        subFailed++;
+        const evictResult = buildFailResult(node, status, state, `PLAN_EVICTED: node no longer in plan ${planId}`, { planId, subscriptionId, granter: granterAddr });
+        evictResult.inPlan = false;
+        evictResult.planIds = [];
+        evictResult.errorCode = 'PLAN_EVICTED';
+        evictResult.diag = evictResult.diag || {};
+        evictResult.diag.viaSubscription = true;
+        evictResult.diag.evicted = true;
+        upsertResult(evictResult, _sanitizeSnippet(`PLAN_EVICTED: node ${node.address} not in plan ${planId} (refreshed ${_refreshAge}ms ago)`));
+        state.resumeHeadAddr = null;
+        saveResults();
+        broadcast('result', { result: evictResult, state });
+        continue;
+      }
+      // Stale set — refresh once before deciding.
+      await _refreshPlanNodeSet();
+      if (!planNodeAddrSet.has(node.address)) {
+        _spBroadcast('log', { msg: `  ⊘ Skipping ${node.address.slice(0, 20)}… — chain evicted from plan ${planId} mid-run (PLAN_EVICTED)` });
+        subFailed++;
+        const evictResult = buildFailResult(node, status, state, `PLAN_EVICTED: node evicted from plan ${planId} during run`, { planId, subscriptionId, granter: granterAddr });
+        evictResult.inPlan = false;
+        evictResult.planIds = [];
+        evictResult.errorCode = 'PLAN_EVICTED';
+        evictResult.diag = evictResult.diag || {};
+        evictResult.diag.viaSubscription = true;
+        evictResult.diag.evicted = true;
+        upsertResult(evictResult, _sanitizeSnippet(`PLAN_EVICTED: chain refresh confirmed node ${node.address} not in plan ${planId}`));
+        state.resumeHeadAddr = null;
+        saveResults();
+        broadcast('result', { result: evictResult, state });
+        continue;
+      }
+    }
+
     let sessionId = null;
     try {
       const sessMsg = {
@@ -1969,18 +2057,39 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
       await waitForSessionActive(node.address, account.address, 20_000);
     } catch (err) {
       const _failTag = _selfGranter ? 'Self-paid' : 'Fee-granted';
-      _spBroadcast('log', { msg: `  ✗ ${_failTag} session start failed: ${_sanitizeSnippet(err.message)}` });
-      subFailed++;
+      const _isEviction = /code=111|node for plan not found|node .* for plan .* does not exist/i.test(err.message || '');
       const _spRawSess = _spLogLines.join('\n');
       const _spSnippetSess = _spRawSess.length > 4096 ? _spRawSess.slice(-4096) : (_spRawSess || null);
-      const errResult = buildFailResult(node, status, state, `sub-plan-session: ${_sanitizeSnippet(err.message)}`, { planId, subscriptionId, granter: granterAddr });
-      errResult.inPlan = true;
-      errResult.planIds = [planId];
+      if (_isEviction) {
+        // Refresh the cached plan-node set so subsequent nodes get an accurate
+        // pre-flight check — the chain just told us our list is stale.
+        await _refreshPlanNodeSet();
+        _spBroadcast('log', { msg: `  ⊘ ${node.address.slice(0, 20)}… — chain rejected as not in plan ${planId} (PLAN_EVICTED)` });
+      } else {
+        _spBroadcast('log', { msg: `  ✗ ${_failTag} session start failed: ${_sanitizeSnippet(err.message)}` });
+      }
+      subFailed++;
+      const errResult = buildFailResult(
+        node,
+        status,
+        state,
+        _isEviction ? `PLAN_EVICTED: node not in plan ${planId} at TX time` : `sub-plan-session: ${_sanitizeSnippet(err.message)}`,
+        { planId, subscriptionId, granter: granterAddr },
+      );
+      if (_isEviction) {
+        errResult.inPlan = false;
+        errResult.planIds = [];
+        errResult.errorCode = 'PLAN_EVICTED';
+      } else {
+        errResult.inPlan = true;
+        errResult.planIds = [planId];
+      }
       errResult.diag = errResult.diag || {};
       errResult.diag.viaSubscription = true;
       errResult.diag.feeGranted = !_selfGranter;
       errResult.diag.selfGranter = _selfGranter;
       errResult.diag.granter = granterAddr;
+      if (_isEviction) errResult.diag.evicted = true;
       upsertResult(errResult, _sanitizeSnippet(_spSnippetSess));
       state.resumeHeadAddr = null;
       saveResults();
@@ -1988,9 +2097,12 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
       continue;
     }
 
+    // Subscription path: force gigabytes mode regardless of state.pricingMode.
+    // Subscription sessions are pre-allocated by the plan; the per-node price
+    // check in node-test.js shouldn't reject on missing hourly_prices.
     const { result, retried, error } = await testWithRetry(
       () => testNode(client, account, privkey, node,
-        { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps, nodeStatus: status },
+        { testMb: TEST_MB, gigabytes: GIGS, denom: DENOM, v2rayAvailable, baselineMbps: state.baselineMbps, nodeStatus: status, pricingMode: 'gigabytes' },
         BigInt(sessionId), _spBroadcast, state
       ),
       _spBroadcast, state, node.address,

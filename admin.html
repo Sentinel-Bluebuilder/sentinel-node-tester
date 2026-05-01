@@ -199,15 +199,16 @@
       display: flex;
       align-items: center;
       gap: 12px;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
       min-width: 0;
+      flex-shrink: 0;
     }
 
-    .header-right > * { min-width: 0; }
+    .header-right > * { flex-shrink: 0; }
 
     .header-stat {
       text-align: right;
-      min-width: 0;
+      flex-shrink: 0;
     }
 
     .header-stat-label {
@@ -572,7 +573,9 @@
       font-size: 10px;
       text-transform: uppercase;
       letter-spacing: 1px;
-      border-bottom: 1px solid var(--border);
+      /* box-shadow paints exactly at the cell edge, so the row gap below
+         doesn't render as a second separator line. */
+      box-shadow: inset 0 -1px 0 var(--border);
       color: var(--text-secondary);
       position: sticky;
       top: 0;
@@ -601,6 +604,16 @@
 
     /* Numeric cells: tabular figures so digits align column-wise without overflow jitter */
     td[style*="text-align:right"] { font-variant-numeric: tabular-nums; }
+
+    /* Results table — tighter padding so 13 columns fit without horizontal jitter */
+    .results-table th,
+    .results-table td { padding-left: 6px; padding-right: 6px; }
+    .results-table th:first-child,
+    .results-table td:first-child { padding-left: 8px; }
+    .results-table th:last-child,
+    .results-table td:last-child { padding-right: 8px; }
+    /* Center the SDK badge inside its narrow column */
+    .results-table tbody td:first-child { text-align: center; }
 
     /* Pagination controls */
     .pager { font-family: var(--font-mono); }
@@ -773,9 +786,9 @@
         ADMIN PANEL
       </span>
       <div class="pulse-dot" id="headerDot"></div>
-      <div>
-        <h1>SENTINEL NODE TEST</h1>
-        <span id="sdkVersionsLabel" title="Click to verify SDKs match GitHub" style="font-size:10px;color:var(--text-secondary);letter-spacing:1.5px;font-family:var(--font-display);font-weight:400;cursor:pointer">Loading SDK versions…</span>
+      <div style="display:inline-flex;align-items:baseline;gap:14px;flex-wrap:nowrap;min-width:0;flex:1 1 auto;overflow:hidden">
+        <h1 style="margin:0;flex:0 0 auto">SENTINEL NODE TEST</h1>
+        <span id="sdkVersionsLabel" style="font-size:10px;color:var(--text-secondary);letter-spacing:1.5px;font-family:var(--font-display);font-weight:400;display:inline-flex;align-items:center;gap:14px;white-space:nowrap;flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis">Loading SDK versions…</span>
       </div>
     </div>
     <div class="header-right">
@@ -794,13 +807,13 @@
         <div class="header-stat-value" id="headerBaseline">--</div>
       </div>
       <div class="header-divider"></div>
-      <div class="header-stat">
-        <div class="header-stat-label">Spend</div>
+      <div class="header-stat" title="Net spend = gross paid this iteration minus refunds already credited back to wallet. Refunds are already reflected in Balance — they are not money owed.">
+        <div class="header-stat-label">Net Spend</div>
         <div class="header-stat-value" style="color:var(--text-muted)" id="estCost">--</div>
       </div>
       <div class="header-divider"></div>
-      <div class="header-stat">
-        <div class="header-stat-label">Refunded</div>
+      <div class="header-stat" title="Cumulative refunds credited back to your wallet during this iteration. Already included in Balance — this is informational, not a pending receivable.">
+        <div class="header-stat-label">Refunded (in balance)</div>
         <div class="header-stat-value" style="color:var(--green)" id="refundedAmt">--</div>
       </div>
       <div class="header-divider"></div>
@@ -979,15 +992,30 @@
           </div>
         </div>
         <div class="table-wrap">
-          <table>
+          <table class="results-table">
+            <colgroup>
+              <col style="width:54px">   <!-- SDK -->
+              <col style="width:108px">  <!-- Transport -->
+              <col>                      <!-- Moniker (flex) -->
+              <col style="width:150px">  <!-- Node -->
+              <col style="width:90px">   <!-- Country -->
+              <col style="width:120px">  <!-- City -->
+              <col style="width:58px">   <!-- Peers -->
+              <col style="width:96px">   <!-- Speed -->
+              <col style="width:92px">   <!-- Total BW -->
+              <col style="width:92px">   <!-- Baseline -->
+              <col style="width:74px">   <!-- Result -->
+              <col style="width:96px">   <!-- Other SDKs -->
+              <col style="width:48px">   <!-- Log -->
+            </colgroup>
             <thead>
               <tr>
-                <th>SDK</th>
-                <th>Transport</th>
-                <th>Moniker</th>
-                <th>Node</th>
-                <th>Country</th>
-                <th>City</th>
+                <th style="text-align:center">SDK</th>
+                <th style="text-align:left">Transport</th>
+                <th style="text-align:left">Moniker</th>
+                <th style="text-align:left">Node</th>
+                <th style="text-align:left">Country</th>
+                <th style="text-align:left">City</th>
                 <th style="text-align:center">Peers</th>
                 <th style="text-align:right">Speed</th>
                 <th style="text-align:right">Total BW</th>
@@ -999,8 +1027,8 @@
             </thead>
             <tbody id="resultsBody"></tbody>
           </table>
-          <div id="resultsPager" class="pager" style="display:flex;justify-content:center;align-items:center;gap:8px;padding:10px 0;"></div>
         </div>
+        <div id="resultsPager" class="pager" style="display:flex;justify-content:center;align-items:center;gap:8px;padding:10px 0;flex-shrink:0;border-top:1px solid var(--border)"></div>
       </div>
 
       <div class="glass-panel log-container">
@@ -1184,6 +1212,33 @@
       else resultsArr.push(result);
     }
 
+    // Keep "Avg Baseline" identical to /live's "Server Baseline" tile by
+    // sourcing from the same /api/public/test/status endpoint /live polls.
+    // SSE state delivers this too, but a stale tab can lag; re-poll defends
+    // against missed events without waiting for the next pipeline broadcast.
+    async function refreshHeaderBaseline() {
+      try {
+        const r = await fetch('/api/public/test/status', { cache: 'no-store' });
+        if (!r.ok) return;
+        const j = await r.json();
+        if (j && j.baselineMbps != null) {
+          // Cold-load fallback only — once SSE delivers baselineHistory,
+          // applyState() recomputes the true mean. Don't overwrite history here.
+          state.baselineMbps = Number(j.baselineMbps);
+          const _bhist = Array.isArray(state.baselineHistory) ? state.baselineHistory : [];
+          const _bsamples = _bhist.map(h => Number(h?.mbps)).filter(n => Number.isFinite(n) && n > 0);
+          const bl = _bsamples.length > 0
+            ? _bsamples.reduce((a, b) => a + b, 0) / _bsamples.length
+            : Number(state.baselineMbps);
+          const blEl = document.getElementById('headerBaseline');
+          if (blEl && Number.isFinite(bl)) {
+            blEl.textContent = bl.toFixed(1) + ' Mbps';
+            blEl.style.color = bl >= 30 ? '' : 'var(--accent-red)';
+          }
+        }
+      } catch {}
+    }
+
     window.addEventListener('DOMContentLoaded', () => {
       // Load stats instantly (tiny payload, no results)
       fetch('/api/stats').then(r => r.json()).then(d => {
@@ -1192,46 +1247,110 @@
       loadSdkVersions();
       connectSSE();
       setInterval(updateETA, 1000);
+      refreshHeaderBaseline();
+      setInterval(refreshHeaderBaseline, 30_000);
     });
 
-    function loadSdkVersions() {
+    const SDK_LABELS = { 'blue-js': 'Blue JS', 'tkd-js': 'TKD' };
+    const SDK_KEY_BY_ACTIVE = { 'js': 'blue-js', 'csharp': 'blue-js', 'tkd': 'tkd-js' };
+    const SDK_BADGE_NAME = { 'js': 'Blue JS', 'csharp': 'Blue C#', 'tkd': 'TKD JS' };
+    let _sdkVersionCache = null;
+
+    async function loadSdkVersions() {
       const el = document.getElementById('sdkVersionsLabel');
       if (!el) return;
-      fetch('/api/sdk-versions').then(r => r.json()).then(d => {
-        const blue = d.sdks?.['blue-js']?.version;
-        const tkd  = d.sdks?.['tkd-js']?.version;
-        const tester = d.tester?.version;
-        const parts = [];
-        if (tester) parts.push(`Tester v${tester}`);
-        if (blue)   parts.push(`Blue JS v${blue}`);
-        if (tkd)    parts.push(`TKD v${tkd}`);
-        el.textContent = parts.join(' · ');
-        el.onclick = verifySdksUi;
-      }).catch(() => { el.textContent = 'SDK versions unavailable'; });
+      try {
+        const [vRes, lRes] = await Promise.all([
+          fetch('/api/sdk-versions').then(r => r.json()).catch(() => null),
+          fetch('/api/sdk-latest').then(r => r.json()).catch(() => ({})),
+        ]);
+        if (!vRes) { el.textContent = 'SDK versions unavailable'; return; }
+        _sdkVersionCache = vRes;
+        renderSdkChips(el, vRes, lRes || {});
+      } catch {
+        el.textContent = 'SDK versions unavailable';
+      }
     }
 
-    function verifySdksUi() {
-      const el = document.getElementById('sdkVersionsLabel');
-      if (!el) return;
-      const orig = el.textContent;
-      el.textContent = 'Verifying SDKs…';
-      fetch('/api/sdk-verify').then(r => r.json()).then(d => {
-        const blue = d['blue-js'];
-        const tkd  = d['tkd-js'];
-        const fmt = (r) => r?.ok ? 'OK' : (r?.exactRef === false ? 'drift?' : 'MISMATCH');
-        const line = `Blue JS ${fmt(blue)} · TKD ${fmt(tkd)}`;
-        el.textContent = line;
-        const msg = [];
-        for (const [k, r] of Object.entries(d)) {
-          if (r?.warning) msg.push(`${k}: ${r.warning}`);
-          else if (!r?.ok) msg.push(`${k}: ${r.counts?.mismatched || 0} mismatched, ${r.counts?.missingOnGithub || 0} missing on GitHub`);
+    function renderSdkChips(el, vRes, latest) {
+      el.innerHTML = '';
+      const tester = vRes.tester?.version;
+      if (tester) {
+        const t = document.createElement('span');
+        t.textContent = `Tester v${tester}`;
+        el.appendChild(t);
+      }
+      for (const key of Object.keys(SDK_LABELS)) {
+        const installed = vRes.sdks?.[key]?.version;
+        if (!installed) continue;
+        const npmLatest = latest[key]?.latest || null;
+        const outdated = npmLatest && installed !== npmLatest;
+        const chip = document.createElement('span');
+        chip.style.cssText = 'display:inline-flex;align-items:center;gap:6px';
+        chip.dataset.sdkKey = key;
+
+        const dot = document.createElement('span');
+        dot.style.cssText = `display:inline-block;width:8px;height:8px;border-radius:50%;background:${outdated ? 'var(--red, #e54545)' : 'var(--accent, #2f7bff)'}`;
+        dot.title = outdated
+          ? `Outdated — npm latest is v${npmLatest}`
+          : (npmLatest
+              ? 'Installed version matches the latest published on npm. Click Verify to hash-check files against GitHub.'
+              : 'npm latest unknown');
+        chip.appendChild(dot);
+
+        const label = document.createElement('span');
+        label.textContent = `${SDK_LABELS[key]} v${installed}`;
+        chip.appendChild(label);
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = 'Verify';
+        btn.style.cssText = 'background:transparent;border:1px solid var(--border);color:var(--text-secondary);font-size:9px;letter-spacing:1px;padding:2px 7px;border-radius:3px;cursor:pointer;font-family:inherit';
+        btn.onclick = () => verifySdkChip(key, chip, btn);
+        chip.appendChild(btn);
+
+        const status = document.createElement('span');
+        status.dataset.role = 'status';
+        status.style.cssText = 'font-size:9px;opacity:0.85';
+        chip.appendChild(status);
+
+        el.appendChild(chip);
+      }
+    }
+
+    async function verifySdkChip(key, chip, btn) {
+      const status = chip.querySelector('[data-role="status"]');
+      const orig = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '…';
+      if (status) status.textContent = '';
+      try {
+        const r = await fetch(`/api/sdk-verify/${encodeURIComponent(key)}`).then(x => x.json());
+        const m = r?.counts?.mismatched || 0;
+        const miss = r?.counts?.missingOnGithub || 0;
+        // Inconclusive (no exact git tag for this version) → show nothing.
+        // Comparing against branch HEAD always produces noise; reporting it as
+        // "drift" or "OK (drift?)" misleads more than it informs.
+        if (r?.exactRef === false) {
+          status.textContent = '';
+          status.title = '';
+        } else if (r?.ok) {
+          status.textContent = 'OK';
+          status.style.color = 'var(--green, #4caf50)';
+          status.title = r.warning || `Compared ${r.counts?.matched || 0} files`;
+        } else {
+          status.textContent = `MISMATCH (${m}/${miss})`;
+          status.style.color = 'var(--red, #e54545)';
+          status.title = r?.warning || `${m} mismatched, ${miss} missing on GitHub`;
         }
-        if (msg.length) alert(msg.join('\n\n'));
-        setTimeout(() => { el.textContent = orig; }, 8000);
-      }).catch(e => {
-        el.textContent = 'Verify failed';
-        setTimeout(() => { el.textContent = orig; }, 4000);
-      });
+      } catch (e) {
+        status.textContent = 'verify failed';
+        status.style.color = 'var(--red, #e54545)';
+        status.title = e.message || '';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = orig;
+      }
     }
 
     function connectSSE() {
@@ -1330,8 +1449,12 @@
             const suffix = pricing === 'hours'
               ? ' : Testing All Nodes - Paying Per Hour'
               : ' : Testing All Nodes - Paying Per GB';
+            const _sdkActive = state.activeSDK || 'js';
+            const _sdkKey = SDK_KEY_BY_ACTIVE[_sdkActive];
+            const _sdkVer = _sdkVersionCache?.sdks?.[_sdkKey]?.version;
+            const sdkSuffix = _sdkVer ? ` · ${SDK_BADGE_NAME[_sdkActive]} v${_sdkVer}` : '';
             label = 'P2P';
-            detail = 'All online nodes — direct peer-to-peer payments per session' + suffix;
+            detail = 'All online nodes — direct peer-to-peer payments per session' + suffix + sdkSuffix;
             color = 'var(--accent-bright, var(--accent))';
           }
           modeBadge.style.display = '';
@@ -1419,10 +1542,16 @@
         refEl.textContent = refUd > 0 ? (refUd / 1_000_000).toFixed(4) + ' P2P' : '--';
       }
 
-      // Avg baseline in header
-      const bl = state.baselineMbps;
+      // Avg baseline in header — true mean of baselineHistory (last-10
+      // direct-connection readings), falling back to the latest sample when
+      // history hasn't been populated yet.
+      const _bhist = Array.isArray(state.baselineHistory) ? state.baselineHistory : [];
+      const _bsamples = _bhist.map(h => Number(h?.mbps)).filter(n => Number.isFinite(n) && n > 0);
+      const bl = _bsamples.length > 0
+        ? _bsamples.reduce((a, b) => a + b, 0) / _bsamples.length
+        : (state.baselineMbps != null ? Number(state.baselineMbps) : null);
       const blEl = document.getElementById('headerBaseline');
-      if (bl != null) {
+      if (bl != null && Number.isFinite(bl)) {
         blEl.textContent = bl.toFixed(1) + ' Mbps';
         blEl.style.color = bl >= 30 ? '' : 'var(--accent-red)';
       } else {
@@ -1704,7 +1833,9 @@
         ? '<span title="ISP bottleneck" style="color:var(--yellow);cursor:help">⚡</span>'
         : '';
       const act = r.actualMbps != null
-        ? `<span style="display:inline-flex;align-items:baseline;justify-content:flex-end;gap:4px"><span>${r.actualMbps.toFixed(2)} Mbps</span><span style="display:inline-block;width:14px;text-align:left">${bottleneckIcon}</span></span>`
+        ? (bottleneckIcon
+            ? `<span style="display:inline-flex;align-items:baseline;justify-content:flex-end;gap:4px">${bottleneckIcon}<span>${r.actualMbps.toFixed(2)} Mbps</span></span>`
+            : `${r.actualMbps.toFixed(2)} Mbps`)
         : '--';
       const blAt = r.baselineAtTest != null ? r.baselineAtTest.toFixed(2) + ' Mbps' : '--';
 
@@ -3605,7 +3736,179 @@ Record (28 bytes × count)
       return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss} UTC`;
     }
 
-    // ─── Per-row copy: fetch latest failure for a node and copy as formatted text ──
+    // ─── Failure-report builder (shared by row-copy + popup "Copy Full Report") ──
+    //
+    // Diagnosis hints: conservative phrasing — "usually means X", never "is X".
+    // Maps (error_code, key diag fields) → { rootCause, fix }. If nothing
+    // matches we fall back to the raw stage/code.
+    const FAILURE_HINTS = [
+      { match: er => /clockdrift|clock_drift|CLOCK_DRIFT/i.test(er.error_code || '') || (er.diag && er.diag.clockDriftWarning),
+        rootCause: 'Your node\'s system clock is significantly out of sync with NTP.',
+        fix: 'Enable NTP sync on the node host (timedatectl set-ntp true on Linux). Sentinel handshake signatures are time-bound — drift over ~30 s breaks them.' },
+      { match: er => /HANDSHAKE_TIMEOUT|handshake.*timeout/i.test((er.error_code || '') + ' ' + (er.error_message || '')),
+        rootCause: 'The tester reached your node\'s API but the WireGuard/V2Ray handshake response never arrived.',
+        fix: 'Check that the listening UDP/TCP port on your firewall matches what the chain advertises, and that the node process is actually serving (not just up).' },
+      { match: er => /PORT_UNREACHABLE|connection refused|ECONNREFUSED/i.test((er.error_code || '') + ' ' + (er.error_message || '')),
+        rootCause: 'The advertised tunnel port is not accepting connections.',
+        fix: 'Verify the port published in your sentinelnode config matches what your firewall/NAT forwards. If your VPS provider blocks UDP, switch to V2Ray TCP transport.' },
+      { match: er => er.diag && er.diag.statusPortFallback,
+        rootCause: 'Your node advertises one port but is actually listening on another.',
+        fix: 'The chain advertisement and the running config disagree. Re-register the node with the correct port or update node.toml listen_on, then restart the node service.' },
+      { match: er => er.diag && er.diag.googleAccessible === false,
+        rootCause: 'Tunnel established but no traffic exits — your node\'s outbound internet appears blocked.',
+        fix: 'Check IP forwarding (sysctl net.ipv4.ip_forward=1), NAT/MASQUERADE rules on your iptables, and that the host can itself curl https://google.com.' },
+      { match: er => /SLA|below.*threshold/i.test((er.error_code || '') + ' ' + (er.error_message || '')),
+        rootCause: 'Tunnel works but speed is below the dynamic threshold (50% of tester baseline).',
+        fix: 'Either upgrade your upstream bandwidth or reduce your advertised Mbps to set realistic expectations. The tester compares measured Mbps against advertised, not against a fixed bar.' },
+      { match: er => er.stage === 'wallet' || /insufficient.*funds|insufficient.*fee/i.test(er.error_message || ''),
+        rootCause: 'Tester wallet ran out of P2P mid-test — not a node fault.',
+        fix: 'Top up the tester wallet and re-run. This is a tester-side issue, not your node.' },
+      { match: er => /NO_PEERS|no peers/i.test((er.error_code || '') + ' ' + (er.error_message || '')),
+        rootCause: 'WireGuard tunnel up but no peer handshake completed.',
+        fix: 'Check that your wg0 interface allowed-IPs and the client public key returned by your node API are consistent. Restart the node service and watch wg show for peer handshakes.' },
+    ];
+
+    function diagnoseFailure(er) {
+      // Surface diag fields onto er for the matcher predicates.
+      let diag = {};
+      try { const raw = er.raw_json ? JSON.parse(er.raw_json) : {}; diag = raw.diag || {}; } catch {}
+      er.diag = diag;
+      for (const h of FAILURE_HINTS) {
+        try { if (h.match(er)) return { rootCause: h.rootCause, fix: h.fix }; }
+        catch {}
+      }
+      return null;
+    }
+
+    // Format a timestamp as "<UTC> (<local TZ>)" for operator clarity.
+    function _fmtCapturedFull(ts) {
+      if (ts == null || ts === '') return '—';
+      const n = Number(ts);
+      const ms = Number.isFinite(n) ? (n < 1e12 ? n * 1000 : n) : new Date(ts).getTime();
+      if (!Number.isFinite(ms)) return String(ts);
+      const d = new Date(ms);
+      const utc = `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')} ${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}:${String(d.getUTCSeconds()).padStart(2,'0')} UTC`;
+      const local = d.toLocaleString(undefined, { timeZoneName: 'short' });
+      return `${utc} · ${local}`;
+    }
+
+    // Build the canonical failure report from N error rows (most recent first).
+    // Used by both the row-copy ⎘ button and the popup's Copy Full Report.
+    function buildFailureReport({ moniker, addr, errors }) {
+      const out = [];
+      const er0 = errors[0];
+      let raw0 = {}; try { raw0 = er0.raw_json ? JSON.parse(er0.raw_json) : {}; } catch {}
+      const svcType0 = (raw0.type != null)
+        ? (String(raw0.type).toLowerCase().includes('wire') || raw0.type === 1 ? 'WireGuard' : 'V2Ray')
+        : (er0.service_type === 1 ? 'WireGuard' : er0.service_type === 2 ? 'V2Ray' : '—');
+
+      out.push('Sentinel Node Tester — Failure Report');
+      out.push('═════════════════════════════════════');
+      out.push('');
+      out.push('[Node]');
+      out.push('  Moniker:   ' + (moniker || '—'));
+      out.push('  Address:   ' + addr);
+      out.push('  Country:   ' + ([er0.country, er0.city].filter(Boolean).join(', ') || '—'));
+      out.push('  Service:   ' + svcType0);
+      out.push('  Captured:  ' + _fmtCapturedFull(er0.captured_at));
+      if (er0.run_id) out.push('  Run ID:    ' + er0.run_id);
+      out.push('  Attempts:  ' + errors.length + ' in this report');
+      out.push('');
+
+      const diagnosis = diagnoseFailure(er0);
+      if (diagnosis) {
+        out.push('[Diagnosis — automated, verify before acting]');
+        out.push('  ⚠ ' + diagnosis.rootCause);
+        out.push('  → ' + diagnosis.fix);
+        out.push('');
+      }
+
+      errors.forEach((er, i) => {
+        let raw = {}; try { raw = er.raw_json ? JSON.parse(er.raw_json) : {}; } catch {}
+        const diag = raw.diag || {};
+        const label = errors.length > 1 ? `[Attempt ${i + 1} of ${errors.length}]` : '[Evidence]';
+        out.push(label);
+        out.push('  Stage:           ' + (er.stage || '—'));
+        out.push('  Error Code:      ' + (er.error_code || '—'));
+        out.push('  Message:         ' + (er.error_message || '—'));
+        out.push('  Captured:        ' + _fmtCapturedFull(er.captured_at));
+        if (er.advertised_mbps != null) out.push('  Advertised:      ' + er.advertised_mbps + ' Mbps');
+        if (er.actual_mbps != null && er.actual_mbps > 0) out.push('  Measured:        ' + er.actual_mbps + ' Mbps');
+        if (raw.dynamicThreshold != null) out.push('  Threshold (50%): ' + raw.dynamicThreshold + ' Mbps');
+        if (raw.baselineAtTest != null) out.push('  Tester Baseline: ' + raw.baselineAtTest + ' Mbps');
+        if (raw.peers != null || raw.maxPeers != null) out.push('  Peers:           ' + (raw.peers ?? '—') + ' / ' + (raw.maxPeers ?? '—'));
+        if (er.latency_ms != null) out.push('  Latency:         ' + er.latency_ms + ' ms');
+        if (raw.timedOut != null) out.push('  Timed Out:       ' + (raw.timedOut ? 'yes' : 'no'));
+        if (raw.slaApplicable != null) out.push('  SLA Applicable:  ' + (raw.slaApplicable ? 'yes' : 'no'));
+        if (diag.googleAccessible != null) out.push('  Google Reachable (via tunnel): ' + (diag.googleAccessible ? 'yes' : 'no') + (diag.googleLatencyMs ? ' (' + diag.googleLatencyMs + ' ms)' : '') + (diag.googleError ? ' — ' + diag.googleError : ''));
+        if (diag.clockDriftSec != null) out.push('  Clock Drift:     ' + diag.clockDriftSec + ' s' + (diag.clockDriftWarning ? ' ⚠ exceeds tolerance' : ''));
+        out.push('');
+
+        // Protocol-specific block — only render the half that applies.
+        const wg = [];
+        if (diag.wgServerEndpoint) wg.push('  WG Server Endpoint: ' + diag.wgServerEndpoint);
+        if (diag.wgAssignedAddrs) wg.push('  WG Assigned Addrs:  ' + (Array.isArray(diag.wgAssignedAddrs) ? diag.wgAssignedAddrs.join(', ') : diag.wgAssignedAddrs));
+        if (diag.wgSplitIPs) wg.push('  WG Split IPs:       ' + (Array.isArray(diag.wgSplitIPs) ? diag.wgSplitIPs.join(', ') : diag.wgSplitIPs));
+        if (wg.length) { out.push('  [WireGuard Details]'); wg.forEach(l => out.push(l)); out.push(''); }
+
+        const v2 = [];
+        if (diag.v2rayProto) v2.push('  V2Ray Protocol:    ' + diag.v2rayProto);
+        if (diag.v2rayTransport) v2.push('  V2Ray Transport:   ' + diag.v2rayTransport);
+        if (diag.v2raySecurity) v2.push('  V2Ray Security:    ' + diag.v2raySecurity);
+        if (diag.v2rayPort != null) v2.push('  V2Ray Port:        ' + diag.v2rayPort);
+        if (diag.statusPortFallback) v2.push('  ⚠ Status-Port Fallback used (advertised port unusable)');
+        if (diag.discoveredPorts && diag.discoveredPorts.length) v2.push('  Discovered Ports:  ' + diag.discoveredPorts.join(', '));
+        if (diag.discoveredPortUsed) v2.push('  Discovered Used:   ' + diag.discoveredPortUsed);
+        if (v2.length) { out.push('  [V2Ray Details]'); v2.forEach(l => out.push(l)); out.push(''); }
+
+        const sess = [];
+        if (diag.sessionId) sess.push('  Session ID: ' + diag.sessionId);
+        if (diag.serverHost) sess.push('  Server Host: ' + diag.serverHost);
+        if (diag.remoteUrl) sess.push('  Remote URL: ' + diag.remoteUrl);
+        if (diag.speedtestMethod) sess.push('  Speedtest Method: ' + diag.speedtestMethod);
+        if (sess.length) { out.push('  [Session]'); sess.forEach(l => out.push(l)); out.push(''); }
+
+        // Sidecar dumps — preserve verbatim, indent 4 spaces so blocks stay readable.
+        const sideCar = [];
+        if (diag.v2rayStdout) sideCar.push(['V2Ray stdout', diag.v2rayStdout]);
+        if (diag.v2rayStderr) sideCar.push(['V2Ray stderr', diag.v2rayStderr]);
+        if (diag.v2rayConfig) sideCar.push(['V2Ray config (sanitized)', typeof diag.v2rayConfig === 'string' ? diag.v2rayConfig : JSON.stringify(diag.v2rayConfig, null, 2)]);
+        if (diag.hsConfig) sideCar.push(['Handshake config (truncated)', diag.hsConfig]);
+        sideCar.forEach(([title, content]) => {
+          out.push('  [' + title + ']');
+          String(content).split('\n').forEach(l => out.push('    ' + l));
+          out.push('');
+        });
+
+        if (er.log_snippet) {
+          out.push('  [Tester Log Snippet]');
+          String(er.log_snippet).split('\n').forEach(l => out.push('    ' + l));
+          out.push('');
+        }
+      });
+
+      out.push('[Tester Environment]');
+      out.push('  SDK:    ' + (er0.sdk || raw0.sdk || '—'));
+      out.push('  OS:     ' + (er0.tester_os || raw0.os || '—'));
+      out.push('');
+      out.push('──');
+      out.push('Generated ' + _fmtCapturedFull(Date.now() / 1000) + ' by Sentinel Node Tester');
+      return out.join('\n');
+    }
+
+    async function _writeClipboard(txt) {
+      try { await navigator.clipboard.writeText(txt); return true; }
+      catch {
+        const ta = document.createElement('textarea');
+        ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+      }
+    }
+
+    // ─── Per-row copy: fetch up to 3 attempts, copy a full failure report. ──
     async function copyRowFailure(ev) {
       ev.stopPropagation();
       const btn = ev.currentTarget;
@@ -3616,7 +3919,7 @@ Record (28 bytes × count)
       btn.innerHTML = '…';
       btn.disabled = true;
       try {
-        const res = await fetch('/api/public/node/' + encodeURIComponent(addr) + '/errors?limit=1', {
+        const res = await fetch('/api/public/node/' + encodeURIComponent(addr) + '/errors?limit=3', {
           credentials: 'same-origin'
         });
         if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -3628,36 +3931,10 @@ Record (28 bytes × count)
           btn.disabled = false;
           return;
         }
-        const er = errs[0];
-        const lines = [
-          'Sentinel Node Tester — Failure Log',
-          '──────────────────────────────────',
-          'Node:       ' + (moniker || '—'),
-          'Address:    ' + addr,
-          'Stage:      ' + (er.stage || '—'),
-          'Error Code: ' + (er.error_code || '—'),
-          'Message:    ' + (er.error_message || '—'),
-          'Captured:   ' + _fmtCapturedUtc(er.captured_at),
-          '',
-        ];
-        if (er.log_snippet) {
-          lines.push('Log Snippet:');
-          lines.push(er.log_snippet);
-        }
-        const txt = lines.join('\n');
-        try {
-          await navigator.clipboard.writeText(txt);
-          btn.innerHTML = '✓';
-          nsShowToast('Failure log copied');
-        } catch (_) {
-          const ta = document.createElement('textarea');
-          ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
-          document.body.appendChild(ta); ta.select();
-          document.execCommand('copy');
-          document.body.removeChild(ta);
-          btn.innerHTML = '✓';
-          nsShowToast('Failure log copied');
-        }
+        const txt = buildFailureReport({ moniker, addr, errors: errs });
+        const ok = await _writeClipboard(txt);
+        btn.innerHTML = ok ? '✓' : '!';
+        nsShowToast(ok ? 'Failure report copied (' + errs.length + ' attempt' + (errs.length === 1 ? '' : 's') + ')' : 'Copy failed');
       } catch (err) {
         btn.innerHTML = '!';
         nsShowToast('Copy failed: ' + (err.message || 'unknown'));
@@ -3693,7 +3970,7 @@ Record (28 bytes × count)
       document.body.appendChild(overlay);
 
       try {
-        const res = await fetch('/api/public/node/' + encodeURIComponent(addr) + '/errors?limit=1', {
+        const res = await fetch('/api/public/node/' + encodeURIComponent(addr) + '/errors?limit=3', {
           credentials: 'same-origin',
         });
         if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -3806,65 +4083,11 @@ Record (28 bytes × count)
         const _copyBtn = document.getElementById('errorPopupCopyBtn');
         if (_copyBtn) {
           _copyBtn.onclick = async () => {
-            const lines = [
-              'Sentinel Node Tester — Failure Log',
-              '══════════════════════════════════',
-              '[Summary]',
-              'Node:        ' + (moniker || '—'),
-              'Address:     ' + addr,
-              'Country:     ' + (er.country || '—'),
-              'City:        ' + (er.city || '—'),
-              'Service:     ' + svcType,
-              'Stage:       ' + (er.stage || '—'),
-              'Error Code:  ' + (er.error_code || '—'),
-              'Message:     ' + (er.error_message || '—'),
-              'Captured:    ' + captured,
-              '',
-              '[Network State at Fail Time]',
-              'Peers:              ' + (raw.peers != null ? raw.peers : '—'),
-              'Max Peers:          ' + (raw.maxPeers != null ? raw.maxPeers : '—'),
-              'Advertised Mbps:    ' + (er.advertised_mbps != null ? er.advertised_mbps + ' Mbps' : '—'),
-              'Tester Baseline:    ' + (raw.baselineAtTest != null ? raw.baselineAtTest + ' Mbps' : '—'),
-              'Dynamic Threshold:  ' + (raw.dynamicThreshold != null ? raw.dynamicThreshold + ' Mbps' : '—'),
-              'SLA Applicable:     ' + (raw.slaApplicable === true ? 'yes' : raw.slaApplicable === false ? 'no' : '—'),
-              'Timed Out:          ' + (raw.timedOut === true ? 'yes' : raw.timedOut === false ? 'no' : '—'),
-              'Latency:            ' + (er.latency_ms != null ? er.latency_ms + ' ms' : '—'),
-              '',
-              '[Tester Environment]',
-              'SDK:    ' + (er.sdk || raw.sdk || '—'),
-              'OS:     ' + (er.tester_os || raw.os || '—'),
-              'Run ID: ' + (er.run_id || '—'),
-              '',
-            ];
-            const diagKeys = Object.keys(diag || {});
-            if (diagKeys.length) {
-              lines.push('[Diagnostics]');
-              for (const k of diagKeys) {
-                const v = diag[k];
-                if (v == null) continue;
-                const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
-                lines.push(k + ':'.padEnd(Math.max(2, 22 - k.length), ' ') + ' ' + s);
-              }
-              lines.push('');
-            }
-            if (er.log_snippet) { lines.push('[Tester Log Snippet]'); lines.push(er.log_snippet); }
-            const txt = lines.join('\n');
+            const txt = buildFailureReport({ moniker, addr, errors: errs });
             const original = _copyBtn.innerHTML;
             _copyBtn.disabled = true;
-            try {
-              try {
-                await navigator.clipboard.writeText(txt);
-              } catch (_) {
-                const ta = document.createElement('textarea');
-                ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
-                document.body.appendChild(ta); ta.select();
-                document.execCommand('copy');
-                document.body.removeChild(ta);
-              }
-              _copyBtn.innerHTML = '✓ Copied';
-            } catch {
-              _copyBtn.innerHTML = '! Failed';
-            }
+            const ok = await _writeClipboard(txt);
+            _copyBtn.innerHTML = ok ? '✓ Copied' : '! Failed';
             setTimeout(() => { _copyBtn.innerHTML = original; _copyBtn.disabled = false; }, 1500);
           };
         }

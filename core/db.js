@@ -718,6 +718,48 @@ export function getNetworkStats(which) {
   return { totalNodes, passingPct, medianMbps, lastRunAt };
 }
 
+/**
+ * Per-run version of getNetworkStats — scoped to a single run_id so the live
+ * dashboard tiles show the *current* sweep's numbers instead of lifetime
+ * averages across every node ever tested.
+ *
+ * @param {number} runId
+ * @returns {{ totalNodes: number, passingPct: number, medianMbps: number|null, processed: number }}
+ */
+export function getRunStats(runId, which) {
+  if (!runId || Number.isNaN(Number(runId))) {
+    return { totalNodes: 0, passingPct: 0, medianMbps: null, processed: 0 };
+  }
+  const db = getDb(which);
+  // No `skipped` column exists on `results` — explicit skips are encoded via
+  // error_code (TEST_RUN_SKIP, OFFLINE_SKIP, NOT_IN_PLAN, etc.). Filter on
+  // error_code so this query matches the actual schema.
+  const rows = db.prepare(`
+    SELECT actual_mbps, pass, error_code
+    FROM results
+    WHERE run_id = @runId
+  `).all({ runId });
+
+  const SKIP_CODES = new Set(['TEST_RUN_SKIP', 'OFFLINE_SKIP', 'NOT_IN_PLAN']);
+  const processed = rows.filter(r => !SKIP_CODES.has(r.error_code));
+  const passing = processed.filter(r => r.pass === 1).length;
+  const totalNodes = processed.length;
+  const passingPct = totalNodes > 0 ? Math.round((passing / totalNodes) * 100) : 0;
+
+  const speeds = processed
+    .map(r => r.actual_mbps)
+    .filter(v => v != null && v > 0)
+    .sort((a, b) => a - b);
+  let medianMbps = null;
+  if (speeds.length > 0) {
+    const mid = Math.floor(speeds.length / 2);
+    medianMbps = speeds.length % 2 === 0
+      ? parseFloat(((speeds[mid - 1] + speeds[mid]) / 2).toFixed(2))
+      : parseFloat(speeds[mid].toFixed(2));
+  }
+  return { totalNodes, passingPct, medianMbps, processed: totalNodes };
+}
+
 // ─── Error Log Mutations ──────────────────────────────────────────────────────
 
 /**
@@ -729,7 +771,7 @@ export function getNetworkStats(which) {
  * @param {string}  opts.stage       - 'handshake'|'session'|'speedtest'|'wallet'|'rpc'|'other'
  * @param {string}  [opts.error_code]
  * @param {string}  [opts.error_message]
- * @param {string}  [opts.log_snippet] - up to 8 KB of log context
+ * @param {string}  [opts.log_snippet] - up to 512 KB of log context
  * @returns {number} inserted id
  */
 export function insertErrorLog({
@@ -740,8 +782,10 @@ export function insertErrorLog({
   log_snippet = null,
 }, which) {
   const db = getDb(which);
-  // Truncate log snippet to 8 KB
-  const snippet = log_snippet ? log_snippet.slice(-8192) : null;
+  // Persist the full per-node tester log (capped at 512 KB to bound row
+  // size). Pipeline already trims to ~512 KB from the tail; this is the
+  // floor cap so a misbehaving caller can't blow the row.
+  const snippet = log_snippet ? log_snippet.slice(-524288) : null;
   const info = db.prepare(`
     INSERT INTO error_logs (result_id, stage, error_code, error_message, log_snippet, captured_at)
     VALUES (@result_id, @stage, @error_code, @error_message, @log_snippet, @captured_at)

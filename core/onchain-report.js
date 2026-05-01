@@ -78,7 +78,9 @@ function fmtRegion(region) {
  */
 export function resultToRecord(result) {
   const addr = result?.address;
-  if (typeof addr !== 'string' || !addr.startsWith('sent1') || addr.length < 30) return null;
+  // Sentinel nodes use the `sentnode1…` bech32 HRP (NOT `sent1…` like wallets).
+  // The early prefix check used `sent1` which silently filtered every record.
+  if (typeof addr !== 'string' || !addr.startsWith('sentnode1') || addr.length < 30) return null;
   const ok = result.actualMbps != null;
   return {
     address: addr,
