@@ -24,7 +24,7 @@ import {
   insertResult, insertErrorLog,
   searchNodes, getNodeDetail, getNodeErrors, getCountryList,
   getActiveRun, getLastCompletedRun, getBandwidthHistory,
-  searchErrors, getNetworkStats,
+  searchErrors, getNetworkStats, getRunStats,
   listBatches, getBatchResults, getActiveBatch, getLastBatch,
   insertBatch, updateBatchOnFinish, insertBatchResult,
   reopenBatch, getBatchById, getBatchWithNodes,
@@ -288,6 +288,7 @@ function withBatchTracking(baseBroadcast, mode, opts = {}) {
   let batchId = opts.existingBatchId ? Number(opts.existingBatchId) : 0;
   let opened = batchId > 0;
   let closed = false;
+  let startEmitted = false;
   if (opened) {
     state.activeBatchId = batchId;
     try { reopenBatch(batchId, 'real'); } catch (e) { console.error('[withBatchTracking reopen]', e.message); }
@@ -320,16 +321,58 @@ function withBatchTracking(baseBroadcast, mode, opts = {}) {
           tested_at:     Date.now(),
           baseline_mbps: r.baselineAtTest ?? r.baselineMbps ?? null,
         }, 'real');
+        // Emit batch:start once + batch:node:result per row so /live's Current
+        // Batch panel ticks for direct-pipeline runs (sub-plan, p2p, retest)
+        // exactly like continuous.js does. Without this, /live falls back on
+        // resultsArr.length which can desync if any 'result' SSE event is
+        // dropped (broadcastLive flip race, reconnect gap), leaving the
+        // counter stuck at the count from the last full REST hydrate.
+        if (!startEmitted) {
+          baseBroadcast('batch:start', {
+            batchId,
+            iteration:    null,
+            startedAt:    new Date().toISOString(),
+            snapshotSize: state.totalNodes || 0,
+            mode,
+          });
+          startEmitted = true;
+        }
+        baseBroadcast('batch:node:result', {
+          batchId,
+          address:      r.address || '',
+          moniker:      r.moniker || null,
+          country:      r.country || null,
+          countryCode:  r.countryCode || r.country_code || null,
+          city:         r.city || null,
+          serviceType:  r.type || null,
+          actualMbps:   r.actualMbps ?? null,
+          baselineMbps: r.baselineAtTest ?? r.baselineMbps ?? null,
+          peers:        r.peers ?? null,
+          maxPeers:     r.maxPeers ?? null,
+          error:        r.error ? String(r.error).slice(0, 200) : null,
+          errorCode:    r.errorCode || null,
+          testedAt:     Date.now(),
+        });
       }
       if (opened && !closed && type === 'state' && data && data.state) {
         const status = data.state.status;
         if (status === 'done' || status === 'error' || status === 'stopped') {
+          const passed = data.state.testedNodes || 0;
+          const failed = data.state.failedNodes || 0;
           updateBatchOnFinish(batchId, {
             finished_at: Date.now(),
-            passed: data.state.testedNodes || 0,
-            failed: data.state.failedNodes || 0,
+            passed,
+            failed,
           }, 'real');
           closed = true;
+          if (startEmitted) {
+            baseBroadcast('batch:end', {
+              batchId,
+              passed,
+              failed,
+              durationMs: null,
+            });
+          }
           // Keep state.activeBatchId so /api/resume can find this batch and
           // reopen it. /api/start clears it explicitly when a new test begins.
         }
@@ -677,10 +720,10 @@ app.get('/live', attachAdminFlag, (req, res) => {
   res.sendFile(path.join(__dirname, 'live.html'));
 });
 
-// Public about page — static, no action buttons
-app.get('/about', attachAdminFlag, (req, res) => {
-  setPublicCsp(res);
-  res.sendFile(path.join(__dirname, 'about.html'));
+// /about is now a modal on /live (and /). Redirect direct hits to /live so
+// users land on the canonical page where the About button opens the modal.
+app.get('/about', (req, res) => {
+  res.redirect(302, '/live');
 });
 
 // ─── Public API: read-only, no wallet or chain writes ────────────────────────
@@ -893,17 +936,65 @@ app.get('/api/public/runs', attachAdminFlag, rlPublicRead, (req, res) => {
 
 app.get('/api/public/stats', attachAdminFlag, rlPublicRead, (req, res) => {
   try {
-    // Use DB aggregate instead of iterating the in-memory results array (F-13).
-    const { totalNodes, passingPct, medianMbps, lastRunAt } = getNetworkStats();
+    // Per-run scoping: live page wants the *current* sweep's numbers, not
+    // lifetime DB averages. Active > last completed > lifetime fallback for
+    // totalNodes / passingPct / lastRunAt. medianMbps is intentionally NOT
+    // backfilled from lifetime — a stale historical median painted on a fresh
+    // server boot makes the /live "Network Median" tile look hardcoded.
+    const lifetime = getNetworkStats();
+    const active = getActiveRun();
+    const last = active ? null : getLastCompletedRun();
+    const scopedRunId = active?.id || last?.id || null;
+    const scoped = scopedRunId ? getRunStats(scopedRunId) : null;
+
+    const useScoped = scoped && scoped.processed > 0;
+    // medianMbps is intentionally gated on an *active* run. A "last completed"
+    // median is stale by definition — painting it on /live makes the tile look
+    // hardcoded between sweeps. When idle, the tile collapses to "—".
+    const medianMbps = active && useScoped && scoped.medianMbps != null && scoped.medianMbps > 0
+      ? scoped.medianMbps
+      : null;
     res.json({
-      totalNodes,
-      passingPct,
+      totalNodes: useScoped ? scoped.totalNodes : lifetime.totalNodes,
+      passingPct: useScoped ? scoped.passingPct : lifetime.passingPct,
       medianMbps,
-      lastRunAt,
+      lastRunAt: lifetime.lastRunAt,
+      runId: scopedRunId,
+      runScope: useScoped ? (active ? 'active' : 'last') : 'lifetime',
       status: continuous.status().running ? 'running' : 'idle',
     });
   } catch (err) {
     console.error('[api/public/stats]', err);
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/**
+ * GET /api/public/sdk-info
+ * Read-only: which SDK the tester is currently using + its installed version.
+ * Used by /live to render the SDK badge next to the run-mode label so the
+ * public can see exactly which client implementation produced the numbers.
+ * Maps state.activeSDK ('js' | 'tkd' | 'csharp') → tracked SDK key + display
+ * name. C# isn't tracked by sdk-verify (no npm pkg), so version is null.
+ */
+app.get('/api/public/sdk-info', attachAdminFlag, rlPublicRead, async (req, res) => {
+  try {
+    const active = state.activeSDK || 'js';
+    const ACTIVE_TO_TRACKED = { js: 'blue-js', tkd: 'tkd-js' };
+    const DISPLAY_NAME = { js: 'Blue JS', tkd: 'TKD JS', csharp: 'Blue C#' };
+    const trackedKey = ACTIVE_TO_TRACKED[active] || null;
+    let version = null;
+    if (trackedKey) {
+      const versions = getInstalledVersions(__dirname);
+      version = versions[trackedKey]?.version || null;
+    }
+    res.json({
+      active,
+      name: DISPLAY_NAME[active] || active,
+      version,
+    });
+  } catch (err) {
+    console.error('[api/public/sdk-info]', err);
     res.status(500).json({ error: 'Internal error' });
   }
 });
@@ -1050,6 +1141,33 @@ app.get('/api/sdk-versions', adminOnly, async (req, res) => {
 let _sdkVerifyCache = { ts: 0, data: null };
 const SDK_VERIFY_TTL_MS = 5 * 60 * 1000;
 
+/** Cached npm-latest lookup. 1h TTL — npm-registry rate-limits aggressive polling. */
+let _sdkLatestCache = { ts: 0, data: null };
+const SDK_LATEST_TTL_MS = 60 * 60 * 1000;
+const NPM_PKGS = { 'blue-js': 'blue-js-sdk', 'tkd-js': '@sentinel-official/sentinel-js-sdk' };
+
+app.get('/api/sdk-latest', adminOnly, async (req, res) => {
+  const now = Date.now();
+  if (!req.query.refresh && _sdkLatestCache.data && (now - _sdkLatestCache.ts) < SDK_LATEST_TTL_MS) {
+    res.setHeader('x-cache', 'hit');
+    return res.json(_sdkLatestCache.data);
+  }
+  const out = {};
+  await Promise.all(Object.entries(NPM_PKGS).map(async ([key, pkg]) => {
+    try {
+      const r = await fetch(`https://registry.npmjs.org/${pkg.replace('/', '%2F')}/latest`, { signal: AbortSignal.timeout(8000) });
+      if (!r.ok) { out[key] = { pkg, latest: null, error: `npm ${r.status}` }; return; }
+      const d = await r.json();
+      out[key] = { pkg, latest: d.version || null };
+    } catch (err) {
+      out[key] = { pkg, latest: null, error: err.message };
+    }
+  }));
+  _sdkLatestCache = { ts: now, data: out };
+  res.setHeader('x-cache', 'miss');
+  res.json(out);
+});
+
 /** Verify every SDK matches its GitHub tag. Slow (~5s) — downloads tarballs. */
 app.get('/api/sdk-verify', adminOnly, async (req, res) => {
   const now = Date.now();
@@ -1152,6 +1270,10 @@ const PUBLIC_STATE_KEYS = [
   // Spend totals on /live derive from this; spentUdvpn itself is admin-only.
   'refundedUdvpn',
   'estimatedTotalCost',
+  // SDK key the tester is currently using ('js' | 'tkd' | 'csharp'). Surfaces
+  // on /live next to the run-mode label so viewers see which client produced
+  // the numbers. Display name + version are joined client-side via /api/public/sdk-info.
+  'activeSDK',
 ];
 function sanitizePublicState(s) {
   if (!s || typeof s !== 'object') return {};
@@ -1316,11 +1438,28 @@ app.get('/api/public/live-state', attachAdminFlag, rlPublicRead, (req, res) => {
   if (!showLive) {
     return res.json({ broadcastLive: false, state: {}, results: [] });
   }
+  // Surface the active batch id + snapshot size so /live's seed path can pin
+  // _cb.batchId before any SSE batch:start lands. Without this, the very
+  // first batch:start arriving after a refresh sees `_cb.batchId == null`
+  // with already-painted rows and treats them as stale → wipes the table
+  // mid-run for sub-plan / p2p / retest (continuous loop is unaffected because
+  // its batch ids are also surfaced via SSE init.batchId).
+  let activeBatchId = null;
+  let activeSnapshotSize = null;
+  try {
+    const ab = getActiveBatch();
+    if (ab) {
+      activeBatchId = ab.batch.id;
+      activeSnapshotSize = ab.batch.snapshot_size;
+    }
+  } catch (_) {}
   res.json({
     // Report effective-live so admin viewers get the live-mode UI on /live.
     broadcastLive: true,
     state: sanitizePublicState(state),
     results: getResults().map(sanitizePublicResult).filter(Boolean),
+    activeBatchId,
+    snapshotSize: activeSnapshotSize,
   });
 });
 
@@ -1330,6 +1469,12 @@ app.get('/api/public/live-state', attachAdminFlag, rlPublicRead, (req, res) => {
  */
 app.get('/api/public/test/status', attachAdminFlag, rlPublicRead, (req, res) => {
   const s = continuous.status();
+  // Only surface a baseline reading when a test is actively running. Restored
+  // snapshot values from a prior session would otherwise paint /live with a
+  // stale number on a cold server boot, making the tile look hardcoded.
+  const baselineMbps = s.running && state.baselineMbps != null
+    ? Number(state.baselineMbps)
+    : null;
   res.json({
     running:   s.running,
     iteration: s.iteration,
@@ -1338,6 +1483,7 @@ app.get('/api/public/test/status', attachAdminFlag, rlPublicRead, (req, res) => 
     uptime:    s.uptime,
     lastError: s.lastError ? String(s.lastError).slice(0, 200) : null,
     allowPublicStart: process.env.ALLOW_PUBLIC_TEST === 'true',
+    baselineMbps,
   });
 });
 

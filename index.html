@@ -913,10 +913,14 @@
 
       if (state.estimatedTotalCost) document.getElementById('estCost').textContent = state.estimatedTotalCost;
 
-      // Avg baseline in header
-      const bl = state.baselineMbps;
+      // Avg baseline in header — true mean of baselineHistory (last-10 readings)
+      const _bhist = Array.isArray(state.baselineHistory) ? state.baselineHistory : [];
+      const _bsamples = _bhist.map(h => Number(h?.mbps)).filter(n => Number.isFinite(n) && n > 0);
+      const bl = _bsamples.length > 0
+        ? _bsamples.reduce((a, b) => a + b, 0) / _bsamples.length
+        : (state.baselineMbps != null ? Number(state.baselineMbps) : null);
       const blEl = document.getElementById('headerBaseline');
-      if (bl != null) {
+      if (bl != null && Number.isFinite(bl)) {
         blEl.textContent = bl.toFixed(1) + ' Mbps';
         blEl.style.color = bl >= 30 ? '' : 'var(--accent-red)';
       } else {

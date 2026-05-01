@@ -381,6 +381,11 @@ export async function tkdQueryNodes() {
         base_value: p.baseValue || '0',
         quote_value: p.quoteValue || p.amount || '0',
       })),
+      hourly_prices: (n.hourlyPrices || []).map(p => ({
+        denom: p.denom,
+        base_value: p.baseValue || '0',
+        quote_value: p.quoteValue || p.amount || '0',
+      })),
       status: n.status ?? 1,
       planIds: [],
       _source: 'tkd-rpc',

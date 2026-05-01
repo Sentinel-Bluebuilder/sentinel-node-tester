@@ -274,6 +274,7 @@ export async function getAllNodes(broadcast) {
         remoteUrl: addrs[0] || '',
         remoteAddrs: addrs,
         gigabyte_prices: n.gigabyte_prices || [],
+        hourly_prices: n.hourly_prices || [],
         status: 1,
         planIds: [],
       };
@@ -291,6 +292,7 @@ export async function getAllNodes(broadcast) {
       remoteUrl: n.remote_url || '',
       remoteAddrs: n.remoteAddrs || (n.remote_addrs || []).map(a => a.startsWith('http') ? a : `https://${a}`),
       gigabyte_prices: n.gigabyte_prices || [],
+      hourly_prices: n.hourly_prices || [],
       status: 1,
       planIds: [],
     }));

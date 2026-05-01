@@ -218,6 +218,113 @@ async function runHttpTests(port) {
   } catch (err) {
     assert(false, `GET /health → error: ${err.message}`);
   }
+
+  // ─── Public→Admin attack-vector hardening ─────────────────────────────────
+  // Below probes every realistic way a public visitor or hostile site could
+  // try to escalate to admin actions. Every one of these MUST fail.
+
+  // CSRF: valid Bearer but missing X-Admin-Request header → 403
+  // Models a same-site form POST or a fetch() that managed to reuse a saved
+  // Bearer in localStorage but didn't set the custom header. Without the
+  // double-submit, browsers will let cross-origin POSTs send Authorization.
+  try {
+    const r = await httpPost(`${base}/api/start`, {}, { 'Authorization': 'Bearer testtoken' });
+    assert(r.status === 403, 'POST /api/start with Bearer but no X-Admin-Request → 403 (CSRF gate)');
+  } catch (err) {
+    assert(false, `CSRF gate test → error: ${err.message}`);
+  }
+
+  // CSRF: valid Bearer + X-Admin-Request → reaches handler (not 403)
+  // Lower bar — just confirms the gate doesn't false-positive on legit requests.
+  try {
+    const r = await httpPost(`${base}/api/start`, { testRun: true }, {
+      'Authorization': 'Bearer testtoken',
+      'X-Admin-Request': '1',
+    });
+    assert(r.status !== 403, `POST /api/start with Bearer + X-Admin-Request → not 403 (got ${r.status})`);
+  } catch (err) {
+    assert(false, `CSRF allow test → error: ${err.message}`);
+  }
+
+  // Session forgery: random unsigned cookie value → 401
+  // The cookie is signed (cookieParser secret); forged values fail HMAC verify
+  // before adminOnly even sees them, so signedCookies.admin_session is null.
+  try {
+    const r = await httpGet(`${base}/admin`, { 'Cookie': 'admin_session=forgedvalue' });
+    assert(r.status === 401, 'GET /admin with forged unsigned cookie → 401');
+  } catch (err) {
+    assert(false, `Forged cookie test → error: ${err.message}`);
+  }
+
+  // SDK switch (state-changing) is admin-only — a public visitor must not be
+  // able to swap the SDK mid-loop and poison results.
+  try {
+    const r = await httpPost(`${base}/api/sdk`, { sdk: 'tkd' });
+    assert(r.status === 401, 'POST /api/sdk without token → 401 (cannot poison SDK from public)');
+  } catch (err) {
+    assert(false, `SDK switch test → error: ${err.message}`);
+  }
+
+  // Broadcast toggle is admin-only — a public visitor must not be able to
+  // turn live SSE on/off (DoS or info-leak vector).
+  try {
+    const r = await httpPost(`${base}/api/broadcast`);
+    assert(r.status === 401, 'POST /api/broadcast without token → 401');
+  } catch (err) {
+    assert(false, `Broadcast toggle test → error: ${err.message}`);
+  }
+
+  // Settings write is admin-only.
+  try {
+    const r = await httpPost(`${base}/api/settings`, { onchainEnabled: true });
+    assert(r.status === 401, 'POST /api/settings without token → 401');
+  } catch (err) {
+    assert(false, `Settings write test → error: ${err.message}`);
+  }
+
+  // Sub-plan test trigger is admin-only — must not be triggerable from
+  // public (would broadcast TXs from operator wallet).
+  try {
+    const r = await httpPost(`${base}/api/test-sub-plan`, { planId: 1, subscriptionId: 1, granter: 'sent1xxx' });
+    assert(r.status === 401, 'POST /api/test-sub-plan without token → 401');
+  } catch (err) {
+    assert(false, `Sub-plan test trigger → error: ${err.message}`);
+  }
+
+  // /api/sdk-versions etc. are admin-only (could leak repo path / fs info).
+  try {
+    const r = await httpGet(`${base}/api/sdk-versions`);
+    assert(r.status === 401, 'GET /api/sdk-versions without token → 401 (no fs/version disclosure to public)');
+  } catch (err) {
+    assert(false, `SDK versions admin gate → error: ${err.message}`);
+  }
+
+  // Public sdk-info IS open (intended) but must not leak repository paths or
+  // anything beyond { active, name, version }.
+  try {
+    const r = await httpGet(`${base}/api/public/sdk-info`);
+    assert(r.status === 200, 'GET /api/public/sdk-info → 200 (intentionally open)');
+    if (r.status === 200) {
+      const data = JSON.parse(r.body);
+      const allowedKeys = new Set(['active', 'name', 'version']);
+      const extra = Object.keys(data).filter(k => !allowedKeys.has(k));
+      assert(extra.length === 0, `GET /api/public/sdk-info returns only {active,name,version} (got extras: ${extra.join(',') || 'none'})`);
+    }
+  } catch (err) {
+    assert(false, `Public sdk-info shape → error: ${err.message}`);
+  }
+
+  // Login endpoint is rate-limited at 10/min — burst of 15 must include 429s.
+  try {
+    let saw429 = false;
+    for (let i = 0; i < 15; i++) {
+      const r = await httpPost(`${base}${process.env.ADMIN_PATH || '/admin'}/login`, { token: 'wrong' });
+      if (r.status === 429) { saw429 = true; break; }
+    }
+    assert(saw429, 'POST /admin/login burst of 15 hits 429 (login rate-limit working)');
+  } catch (err) {
+    assert(false, `Login rate-limit test → error: ${err.message}`);
+  }
 }
 
 // ─── Server startup isolation test ───────────────────────────────────────────
@@ -238,12 +345,37 @@ async function runPublicModeStartupTest() {
   assert(result.status === 1, `PUBLIC_MODE=true + ADMIN_TOKEN empty → exits with code 1 (got ${result.status})`);
 }
 
+// ─── On-chain reporter parity (grep check) ──────────────────────────────────
+// Every audit runner in audit/pipeline.js (runAudit, runRetestSkips,
+// runPlanTest, runSubPlanTest) MUST call _initOnchainReporter at start AND
+// _finalizeOnchainReporter before return. A missing init silently disables
+// reporting for that route; a missing finalize drops the un-flushed tail
+// batch. Both have happened in real history — this grep locks them in.
+function checkOnchainReporterParity() {
+  console.log('\n2. On-chain reporter wiring parity (grep check)...');
+  const src = readFileSync(path.join(ROOT, 'audit/pipeline.js'), 'utf8');
+  const RUNNERS = ['runAudit', 'runRetestSkips', 'runPlanTest', 'runSubPlanTest'];
+  for (const fn of RUNNERS) {
+    const startIdx = src.indexOf('export async function ' + fn);
+    if (startIdx === -1) {
+      assert(false, `${fn}: function not found in pipeline.js`);
+      continue;
+    }
+    // Find the next 'export async function' (or EOF) — that's the runner body.
+    const next = src.indexOf('\nexport async function ', startIdx + 1);
+    const body = src.slice(startIdx, next === -1 ? src.length : next);
+    assert(body.includes('_initOnchainReporter('), `${fn}: calls _initOnchainReporter`);
+    assert(body.includes('_finalizeOnchainReporter('), `${fn}: calls _finalizeOnchainReporter`);
+  }
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 async function run() {
   console.log('Sentinel Node Tester — Security Tests\n');
 
   // Phase 1: static code checks (no server needed)
   checkPublicRouteImports();
+  checkOnchainReporterParity();
 
   // Phase 2: server startup safety check
   await runPublicModeStartupTest();
