@@ -117,7 +117,7 @@ See [docs/OPERATOR-RUNBOOK.md](docs/OPERATOR-RUNBOOK.md) for the full deployment
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `MNEMONIC` | Yes | — | 12-word Cosmos mnemonic. Signs session and gas transactions. Never commit to git. |
-| `RPC` | No | `https://rpc.sentinel.co:443` | Primary RPC endpoint for chain queries and broadcasts. |
+| `RPC` | No | `https://rpc-sentinel.busurnode.com` | Primary RPC endpoint for chain queries and broadcasts. (rpc.sentinel.co was the old default but stalled behind tip while reporting `catching_up=false`, returning stale balances — kept last in `core/constants.js` as a fallback only.) |
 | `DENOM` | No | `udvpn` | Token denomination. Do not change. |
 | `GAS_PRICE` | No | `0.2udvpn` | Gas price for transactions. |
 | `PORT` | No | `3001` | HTTP port the server listens on. |
