@@ -12,7 +12,7 @@ import { existsSync } from 'fs';
 import { adminOnly, attachAdminFlag, safeEq, setAdminSessionValidator } from './core/auth.js';
 import { rateLimit, sseLimit } from './core/rate-limit.js';
 
-import { MNEMONIC, DENOM, GAS_PRICE, PORT, LCD_ENDPOINTS, PROJECT_ROOT, DNS_PRESETS, ACTIVE_DNS, setActiveDns } from './core/constants.js';
+import { MNEMONIC, DENOM, GAS_PRICE, PORT, LCD_ENDPOINTS, RPC_ENDPOINTS, PROJECT_ROOT, DNS_PRESETS, ACTIVE_DNS, setActiveDns } from './core/constants.js';
 import { getSettings, updateSettings, getDefaultSettings } from './core/settings.js';
 import { queryReports as queryOnchainReports } from './core/onchain-report.js';
 import { cachedWalletSetup, createFreshClient } from './core/wallet.js';
@@ -76,6 +76,22 @@ import { loadTransportCache, getCacheStats } from './core/transport-cache.js';
 
 import { DirectSecp256k1HdWallet } from '@cosmjs/proto-signing';
 import { SigningStargateClient, GasPrice } from '@cosmjs/stargate';
+
+// Walk RPC_ENDPOINTS in order and return the first SigningStargateClient that
+// connects. Replaces a hardcoded `rpc.sentinel.co:443` connect that returned
+// stale balances when that node fell behind tip while reporting catching_up=false.
+async function connectWithRpcFailover(wallet) {
+  const opts = { gasPrice: GasPrice.fromString(GAS_PRICE) };
+  let lastErr;
+  for (const url of RPC_ENDPOINTS) {
+    try {
+      return await SigningStargateClient.connectWithSigner(url, wallet, opts);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('All RPC endpoints unreachable');
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 process.env.PATH = path.join(__dirname, 'bin') + path.delimiter + (process.env.PATH || '');
@@ -2519,10 +2535,7 @@ app.listen(PORT, LISTEN_HOST, async () => {
       const w = await DirectSecp256k1HdWallet.fromMnemonic(MNEMONIC, { prefix: 'sent' });
       const [acc] = await w.getAccounts();
       state.walletAddress = acc.address;
-      const tmpClient = await SigningStargateClient.connectWithSigner(
-        'https://rpc.sentinel.co:443', w,
-        { gasPrice: GasPrice.fromString(GAS_PRICE) },
-      );
+      const tmpClient = await connectWithRpcFailover(w);
       const bal = await tmpClient.getBalance(acc.address, DENOM);
       state.balanceUdvpn = parseInt(bal?.amount || '0', 10);
       state.spentUdvpn = 0; // Real chain balance is the truth — reset estimate
@@ -2545,10 +2558,7 @@ app.listen(PORT, LISTEN_HOST, async () => {
       try {
         const w = await DirectSecp256k1HdWallet.fromMnemonic(MNEMONIC, { prefix: 'sent' });
         const [acc] = await w.getAccounts();
-        const tmpClient = await SigningStargateClient.connectWithSigner(
-          'https://rpc.sentinel.co:443', w,
-          { gasPrice: GasPrice.fromString(GAS_PRICE) },
-        );
+        const tmpClient = await connectWithRpcFailover(w);
         const bal = await tmpClient.getBalance(acc.address, DENOM);
         const fresh = parseInt(bal?.amount || '0', 10);
         tmpClient.disconnect();

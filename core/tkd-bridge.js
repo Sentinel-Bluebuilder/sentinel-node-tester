@@ -24,7 +24,7 @@ import { GasPrice, assertIsDeliverTxSuccess } from '@cosmjs/stargate';
 import Long from 'long';
 import axios from 'axios';
 import https from 'https';
-import { RPC, MNEMONIC } from './constants.js';
+import { MNEMONIC, RPC_ENDPOINTS as TKD_RPC_ENDPOINTS } from './constants.js';
 
 // ─── Shared HTTPS agent (TLS TOFU — same as Blue JS SDK) ─────────────────
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
@@ -32,13 +32,9 @@ const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 // ─── Availability Check ────────────────────────────────────────────────────
 export const TKD_AVAILABLE = true;
 
-// ─── RPC Endpoints ─────────────────────────────────────────────────────────
-const TKD_RPC_ENDPOINTS = [
-  RPC,
-  'https://sentinel-rpc.polkachu.com',
-  'https://rpc.sentinel.quokkastake.io',
-  'https://sentinel-rpc.publicnode.com:443',
-];
+// ─── RPC Endpoints (verified 2026-05-02, see core/constants.js) ─────────────
+// TKD_RPC_ENDPOINTS is just a renamed import of the canonical RPC_ENDPOINTS so
+// any future endpoint refresh only lands in one file.
 
 // ─── Cached instances ──────────────────────────────────────────────────────
 let _queryClient = null;

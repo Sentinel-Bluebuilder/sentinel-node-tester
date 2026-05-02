@@ -12,7 +12,11 @@ export const PROJECT_ROOT = path.resolve(__dirname, '..');
 
 // ─── Environment Config ──────────────────────────────────────────────────────
 export const MNEMONIC = process.env.MNEMONIC;
-export const RPC = process.env.RPC || 'https://rpc.sentinel.co:443';
+// Default RPC: busurnode (verified 2026-05-02, ~125ms). rpc.sentinel.co is
+// excluded — it has been stuck ~22k blocks behind tip while still reporting
+// catching_up=false, returning stale ABCI state (e.g. zero balance for
+// funded addresses). Override via env if you maintain a private node.
+export const RPC = process.env.RPC || 'https://rpc-sentinel.busurnode.com';
 export const DENOM = process.env.DENOM || 'udvpn';
 export const GAS_PRICE = process.env.GAS_PRICE || '0.2udvpn';
 export const GIGS = Math.max(1, parseInt(process.env.GIGABYTES_PER_NODE || '1', 10));
@@ -45,20 +49,36 @@ export const V3_MSG_TYPE = MSG_TYPES.START_SESSION;
 export const V3_SUB_TYPE = MSG_TYPES.START_SUBSCRIPTION;
 export const V3_SUB_SESSION_TYPE = MSG_TYPES.SUB_START_SESSION;
 
-// ─── RPC Endpoints (ordered by reliability) ──────────────────────────────────
+// ─── RPC Endpoints (verified 2026-05-02, sorted by latency) ─────────────────
+// Audited end-to-end: connect + /status + ABCI bank balance against a known
+// funded address (see audit/audit-rpc-endpoints.mjs). rpc.sentinel.co is kept
+// last as a stale-fallback only — it reports catching_up=false while serving
+// state ~22k blocks behind tip.
 export const RPC_ENDPOINTS = [
-  RPC,
-  'https://sentinel-rpc.polkachu.com',
-  'https://rpc.sentinel.quokkastake.io',
-  'https://sentinel-rpc.publicnode.com:443',
+  RPC,                                          // env-overridable primary (default busurnode)
+  'https://sentinel-rpc.publicnode.com',        // ~459ms
+  'https://rpc.trinitystake.io',                // ~470ms
+  'https://rpc.sentinel.validatus.com',         // ~643ms
+  'https://sentinel-rpc.polkachu.com',          // ~666ms
+  'https://rpc.dvpn.roomit.xyz',                // ~920ms
+  'https://rpc.sentinel.quokkastake.io',        // ~923ms
+  'https://rpc.sentinel.suchnode.net',          // ~962ms
+  'https://rpc-sentinel.chainvibes.com',        // ~1035ms
+  'https://rpc.sentineldao.com',                // ~2323ms
+  'https://rpc.mathnodes.com',                  // ~2380ms
+  'https://rpc.sentinel.chaintools.tech',       // ~3935ms
+  'https://rpc.sentinel.co:443',                // stale-fallback only
 ];
 
-// ─── LCD Endpoints (ordered by reliability) ──────────────────────────────────
+// ─── LCD Endpoints (verified 2026-05-02) ─────────────────────────────────────
+// lcd.sentinel.co kept last for the same reason as rpc.sentinel.co.
 export const LCD_ENDPOINTS = [
-  'https://lcd.sentinel.co',
-  'https://sentinel-api.polkachu.com',
+  'https://lcd-sentinel.busurnode.com',
+  'https://api.sentinel.suchnode.net',
   'https://api.sentinel.quokkastake.io',
+  'https://sentinel-api.polkachu.com',
   'https://sentinel-rest.publicnode.com',
+  'https://lcd.sentinel.co',
 ];
 
 // ─── Batch Payment ───────────────────────────────────────────────────────────
