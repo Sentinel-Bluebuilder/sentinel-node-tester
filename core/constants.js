@@ -70,14 +70,18 @@ export const RPC_ENDPOINTS = [
   'https://rpc.sentinel.co:443',                // stale-fallback only
 ];
 
-// ─── LCD Endpoints (verified 2026-05-02) ─────────────────────────────────────
+// ─── LCD Endpoints (verified 2026-05-02, parity with blue-js-sdk@2.7.1) ─────
 // lcd.sentinel.co kept last for the same reason as rpc.sentinel.co.
 export const LCD_ENDPOINTS = [
   'https://lcd-sentinel.busurnode.com',
-  'https://api.sentinel.suchnode.net',
-  'https://api.sentinel.quokkastake.io',
-  'https://sentinel-api.polkachu.com',
   'https://sentinel-rest.publicnode.com',
+  'https://api.sentinel.suchnode.net',
+  'https://sentinel-api.polkachu.com',
+  'https://api.dvpn.roomit.xyz',
+  'https://api.sentinel.quokkastake.io',
+  'https://api.sentinel.chaintools.tech',
+  'https://api-sentinel.chainvibes.com',
+  'https://api.sentinel.validatus.com',
   'https://lcd.sentinel.co',
 ];
 
