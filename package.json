@@ -102,7 +102,7 @@
     "@sentinel-official/sentinel-js-sdk": "^2.0.4",
     "axios": "^1.6.8",
     "better-sqlite3": "^12.9.0",
-    "blue-js-sdk": "^2.6.0",
+    "blue-js-sdk": "^2.7.2",
     "cookie-parser": "^1.4.7",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
