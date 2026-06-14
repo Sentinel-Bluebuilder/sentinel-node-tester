@@ -53,6 +53,7 @@ const DB_PATH = path.join(ROOT, 'data', 'audit.db');
 const FIX = process.argv.includes('--fix');
 const PURGE_LOGS = process.argv.includes('--purge-orphan-logs');
 const MATCH_TOLERANCE_MS = 15_000;
+const BACKFILL_TOLERANCE_MS = 60_000; // wider dedup window for backfill (save-time skew)
 const RECENT_LOG_MS = 24 * 60 * 60 * 1000;       // never purge a log written in the last day
 const RUNAWAY_NOTES = 'continuous-loop iteration%';
 
@@ -101,9 +102,10 @@ if (rdb) {
     try { ok(`table ${t}: ${rdb.prepare(`SELECT COUNT(*) AS c FROM ${t}`).get().c} rows`); }
     catch (e) { hard(`table ${t} missing/unreadable: ${e.message}`); }
   }
-  for (const col of ['spent_udvpn', 'refunded_udvpn']) {
-    rdb.prepare('PRAGMA table_info(runs)').all().some(c => c.name === col) ? ok(`runs.${col} present`) : hard(`runs.${col} missing (migration v10 not applied)`);
-  }
+  try {
+    const cols = rdb.prepare('PRAGMA table_info(runs)').all().map(c => c.name);
+    for (const col of ['spent_udvpn', 'refunded_udvpn']) cols.includes(col) ? ok(`runs.${col} present`) : hard(`runs.${col} missing (migration v10 not applied)`);
+  } catch (e) { hard(`runs columns unreadable: ${e.message}`); }
   try {
     runawayCount = rdb.prepare('SELECT COUNT(*) AS c FROM runs WHERE notes LIKE ?').get(RUNAWAY_NOTES).c;
     runawayCount > 0 ? repairable(`${runawayCount.toLocaleString()} runaway 'continuous-loop iteration' run rows`) : ok('no runaway continuous-loop rows');
@@ -160,7 +162,8 @@ if (indexUnparseable) {
       const c = recompute(rows);
       let date; try { date = statSync(snapResults(num)).mtime.toISOString(); } catch { date = new Date().toISOString(); }
       const entry = { number: num, label: 'Recovered (orphan dir)', date, ...c, sdk: null, spentUdvpn: null, refundedUdvpn: null, auditLog: null };
-      if (FIX) { cleanRuns.push(entry); known.add(num); indexChanged = true; fixd(`registered orphan test-${m[1]} as #${num}`); } else todo(`register orphan test-${m[1]}`);
+      known.add(num); // track existence in both modes so the activeRun check below is accurate
+      if (FIX) { cleanRuns.push(entry); indexChanged = true; fixd(`registered orphan test-${m[1]} as #${num}`); } else todo(`register orphan test-${m[1]}`);
     }
   }
 
@@ -201,8 +204,13 @@ if (existsSync(RESULTS_DIR)) {
     return now - mtime >= RECENT_LOG_MS; // protect recently-written (possibly live) logs
   });
   if (!orphanLogs.length) ok(`no purgeable orphan logs (${logs.length} log file(s))`);
-  else { info(`${orphanLogs.length} orphan log file(s): ${orphanLogs.slice(0, 5).join(', ')}${orphanLogs.length > 5 ? ' …' : ''}`); if (!(FIX && PURGE_LOGS)) console.log(C.dim('    (pass --fix --purge-orphan-logs to quarantine these)')); }
+  else { info(`${orphanLogs.length} orphan log file(s): ${orphanLogs.slice(0, 5).join(', ')}${orphanLogs.length > 5 ? ' …' : ''}`); if (PURGE_LOGS && !FIX) console.log(C.dim('    (--purge-orphan-logs needs --fix to take effect — ignored)')); else if (!(FIX && PURGE_LOGS)) console.log(C.dim('    (pass --fix --purge-orphan-logs to quarantine these)')); }
 }
+
+// Close our OWN read-only handle before mutating: if it stays open, the WAL
+// checkpoint below can report `busy` and falsely abort the whole --fix on a
+// perfectly healthy, server-stopped box.
+if (rdb) { try { rdb.close(); } catch {} rdb = null; }
 
 // ─── apply mutations (only under --fix) ───────────────────────────────────────
 if (FIX) {
@@ -212,15 +220,16 @@ if (FIX) {
   // write if the WAL couldn't be fully checkpointed (server likely running → a
   // .db-only copy would be an incomplete, non-restorable backup).
   let dbWriteOk = existsSync(DB_PATH);
+  let abortAll = false; // a blocked checkpoint => server running => mutate NOTHING (incl. index)
   if (dbWriteOk) {
     try {
       const w = new Database(DB_PATH);
       const cp = w.pragma('wal_checkpoint(TRUNCATE)');
       const busy = Array.isArray(cp) ? cp[0]?.busy : cp?.busy;
       w.close();
-      if (busy) { hard('WAL checkpoint blocked (is the server running?) — aborting all DB writes'); dbWriteOk = false; }
+      if (busy) { hard('WAL checkpoint blocked — is the server running? Stop it and re-run. No changes made.'); dbWriteOk = false; abortAll = true; }
       else { copyFileSync(DB_PATH, `${DB_PATH}.bak-${ts}`); console.log(`  ${C.grn('●')} backed up audit.db → ${path.basename(DB_PATH)}.bak-${ts}`); }
-    } catch (e) { hard(`audit.db backup failed — aborting all DB writes: ${e.message}`); dbWriteOk = false; }
+    } catch (e) { hard(`audit.db backup failed — aborting all changes: ${e.message}`); dbWriteOk = false; abortAll = true; }
   }
 
   if (runawayCount > 0 && dbWriteOk) {
@@ -244,7 +253,7 @@ if (FIX) {
     } catch (e) { hard(`runaway prune failed (restore audit.db from the backup): ${e.message}`); }
   }
 
-  if (indexChanged && !indexUnparseable) {
+  if (indexChanged && !indexUnparseable && !abortAll) {
     try {
       if (existsSync(RUNS_INDEX)) copyFileSync(RUNS_INDEX, `${RUNS_INDEX}.bak-${ts}`);
       writeFileSync(RUNS_INDEX, JSON.stringify({ runs: cleanRuns, activeRun: rawIndex.activeRun }, null, 2), 'utf8');
@@ -252,13 +261,11 @@ if (FIX) {
     } catch (e) { hard(`could not write index.json: ${e.message}`); }
   }
 
-  // Backfill file runs missing from SQLite. Idempotent via a tolerance match
-  // (node_count + finish-time within 15s) — exact started_at can't be the key
-  // because the index `date` is the FINISH time, not the run's start, so
-  // findRunByKey would never match and would re-insert duplicates every run.
-  // mode is derived from the snapshot rows (mostly TEST_RUN_SKIP → 'test') or a
-  // 'Sub. Plan' label, never guessed as p2p (which would corrupt analytics and
-  // violate TEST RUN isolation). The active run is skipped (its DB row exists).
+  // Backfill file runs missing from SQLite. Idempotent via a tolerance match on
+  // node_count + the save-time finish (see the dedup note below). mode is derived
+  // from the snapshot rows (mostly TEST_RUN_SKIP → 'test') or a 'Sub. Plan' label,
+  // never guessed as p2p (which would corrupt analytics + violate TEST RUN
+  // isolation). The active run is skipped (its DB row exists, unfinished).
   if (dbWriteOk) {
     try {
       const { getDb, insertRun, updateRunOnFinish, insertResultsBatch } = await import('../core/db.js');
@@ -270,9 +277,14 @@ if (FIX) {
         const rows = loadJson(snapResults(e.number));
         if (!Array.isArray(rows) || !rows.length) continue;
         const times = rows.map(r => r && r.timestamp ? new Date(r.timestamp).getTime() : 0).filter(t => t > 0);
-        const started_at  = times.length ? Math.min(...times) : (Number.isFinite(Date.parse(e.date)) ? Date.parse(e.date) : Date.now());
-        const finished_at = times.length ? Math.max(...times) : (Number.isFinite(Date.parse(e.date)) ? Date.parse(e.date) : null);
-        if (finished_at != null && existsStmt.get(rows.length, finished_at, MATCH_TOLERANCE_MS)) continue; // already in SQLite
+        // Dedup against what the server actually stored: saveCurrentRun writes the
+        // SQLite finished_at = Date.now() at save, which is exactly the index
+        // `date`. Key on that (not max(row timestamp), which lags it). Skip — never
+        // insert — runs we can't time, so a re-run stays idempotent.
+        const finished_at = Number.isFinite(Date.parse(e.date)) ? Date.parse(e.date) : (times.length ? Math.max(...times) : null);
+        if (finished_at == null) { info(`#${e.number}: snapshot has no finish time — skipped backfill (can't dedup safely)`); continue; }
+        if (existsStmt.get(rows.length, finished_at, BACKFILL_TOLERANCE_MS)) continue; // already in SQLite
+        const started_at = times.length ? Math.min(...times) : finished_at;
         const skips = rows.filter(r => r && (r.errorCode === 'TEST_RUN_SKIP' || r.skipped)).length;
         const mode = skips > rows.length / 2 ? 'test' : (/sub\.?\s*plan/i.test(e.label || '') ? 'subscription' : 'p2p');
         const runId = insertRun({ started_at, mode, notes: e.label || `test-${e.number}` });
@@ -284,7 +296,7 @@ if (FIX) {
     } catch (e) { hard(`SQLite backfill failed: ${e.message}`); }
   } else console.log(`  ${C.dim('↳ backfill skipped (DB writes disabled)')}`);
 
-  if (PURGE_LOGS && orphanLogs.length) {
+  if (PURGE_LOGS && orphanLogs.length && !abortAll) {
     const trash = path.join(RESULTS_DIR, '.cleanup-trash', String(ts));
     try {
       mkdirSync(trash, { recursive: true });
