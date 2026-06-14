@@ -1006,6 +1006,10 @@ function clearActiveRunView() {
   // activeBatchId/resumeHeadAddr could mis-target a later resume.
   state.baselineHistory = [];
   state.nodeSpeedHistory = [];
+  // Also clear the single current-baseline value — the "Avg Baseline" header
+  // stat falls back to baselineMbps when baselineHistory is empty, so without
+  // this the DELETED run's baseline keeps showing after a delete.
+  state.baselineMbps = null;
   state.currentNode = null;
   state.resumeHeadAddr = null;
   state.activeBatchId = 0;
@@ -2738,6 +2742,7 @@ app.post('/api/clear', adminOnly, (req, res) => {
   state.retryCount = 0;
   state.baselineHistory = [];
   state.nodeSpeedHistory = [];
+  state.baselineMbps = null; // else "Avg Baseline" falls back to the stale value
   // /api/clear wipes the DISPLAYED rows but keeps the active-run identity
   // (activeRunNumber / activeDbRunId / pipeline run dir stay attached — use
   // clearActiveRunView()/deleteRun to drop the identity). The counters above
