@@ -562,6 +562,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   clearPaidNodes();
   clearAllCredentials(); // Wipe stale sessions from previous runs — force fresh payment
   invalidateSessionCache(); // Wipe stale session map — prevents wrong node→session mapping
+  state._freshSessionIds = new Map(); // Drop stale 409-fresh-session entries from a prior/stopped run
   broadcast('state', { state });
 
   // Create audit log file. On resume, reuse the prior run's log file so the
@@ -894,10 +895,20 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
         : (_rawSnippet || null);
 
       if (result) {
-        state.testedNodes++;
-        if (result.slaApplicable && result.pass15mbps) state.passed15++;
-        if (result.pass10mbps) state.passed10++;
-        if (result.passBaseline) state.passedBaseline++;
+        // Classify exactly as recomputeCounters/rehydrateState do: a null-mbps
+        // result that isn't TEST_RUN_SKIP / skipped is a FAILURE, not a pass —
+        // otherwise the live header over-counts passed/tested until a recompute.
+        const _isSkip = result.skipped || result.errorCode === 'TEST_RUN_SKIP';
+        if (result.actualMbps != null) {
+          state.testedNodes++;
+          if (result.slaApplicable && result.pass15mbps) state.passed15++;
+          if (result.pass10mbps) state.passed10++;
+          if (result.passBaseline) state.passedBaseline++;
+        } else if (_isSkip) {
+          state.skippedNodes++;
+        } else {
+          state.failedNodes++;
+        }
         upsertResult(result); // success — no snippet needed
         state.resumeHeadAddr = null;
         saveResults();
@@ -1084,7 +1095,8 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
         break;
       }
 
-      if (result) {
+      if (result && result.actualMbps != null) {
+        // Only a real-speed result flips this node from failed → tested.
         state.failedNodes = Math.max(0, state.failedNodes - 1);
         state.testedNodes++;
         if (result.pass10mbps) state.passed10++;
@@ -1092,6 +1104,13 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
         saveResults();
         broadcast('result', { result, state });
         broadcast('log', { msg: `  ✓ Internet-recovery retest PASS: ${result.actualMbps} Mbps` });
+      } else if (result) {
+        // Truthy result but null mbps — still a failure (it was already counted
+        // as failed before this retest). Persist it without touching counters.
+        upsertResult(result, _sanitizeSnippet(_irSnippet));
+        saveResults();
+        broadcast('result', { result, state });
+        broadcast('log', { msg: `  ✗ Internet-recovery retest FAIL: ${result.errorCode || 'no speed'}` });
       } else {
         const errMsg = error?.message || 'Unknown';
         const failResult = buildFailResult(node, status, state, errMsg, error?.diag || {});
@@ -1203,6 +1222,7 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
   clearPoisonedSessions();
   clearPaidNodes();
   invalidateSessionCache(); // Force fresh session lookups — prevents stale mappings
+  state._freshSessionIds = new Map(); // Drop stale 409-fresh-session entries from a prior/stopped run
   broadcast('state', { state });
 
   // Create test log file

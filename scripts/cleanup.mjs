@@ -96,7 +96,7 @@ let runawayCount = 0;
 if (rdb) {
   try { const v = rdb.prepare('PRAGMA integrity_check').get()?.integrity_check; v === 'ok' ? ok('integrity_check: ok') : hard(`integrity_check: ${v}`); }
   catch (e) { hard(`integrity_check failed: ${e.message}`); }
-  try { ok(`schema_version: ${rdb.prepare('SELECT version FROM schema_version LIMIT 1').get()?.version ?? '(none)'}`); }
+  try { ok(`schema_version: ${rdb.prepare('SELECT MAX(version) AS version FROM schema_version').get()?.version ?? '(none)'}`); }
   catch (e) { hard(`schema_version unreadable: ${e.message}`); }
   for (const t of ['runs', 'results', 'error_logs', 'batches', 'batch_results']) {
     try { ok(`table ${t}: ${rdb.prepare(`SELECT COUNT(*) AS c FROM ${t}`).get().c} rows`); }
