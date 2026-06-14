@@ -111,6 +111,11 @@
       border-color: var(--green-dim);
     }
     .subheader-chip-green:hover { background: var(--green-dim); }
+    .subheader-chip-red {
+      color: var(--red);
+      border-color: var(--red-dim);
+    }
+    .subheader-chip-red:hover { background: var(--red-dim); }
     .sdk-toggle {
       display: inline-flex;
       align-items: center;
@@ -843,6 +848,7 @@
         <option value="">Loading...</option>
       </select>
       <button onclick="saveRun()" class="subheader-chip subheader-chip-green">SAVE</button>
+      <button onclick="deleteRun()" class="subheader-chip subheader-chip-red" title="Delete the selected saved test run">DELETE</button>
     </div>
     <div class="subheader-divider"></div>
     <div class="subheader-group">
@@ -2015,6 +2021,25 @@
           loadRunsList();
         }
       } catch {}
+    }
+
+    async function deleteRun() {
+      const sel = document.getElementById('runSelect');
+      const num = sel.value;
+      if (!num) { alert('Select a saved test to delete first.'); return; }
+      const label = sel.options[sel.selectedIndex]?.textContent || ('Test #' + num);
+      if (!confirm(`Delete ${label}?\n\nThis permanently removes the saved snapshot and cannot be undone.`)) return;
+      try {
+        const res = await fetch('/api/runs/' + encodeURIComponent(num), {
+          method: 'DELETE',
+          headers: { 'X-Admin-Request': '1' },
+        });
+        const data = await res.json();
+        if (data.ok) loadRunsList();
+        else alert('Delete failed: ' + (data.error || 'unknown'));
+      } catch (e) {
+        alert('Delete error: ' + e.message);
+      }
     }
 
     loadRunsList();

@@ -457,7 +457,7 @@ function hydrateLogBufferFromFile(filePath) {
 }
 
 // ─── Test Run Management ─────────────────────────────────────────────────────
-import { readFileSync as _rfs, writeFileSync as _wfs, mkdirSync as _mkd, existsSync as _ex, readdirSync as _rd, copyFileSync as _cp } from 'fs';
+import { readFileSync as _rfs, writeFileSync as _wfs, mkdirSync as _mkd, existsSync as _ex, readdirSync as _rd, copyFileSync as _cp, rmSync as _rm } from 'fs';
 
 const RUNS_DIR = path.join(__dirname, 'results', 'runs');
 const RUNS_INDEX = path.join(RUNS_DIR, 'index.json');
@@ -554,6 +554,22 @@ function loadRun(num) {
   const resultsPath = path.join(runDir, 'results.json');
   if (!_ex(resultsPath)) return null;
   return JSON.parse(_rfs(resultsPath, 'utf8'));
+}
+
+function deleteRun(num) {
+  const index = loadRunsIndex();
+  const i = index.runs.findIndex(r => r.number === num);
+  if (i === -1) return false;
+  index.runs.splice(i, 1);
+  if (index.activeRun === num) index.activeRun = null;
+  saveRunsIndex(index);
+  // Remove the on-disk snapshot dir (results.json, summary.txt, failures.jsonl).
+  const runDir = path.join(RUNS_DIR, `test-${String(num).padStart(3, '0')}`);
+  if (_ex(runDir)) {
+    try { _rm(runDir, { recursive: true, force: true }); }
+    catch (err) { console.error(`[deleteRun] failed to remove ${runDir}: ${err.message}`); }
+  }
+  return true;
 }
 
 // ─── Rehydrate state from results.json on startup ───────────────────────────
@@ -2302,6 +2318,17 @@ app.post('/api/runs/load/:num', adminOnly, (req, res) => {
   broadcastStateFresh();
   broadcast('log', { msg: `📂 Loaded Test #${num} (${data.length} results)` });
   res.json({ ok: true, number: num, total: data.length });
+});
+
+app.delete('/api/runs/:num', adminOnly, (req, res) => {
+  const num = parseInt(req.params.num);
+  if (!Number.isInteger(num)) return res.status(400).json({ error: 'Invalid run number' });
+  const ok = deleteRun(num);
+  if (!ok) return res.status(404).json({ error: `Test #${num} not found` });
+  // If the deleted run was the active selection, clear it.
+  if (state.activeRunNumber === num) state.activeRunNumber = null;
+  broadcast('log', { msg: `🗑 Deleted Test #${num}` });
+  res.json({ ok: true, number: num });
 });
 
 // ─── SDK Toggle ─────────────────────────────────────────────────────────────
