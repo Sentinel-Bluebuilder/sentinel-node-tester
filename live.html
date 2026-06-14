@@ -1269,22 +1269,23 @@
       renderTable();
     }
 
+    // Coalesce per-event table renders into one per animation frame. Results
+    // stream newest-first, so every new row lands on page 1 — the old code ran
+    // a full 50-row renderTable() synchronously for EVERY SSE result, and a
+    // burst of ~1000 node results during a live broadcast froze the main thread
+    // (the profile showed onmessage -> handleEvent -> upsert -> addSingleRow ->
+    // renderTable). Collapsing a burst into ~1 render/frame keeps the table live
+    // without blocking. renderTable() rebuilds the visible page, count label and
+    // pager from resultsArr, so the coalesced render reflects the final state.
+    let _renderQueued = false;
+    function scheduleRenderTable() {
+      if (_renderQueued) return;
+      _renderQueued = true;
+      requestAnimationFrame(() => { _renderQueued = false; renderTable(); });
+    }
+
     function addSingleRow(r) {
-      // Re-render current page only when the affected row falls on the visible page;
-      // otherwise just bump the count label.
-      const filtered = applyFilter(resultsArr).slice().reverse();
-      const idxInFiltered = filtered.findIndex(x => x.address === r.address);
-      const onVisiblePage = idxInFiltered >= 0
-        && idxInFiltered >= (_livePage - 1) * LIVE_PAGE_SIZE
-        && idxInFiltered <  _livePage      * LIVE_PAGE_SIZE;
-      if (onVisiblePage) {
-        renderTable();
-      } else {
-        document.getElementById('resultsCountLabel').textContent = resultsArr.length + ' Entries';
-        const total = filtered.length;
-        const totalPages = Math.max(1, Math.ceil(total / LIVE_PAGE_SIZE));
-        renderLivePager(total, totalPages);
-      }
+      scheduleRenderTable();
     }
 
     function appendRowHtml(r, tbody, prepend = false) {
