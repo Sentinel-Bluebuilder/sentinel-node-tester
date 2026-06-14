@@ -51,9 +51,17 @@
     }
 
     /* ─── Page layout ─── */
+    /* main is a viewport-tall flex column: the fixed-height blocks above the
+       data-grid (header, stats, current-batch, search) take their natural
+       height, then .data-grid flexes to fill whatever vertical space is left
+       so the page fits the viewport with no scroll into empty space below the
+       table. The table-wrap and log body scroll internally instead. */
     main {
       max-width: 1600px; margin: 0 auto;
-      padding: 28px 24px 80px;
+      padding: 28px 24px 24px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
     }
 
     /* Live-banner / status row (kept for status var references) */
@@ -288,10 +296,15 @@
       display: grid;
       grid-template-columns: 1fr 380px;
       gap: 16px;
-      height: 640px;
+      /* Fill the remaining viewport height left by the blocks above instead of
+         a fixed 640px. min-height keeps the grid usable on short viewports
+         (the page may scroll only then); min-height:0 on the flex child lets
+         the inner table-wrap / log body own the overflow. */
+      flex: 1 1 auto;
+      min-height: 360px;
     }
 
-    .table-container { display: flex; flex-direction: column; overflow: hidden; height: 640px; max-height: 640px; }
+    .table-container { display: flex; flex-direction: column; overflow: hidden; height: 100%; min-height: 0; }
 
     .panel-header {
       padding: 16px 20px;
@@ -354,11 +367,16 @@
       background: var(--bg-card-solid) !important;
       /* Single header separator. The box-shadow draws the only divider line
          (and fills the border-spacing gap above/below it) so it survives the
-         sticky-header scroll; a plain border-bottom here would double it. */
+         sticky-header scroll; a plain border-bottom here would double it.
+         The solid fill (-6px / +5px) and the 1px border (+5px → +6px) share an
+         edge at exactly 5px, so there is no 1px background sliver between the
+         fill-end and the border — one clean line below the header row. The
+         downward fill is capped at 5px (< the 4px+ row body offset would show)
+         so it covers the border-spacing gap and meets the divider with no seam. */
       box-shadow:
         0 -6px 0 0 var(--bg-card-solid),
-        0  6px 0 0 var(--bg-card-solid),
-        0  7px 0 0 var(--border);
+        0  5px 0 0 var(--bg-card-solid),
+        0  6px 0 0 var(--border);
       z-index: 10;
     }
 
@@ -397,12 +415,10 @@
     .row-copy-btn:hover { border-color: var(--text); color: var(--text); background: var(--bg-card); }
     .row-copy-btn:disabled { opacity: 0.6; cursor: wait; }
 
-    /* ─── Log panel — fixed height, scroll inside ─── */
+    /* ─── Log panel — fills its grid cell, scroll inside ─── */
     .log-container {
       display: flex; flex-direction: column; overflow: hidden;
-      height: 640px; max-height: 640px;
-      align-self: start;
-      position: sticky; top: 12px;
+      height: 100%; min-height: 0;
     }
     .logs {
       flex: 1 1 auto; min-height: 0;
@@ -476,17 +492,6 @@
       padding: 2px 6px; border-radius: 3px; cursor: pointer;
     }
     .log-entry .log-copy:hover { border-color: var(--text); color: var(--text); background: var(--bg-card); }
-    .log-filters {
-      display: inline-flex; gap: 2px;
-      border: 1px solid var(--border); border-radius: 5px;
-      overflow: hidden; font-size: 10px; letter-spacing: 0.5px;
-      font-family: var(--font-display);
-    }
-    .log-filter-btn {
-      padding: 3px 8px; color: var(--text-muted); font-weight: 600;
-      cursor: pointer; user-select: none;
-    }
-    .log-filter-btn.active { background: var(--bg-input); color: var(--text); }
     @keyframes slideIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
 
     /* ─── Toast ─── */
@@ -822,15 +827,6 @@
       <div class="glass-panel log-container">
         <div class="panel-header">
           <div class="panel-title">Live Log</div>
-          <div style="display:flex;align-items:center;gap:8px">
-            <span class="log-filters" id="logFilters">
-              <span class="log-filter-btn active" data-lf="all"  onclick="setLogFilter('all')">ALL</span>
-              <span class="log-filter-btn"        data-lf="node" onclick="setLogFilter('node')">NODE</span>
-              <span class="log-filter-btn"        data-lf="fail" onclick="setLogFilter('fail')">FAIL</span>
-              <span class="log-filter-btn"        data-lf="sys"  onclick="setLogFilter('sys')">SYS</span>
-            </span>
-            <span style="font-size:11px;color:var(--text-dim)" id="logStatus">idle</span>
-          </div>
         </div>
         <div class="logs" id="logBody"></div>
       </div>
@@ -1363,29 +1359,9 @@
     }
 
     // ─── Logs ───
-    let _logFilter = 'all'; // 'all' | 'node' | 'fail' | 'sys'
-
-    function setLogFilter(f) {
-      _logFilter = f;
-      document.querySelectorAll('.log-filter-btn').forEach(b => {
-        b.classList.toggle('active', b.dataset.lf === f);
-      });
-      const body = document.getElementById('logBody');
-      if (!body) return;
-      for (const row of body.children) {
-        row.style.display = _logEntryMatches(row, f) ? '' : 'none';
-      }
-      body.scrollTop = body.scrollHeight;
-    }
-
-    function _logEntryMatches(row, f) {
-      if (f === 'all') return true;
-      const cat = row.dataset.cat || 'sys';
-      if (f === 'node') return cat === 'node' || cat === 'fail';
-      if (f === 'fail') return cat === 'fail';
-      if (f === 'sys')  return cat === 'sys';
-      return true;
-    }
+    // Unified feed: every line is appended; there is no per-line show/hide
+    // filter (the ALL/NODE/FAIL/SYS buttons were removed). The cat/status tags
+    // are kept solely for tag-pill styling.
 
     // Structured log entry. Takes opts:
     //   { tag, cat, status ('pass'|'fail'|'warn'|'ok'|'sys'),
@@ -1482,8 +1458,6 @@
       // which froze the page when replaying thousands of buffered lines.
       if (!_logSeeding) body.scrollTop = body.scrollHeight;
       if (body.children.length > MAX_LOG) body.removeChild(body.firstChild);
-
-      if (!_logEntryMatches(div, _logFilter)) div.style.display = 'none';
     }
 
     // ─── Toast / status ───
