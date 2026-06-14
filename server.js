@@ -450,6 +450,12 @@ const state = createState();
 // the Resume button for loaded runs). Set true by /api/runs/load, cleared by
 // startFreshRun / resume, and persisted+restored across bounces (H-1).
 state.loadedReadonly = false;
+// Derived flag: is the currently-loaded run already saved in the runs index?
+// Drives the admin SAVE button (shown only for an UNSAVED loaded run). Maintained
+// at the run-lifecycle points (startFreshRun=false, saveCurrentRun/persistActiveRun
+// =true, loadRunIntoState=computed, clearActiveRunView=false, boot=computed) — same
+// discipline as loadedReadonly — so it flows to the client via SSE automatically.
+state.activeRunSaved = false;
 
 // ─── Canonical "audit busy" predicates — ONE source of truth ─────────────────
 // These replace ~10 hand-copied `state.status === 'running' || ...` checks that
@@ -550,6 +556,7 @@ function saveCurrentRun(label) {
       const storedSpent = Number(existing.spentUdvpn) || 0;
       const liveSpent = Number(state.spentUdvpn) || 0;
       const passSpent = Math.max(storedSpent, liveSpent);
+      state.activeRunSaved = true;
       try {
         const r = persistActiveRun(label || existing.label, { accumulateSpend: false, passSpent });
         if (r) return r.number;
@@ -637,6 +644,7 @@ function saveCurrentRun(label) {
     }
   }
 
+  state.activeRunSaved = true;
   return num;
 }
 
@@ -729,6 +737,7 @@ function persistActiveRun(label, { accumulateSpend = true, passSpent = null } = 
       console.error(`[persistActiveRun] updateRunOnFinish failed: ${dbErr.message}`);
     }
   }
+  state.activeRunSaved = true;
   return { number: num, cumulativeSpent };
 }
 
@@ -798,6 +807,8 @@ function loadRunIntoState(num) {
   // this is set so a resume can't append live rows onto a past run. Cleared by
   // startFreshRun() (New Test / Retest) and a genuine in-flight resume.
   state.loadedReadonly = true;
+  // Saved iff this run has an index entry (it does when _runMeta was found).
+  state.activeRunSaved = !!_runMeta;
   return data;
 }
 
@@ -831,9 +842,12 @@ function latestRunNumber() {
 function deleteRun(num) {
   const index = loadRunsIndex();
   const i = index.runs.findIndex(r => r.number === num);
-  if (i === -1) return false;
-  const entry = index.runs[i];
-  index.runs.splice(i, 1);
+  const entry = i !== -1 ? index.runs[i] : null;
+  // Allow discarding the currently-loaded run even when it was never saved to
+  // the index (a brand-new/interrupted run has only its activeRun pointer + a
+  // test-NNN dir, no index entry). For any OTHER not-in-index number, refuse.
+  if (i === -1 && state.activeRunNumber !== num) return false;
+  if (i !== -1) index.runs.splice(i, 1);
   if (index.activeRun === num) index.activeRun = null;
   saveRunsIndex(index);
   // Remove the snapshot dir (results.json, summary.txt, failures.jsonl, audit.log).
@@ -875,6 +889,7 @@ function clearActiveRunView() {
   state.activeRunNumber = null;
   state.activeDbRunId = null;
   state.loadedReadonly = false;
+  state.activeRunSaved = false;
   state.status = 'idle';
   state.spentUdvpn = 0;
   state.estimatedTotalCost = '0 P2P';
@@ -1024,6 +1039,10 @@ function rehydrateState(results) {
         catch (e) { console.error('[boot] reserve run-number snapshot failed:', e.message); }
       }
     }
+
+    // Saved iff the restored active run has an index entry (an interrupted run
+    // that never completed has only its activeRun pointer, not an index entry).
+    state.activeRunSaved = index.runs.some(r => r.number === state.activeRunNumber);
 
     console.log(`Resuming Test #${state.activeRunNumber} | ${results.length} results: ${state.testedNodes} passed, ${state.failedNodes} failed | SDK: ${state.activeSDK}`);
   } else {
@@ -2099,6 +2118,9 @@ function startFreshRun(label, { mode = 'p2p', plan_id = null } = {}) {
   // A fresh run is live/writable — clear any read-only marker left by a prior
   // /api/runs/load so /api/resume works again for this new run.
   state.loadedReadonly = false;
+  // Brand-new run isn't in the saved index yet (saveCurrentRun adds it on
+  // completion) — so it's UNSAVED until then. Drives the SAVE button.
+  state.activeRunSaved = false;
   state.stopRequested = false;
   state.testedNodes = 0;
   state.failedNodes = 0;
@@ -2769,6 +2791,9 @@ app.post('/api/runs/save', adminOnly, (req, res) => {
   if (num) {
     state.activeRunNumber = num;
     broadcast('log', { msg: `💾 Saved as Test #${num}` });
+    // Push fresh state so the admin SAVE button hides immediately (the run is
+    // now saved → state.activeRunSaved=true flows to applyState).
+    broadcastStateFresh();
     res.json({ ok: true, number: num });
   } else {
     res.json({ error: 'No results to save' });

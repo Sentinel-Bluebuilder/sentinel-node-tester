@@ -857,8 +857,8 @@
       <select id="runSelect" onchange="loadRun(this.value)" class="subheader-select">
         <option value="">Loading...</option>
       </select>
-      <button onclick="saveRun()" class="subheader-chip subheader-chip-green">SAVE</button>
-      <button onclick="deleteRun()" class="subheader-chip subheader-chip-red" title="Delete the selected saved test run">DELETE</button>
+      <button id="btnSaveRun" onclick="saveRun()" class="subheader-chip subheader-chip-green" style="display:none">SAVE</button>
+      <button id="btnDeleteRun" onclick="deleteRun()" class="subheader-chip subheader-chip-red" title="Delete the loaded test run" style="display:none">DELETE</button>
     </div>
     <div class="subheader-divider"></div>
     <div class="subheader-group">
@@ -1562,7 +1562,24 @@
       const _failCount = (resultsArr || []).filter(r => r && r.actualMbps == null && !r.skipped && r.errorCode !== 'TEST_RUN_SKIP').length;
 
       btnStart.disabled = active;
+      // STOP: visible ONLY while a run is active (running or paused).
+      btnStop.style.display = active ? '' : 'none';
       btnStop.disabled = !active;
+
+      // SAVE / DELETE visibility (run toolbar):
+      //   hasRun  — a run with data is currently loaded/displayed.
+      //   saved   — that run is already in the saved index (server-authoritative).
+      // SAVE shows only for an UNSAVED loaded run while NOT actively running
+      // (paused is fine). DELETE shows for ANY loaded run while not running
+      // (it discards an unsaved run, removes a saved one). Both hide when there's
+      // no loaded run ("no saved work") and during an active (running) audit.
+      const btnSaveRun = document.getElementById('btnSaveRun');
+      const btnDeleteRun = document.getElementById('btnDeleteRun');
+      const hasRun = Array.isArray(resultsArr) && resultsArr.length > 0;
+      const savedRun = !!state.activeRunSaved;
+      if (btnSaveRun) btnSaveRun.style.display = (hasRun && !savedRun && !running) ? '' : 'none';
+      if (btnDeleteRun) btnDeleteRun.style.display = (hasRun && !running) ? '' : 'none';
+
       // Resume: visible only for an incomplete, not-running run.
       if (btnResume) {
         const showResume = !active && _remaining > 0 && !state.loadedReadonly;
@@ -2088,11 +2105,17 @@
     }
 
     async function deleteRun() {
-      const sel = document.getElementById('runSelect');
-      const num = sel.value;
-      if (!num) { alert('Select a saved test to delete first.'); return; }
-      const label = sel.options[sel.selectedIndex]?.textContent || ('Test #' + num);
-      if (!confirm(`Delete ${label}?\n\nThis permanently removes the saved snapshot and cannot be undone.`)) return;
+      // DELETE always acts on the currently-loaded run (the one displayed), not
+      // a dropdown pick — selecting a run in the dropdown already loads it. This
+      // lets DELETE work on an UNSAVED loaded run too (the server discards it).
+      const num = state.activeRunNumber;
+      if (num == null) { alert('No test run is loaded to delete.'); return; }
+      const saved = !!state.activeRunSaved;
+      const label = 'Test #' + num + (saved ? '' : ' (unsaved)');
+      const warn = saved
+        ? `Delete ${label}?\n\nThis permanently removes the saved snapshot and cannot be undone.`
+        : `Discard ${label}?\n\nThis unsaved run will be discarded and cannot be recovered.`;
+      if (!confirm(warn)) return;
       try {
         const res = await fetch('/api/runs/' + encodeURIComponent(num), {
           method: 'DELETE',
