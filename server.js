@@ -801,11 +801,31 @@ function loadRunIntoState(num) {
   return data;
 }
 
-/** Highest saved run number, or null when no runs are saved. */
+/**
+ * The latest DISPLAYABLE run number, or null when none can be shown.
+ *
+ * "Latest" is NOT simply max(index.runs[].number): startFreshRun reserves the
+ * current run as `index.activeRun = getNextRunNumber()` (= max+1) BEFORE it is
+ * folded into index.runs (that happens later in saveCurrentRun). So the genuinely
+ * latest/current run lives at `index.activeRun`, one ahead of the highest entry
+ * in index.runs. Using max(index.runs) here returned "latest − 1". This mirrors
+ * the boot IF-branch, which also prefers index.activeRun.
+ *
+ * Candidate order: index.activeRun first, then the highest saved run number. We
+ * return the first candidate that has an on-disk snapshot (results.json) so the
+ * empty-working-set boot path can't land on a run with no data.
+ */
 function latestRunNumber() {
   const index = loadRunsIndex();
-  if (!index.runs.length) return null;
-  return index.runs.reduce((max, r) => (r.number > max ? r.number : max), index.runs[0].number);
+  const candidates = [];
+  if (index.activeRun != null) candidates.push(index.activeRun);
+  if (index.runs.length) {
+    candidates.push(index.runs.reduce((max, r) => (r.number > max ? r.number : max), index.runs[0].number));
+  }
+  for (const num of candidates) {
+    if (_ex(path.join(RUNS_DIR, `test-${String(num).padStart(3, '0')}`, 'results.json'))) return num;
+  }
+  return null;
 }
 
 function deleteRun(num) {
