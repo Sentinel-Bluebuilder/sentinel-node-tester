@@ -394,6 +394,7 @@ export function createState() {
     balanceUdvpn: 0,
     estimatedTotalCost: null,
     spentUdvpn: 0,
+    runSpentUdvpn: 0,
     startedAt: null,
     completedAt: null,
     errorMessage: null,
@@ -612,6 +613,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   state.balanceUdvpn = parseInt(balRes?.amount || '0', 10);
   state.balance = `${(state.balanceUdvpn / 1_000_000).toFixed(4)} P2P`;
   state.spentUdvpn = 0;
+  if (!resume) state.runSpentUdvpn = 0; // cumulative run spend — preserve across resume
 
   if (resume) {
     broadcast('log', { msg: `Resuming audit with ${results.length} existing results...` });
@@ -1292,6 +1294,7 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
   state.balance = `${(state.balanceUdvpn / 1_000_000).toFixed(4)} P2P`;
   // retest displays only this pass's spend; the run's stored total is accumulated on persist (see persistActiveRun).
   state.spentUdvpn = 0;
+  state.runSpentUdvpn = 0; // fresh PASS — accumulates onto saved run's prior via persistActiveRun
   broadcast('state', { state });
 
   const v2rayAvailable = await checkV2Ray();
@@ -1481,6 +1484,7 @@ export async function runPlanTest(planId, state, broadcast) {
   state.balanceUdvpn = parseInt(balRes?.amount || '0', 10);
   state.balance = `${(state.balanceUdvpn / 1_000_000).toFixed(4)} P2P`;
   state.spentUdvpn = 0;
+  state.runSpentUdvpn = 0; // fresh pass — cumulative run spend
   broadcast('state', { state });
 
   const v2rayAvailable = await checkV2Ray();
@@ -1506,6 +1510,7 @@ export async function runPlanTest(planId, state, broadcast) {
       throw new Error(`Subscribe tx failed code=${subResult.code}: ${subResult.rawLog}`);
     }
     state.spentUdvpn += 200000;
+    state.runSpentUdvpn = (state.runSpentUdvpn || 0) + 200000;
     for (const event of (subResult.events || [])) {
       if (/subscription/i.test(event.type)) {
         for (const attr of event.attributes) {
@@ -1655,6 +1660,7 @@ export async function runPlanTest(planId, state, broadcast) {
         throw new Error(`Session tx failed code=${sessResult.code}: ${sessResult.rawLog}`);
       }
       state.spentUdvpn += 200000;
+      state.runSpentUdvpn = (state.runSpentUdvpn || 0) + 200000;
 
       for (const event of (sessResult.events || [])) {
         if (/session/i.test(event.type)) {
@@ -1813,6 +1819,7 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
   state.balanceUdvpn = parseInt(balRes?.amount || '0', 10);
   state.balance = `${(state.balanceUdvpn / 1_000_000).toFixed(4)} P2P`;
   state.spentUdvpn = 0;
+  state.runSpentUdvpn = 0; // fresh pass — cumulative run spend
   broadcast('state', { state });
 
   // Pre-broadcast fee grant verification — abort with structured error if missing/expired.
@@ -2092,6 +2099,7 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
           throw new Error(`Session tx failed code=${sessResult.code}: ${sessResult.rawLog}`);
         }
         state.spentUdvpn += 200000;
+        state.runSpentUdvpn = (state.runSpentUdvpn || 0) + 200000;
       } else {
         _spBroadcast('log', { msg: `  Starting session (fee-granted by ${granterAddr.slice(0, 12)}…)` });
         sessResult = await broadcastWithFeeGrant(client, account.address, [sessMsg], granterAddr, '', _spBroadcast);

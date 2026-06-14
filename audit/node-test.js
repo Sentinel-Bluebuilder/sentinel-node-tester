@@ -421,8 +421,9 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
     }
 
     state.spentUdvpn += thisCostUdvpn + 200000;
+    state.runSpentUdvpn = (state.runSpentUdvpn || 0) + thisCostUdvpn + 200000;
     state.balance = `${(Math.max(0, state.balanceUdvpn - state.spentUdvpn) / 1_000_000).toFixed(4)} P2P (est. remaining)`;
-    state.estimatedTotalCost = `${(state.spentUdvpn / 1_000_000).toFixed(4)} P2P`;
+    state.estimatedTotalCost = `${(state.runSpentUdvpn / 1_000_000).toFixed(4)} P2P`;
     if (broadcast) broadcast('state', { state });
 
     sessionId = extractSessionId(txResult);
@@ -488,8 +489,9 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
       state._freshSessionIds.set(node.address, String(sessionId));
     }
     state.spentUdvpn += thisCostUdvpn + 200000;
+    state.runSpentUdvpn = (state.runSpentUdvpn || 0) + thisCostUdvpn + 200000;
     state.balance = `${(Math.max(0, state.balanceUdvpn - state.spentUdvpn) / 1_000_000).toFixed(4)} P2P (est. remaining)`;
-    state.estimatedTotalCost = `${(state.spentUdvpn / 1_000_000).toFixed(4)} P2P`;
+    state.estimatedTotalCost = `${(state.runSpentUdvpn / 1_000_000).toFixed(4)} P2P`;
     if (broadcast) broadcast('state', { state });
     if (broadcast) broadcast('log', { msg: `  Fresh session ${sessionId} — waiting for chain + node indexing...` });
     await waitForSessionActive(node.address, account.address, 20_000, sessionId);

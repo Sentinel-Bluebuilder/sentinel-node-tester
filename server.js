@@ -238,6 +238,7 @@ function saveStateSnapshot(force = false) {
       baselineHistory: state.baselineHistory,
       nodeSpeedHistory: state.nodeSpeedHistory,
       spentUdvpn: state.spentUdvpn,
+      runSpentUdvpn: state.runSpentUdvpn ?? 0,
       balanceUdvpn: state.balanceUdvpn,
       balance: state.balance,
       estimatedTotalCost: state.estimatedTotalCost,
@@ -603,20 +604,22 @@ function saveCurrentRun(label) {
   // C-1(b) guard: if the currently-active run is ALREADY a saved run (its index
   // entry exists AND aliases the same SQLite dbRunId we'd write to), do NOT
   // allocate a new run number / create a duplicate index entry / overwrite the
-  // SQLite spend downward. This happens after load+retest (or retest-then-Save):
-  // state.activeDbRunId still points at the saved run while state.spentUdvpn may
-  // hold only a pass-only figure. Re-persist into the SAME run with
-  // accumulateSpend=false so we never reduce stored spend, then return the
-  // existing number. persistActiveRun keeps index + SQLite in lockstep.
+  // SQLite spend downward. This happens after load+retest (or resume-then-Save):
+  // state.activeDbRunId still points at the saved run. Re-persist into the SAME
+  // run with accumulateSpend=false so we never reduce stored spend, then return
+  // the existing number. persistActiveRun keeps index + SQLite in lockstep.
   if (state.activeRunNumber != null && state.activeDbRunId != null) {
     const idxGuard = loadRunsIndex();
     const existing = idxGuard.runs.find(r => r.number === state.activeRunNumber);
     if (existing && existing.dbRunId != null && Number(existing.dbRunId) === Number(state.activeDbRunId)) {
-      // Never reduce stored spend: only re-persist (write-through) when the live
-      // figure is at least the stored cumulative. accumulateSpend=false treats
-      // state.spentUdvpn as the full cumulative (not additive on top of stored).
+      // Compare against the CUMULATIVE run spend (runSpentUdvpn), NOT the
+      // balance-delta spentUdvpn: when resuming an already-saved run, the index
+      // entry still holds the pre-resume total while the post-resume spend lives
+      // only in runSpentUdvpn — reading spentUdvpn here would record the stale
+      // (smaller) figure and silently drop the resume-pass spend from the
+      // on-chain oracle. accumulateSpend=false treats this as the full cumulative.
       const storedSpent = Number(existing.spentUdvpn) || 0;
-      const liveSpent = Number(state.spentUdvpn) || 0;
+      const liveSpent = Number(state.runSpentUdvpn) || 0;
       const passSpent = Math.max(storedSpent, liveSpent);
       state.activeRunSaved = true;
       try {
@@ -689,7 +692,7 @@ function saveCurrentRun(label) {
     failed: failed.length,
     pass10: pass10.length,
     sdk: state.activeSDK,
-    spentUdvpn: Number(state.spentUdvpn) || 0,
+    spentUdvpn: Number(state.runSpentUdvpn) || 0,
     dbRunId: state.activeDbRunId || null,
     auditLog: state.auditLogPath ? path.basename(state.auditLogPath) : null,
   };
@@ -706,7 +709,7 @@ function saveCurrentRun(label) {
         finished_at:    Date.now(),
         node_count:     results.length,
         pass_count:     passed.length,
-        spent_udvpn:    Number(state.spentUdvpn)    || 0,
+        spent_udvpn:    Number(state.runSpentUdvpn) || 0,
       });
     } catch (dbErr) {
       console.error(`[db] updateRunOnFinish failed: ${dbErr.message}`);
@@ -770,7 +773,7 @@ function persistActiveRun(label, { accumulateSpend = true, passSpent = null } = 
   const priorSpent    = accumulateSpend ? (Number(entry?.spentUdvpn)    || 0) : 0;
   // Snapshot the pass spend the caller captured (defends against the idle
   // balance refresher zeroing state.spentUdvpn mid-gap); fall back to live state.
-  const thisPassSpent = passSpent != null ? (Number(passSpent) || 0) : (Number(state.spentUdvpn) || 0);
+  const thisPassSpent = passSpent != null ? (Number(passSpent) || 0) : (Number(state.runSpentUdvpn) || 0);
   const cumulativeSpent    = priorSpent    + thisPassSpent;
   if (!entry) {
     // M-2: no index entry for the active run → create one so index + SQLite
@@ -864,6 +867,7 @@ function loadRunIntoState(num) {
     }
   }
   state.spentUdvpn = _spent;
+  state.runSpentUdvpn = _spent; // loaded run's stored cumulative spend
   state.estimatedTotalCost = _spent > 0 ? `${(_spent / 1_000_000).toFixed(4)} P2P` : '0 P2P';
   // Live Log follows the loaded run: replace the rolling buffer with this run's
   // saved execution log (empty if the run predates per-run log capture).
@@ -990,6 +994,7 @@ function clearActiveRunView() {
   state.activeRunSaved = false;
   state.status = 'idle';
   state.spentUdvpn = 0;
+  state.runSpentUdvpn = 0;
   state.estimatedTotalCost = '0 P2P';
   state.auditLogPath = null;
   // Charts + transient run pointers also belong to the now-deleted run: without
@@ -1062,6 +1067,9 @@ function rehydrateState(results) {
       // Only restore for display purposes, capped to prevent negative.
       if (snap.balanceUdvpn) state.balanceUdvpn = snap.balanceUdvpn;
       if (snap.spentUdvpn) state.spentUdvpn = Math.min(snap.spentUdvpn, state.balanceUdvpn);
+      // runSpentUdvpn is a cumulative payment total (not a balance delta) — restore
+      // uncapped so a stop→bounce→resume preserves the true recorded run spend.
+      if (snap.runSpentUdvpn != null) state.runSpentUdvpn = snap.runSpentUdvpn;
       const remaining = Math.max(0, state.balanceUdvpn - state.spentUdvpn);
       state.balance = `${(remaining / 1_000_000).toFixed(4)} P2P`;
       if (snap.estimatedTotalCost) state.estimatedTotalCost = snap.estimatedTotalCost;
@@ -2251,6 +2259,7 @@ function startFreshRun(label, { mode = 'p2p', plan_id = null } = {}) {
   state.retryCount = 0;
   state.estimatedTotalCost = '0 P2P';
   state.spentUdvpn = 0;
+  state.runSpentUdvpn = 0;
   // Surface the active mode so the UI can render a clear "what's running" badge:
   // 'subscription' (sub-plan), 'p2p', 'test'. Plan id is null unless mode === 'subscription'.
   state.runMode = mode;
@@ -2557,12 +2566,15 @@ app.post('/api/retest-skips', adminOnly, async (req, res) => {
   const tracked = withBatchTracking(broadcast, state.runMode || 'p2p');
   runRetestSkips(skipAddrs, state, tracked).then(() => {
     // Snapshot this-pass spend NOW, before the idle balance refresher can zero
-    // state.spentUdvpn in the gap before persist. Then reset state.spentUdvpn to
-    // the true cumulative so the live header + any later Save reflect the real total.
-    const passSpent = Number(state.spentUdvpn) || 0;
+    // state.spentUdvpn in the gap before persist. runRetestSkips resets the
+    // cumulative accumulator (runSpentUdvpn) to 0 at its top, so this-pass spend
+    // lives in runSpentUdvpn. Then set BOTH state.spentUdvpn (balance-delta) and
+    // state.runSpentUdvpn (cumulative) to the true running total so the live
+    // header + any later Save reflect the real total.
+    const passSpent = Number(state.runSpentUdvpn) || 0;
     try {
       const r = persistActiveRun(undefined, { passSpent });
-      if (r) state.spentUdvpn = r.cumulativeSpent;
+      if (r) { state.spentUdvpn = r.cumulativeSpent; state.runSpentUdvpn = r.cumulativeSpent; }
     } catch (e) { console.error('[retest-skips] persistActiveRun failed:', e.message); }
   }).catch(err => {
     state.status = 'error';
@@ -2593,12 +2605,14 @@ app.post('/api/retest-fails', adminOnly, async (req, res) => {
   }
   const tracked = withBatchTracking(broadcast, state.runMode || 'p2p');
   runRetestSkips(failAddrs, state, tracked).then(() => {
-    // Snapshot this-pass spend before the idle refresher can zero it; reset
-    // state.spentUdvpn to the true cumulative for the live header + later Save.
-    const passSpent = Number(state.spentUdvpn) || 0;
+    // Snapshot this-pass spend (from runSpentUdvpn, the cumulative accumulator
+    // which runRetestSkips reset to 0 at its top) before the idle refresher can
+    // zero it; set BOTH state.spentUdvpn (balance-delta) and state.runSpentUdvpn
+    // (cumulative) to the true cumulative for the live header + later Save.
+    const passSpent = Number(state.runSpentUdvpn) || 0;
     try {
       const r = persistActiveRun(undefined, { passSpent });
-      if (r) state.spentUdvpn = r.cumulativeSpent;
+      if (r) { state.spentUdvpn = r.cumulativeSpent; state.runSpentUdvpn = r.cumulativeSpent; }
     } catch (e) { console.error('[retest-fails] persistActiveRun failed:', e.message); }
   }).catch(err => {
     state.status = 'error';
@@ -2727,6 +2741,7 @@ app.post('/api/clear', adminOnly, (req, res) => {
   // leave spend/total/currentNode stale, so the header would still show the old
   // Net Spend / Total. Reset those transient fields too for a consistent wipe.
   state.spentUdvpn = 0;
+  state.runSpentUdvpn = 0;
   state.estimatedTotalCost = '0 P2P';
   state.totalNodes = 0;
   state.currentNode = null;
@@ -2922,12 +2937,14 @@ app.post('/api/auto-retest', adminOnly, async (req, res) => {
   const tracked = withBatchTracking(broadcast, state.runMode || 'p2p');
   runRetestSkips(retestable.map(r => r.address), state, tracked).then(() => {
     // Persist back to the SAME run number — no new run is created.
-    // Snapshot this-pass spend before the idle refresher can zero it; reset
-    // state.spentUdvpn to the true cumulative for the live header + later Save.
-    const passSpent = Number(state.spentUdvpn) || 0;
+    // Snapshot this-pass spend from runSpentUdvpn (the cumulative accumulator
+    // runRetestSkips reset to 0 at its top) before the idle refresher can zero
+    // it; set BOTH state.spentUdvpn (balance-delta) and state.runSpentUdvpn
+    // (cumulative) to the true cumulative for the live header + later Save.
+    const passSpent = Number(state.runSpentUdvpn) || 0;
     try {
       const r = persistActiveRun(undefined, { passSpent });
-      if (r) state.spentUdvpn = r.cumulativeSpent;
+      if (r) { state.spentUdvpn = r.cumulativeSpent; state.runSpentUdvpn = r.cumulativeSpent; }
     } catch (e) { console.error('[auto-retest] persistActiveRun failed:', e.message); }
   }).catch(err => {
     state.status = 'error';

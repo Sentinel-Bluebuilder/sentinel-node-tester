@@ -378,11 +378,16 @@ export async function submitBatchPayment(client, account, denom, gigabytes, batc
       const list = pricingMode === 'hours' ? (node.hourly_prices || []) : (node.gigabyte_prices || []);
       const priceEntry = list.find(p => p.denom === denom);
       const units = pricingMode === 'hours' ? sessionHours : gigabytes;
-      if (priceEntry) state.spentUdvpn += Math.round(parseFloat(priceEntry.quote_value) || 0) * units;
+      if (priceEntry) {
+        const _amt = Math.round(parseFloat(priceEntry.quote_value) || 0) * units;
+        state.spentUdvpn += _amt;
+        state.runSpentUdvpn = (state.runSpentUdvpn || 0) + _amt;
+      }
     });
     state.spentUdvpn += 200000 * n;
+    state.runSpentUdvpn = (state.runSpentUdvpn || 0) + 200000 * n;
     state.balance = `${(Math.max(0, state.balanceUdvpn - state.spentUdvpn) / 1_000_000).toFixed(4)} P2P (est. remaining)`;
-    state.estimatedTotalCost = `${(state.spentUdvpn / 1_000_000).toFixed(4)} P2P`;
+    state.estimatedTotalCost = `${(state.runSpentUdvpn / 1_000_000).toFixed(4)} P2P`;
     if (broadcast) broadcast('state', { state });
   }
   result._reusedAddrs = reusedAddrs;
