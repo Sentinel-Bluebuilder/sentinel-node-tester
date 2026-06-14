@@ -1166,7 +1166,7 @@ app.get('/api/sdk-versions', adminOnly, async (req, res) => {
     const { readFileSync } = await import('fs');
     const versions = getInstalledVersions(__dirname);
     const pkg = JSON.parse(readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
-    res.json({ tester: { version: pkg.version, name: pkg.name }, sdks: versions });
+    res.json({ tester: { version: pkg.version, name: pkg.name, platform: process.platform }, sdks: versions });
   } catch (err) {
     console.error('[api/sdk-versions]', err);
     res.status(500).json({ error: 'Internal error' });

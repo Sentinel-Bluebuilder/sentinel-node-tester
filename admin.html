@@ -866,8 +866,8 @@
     </div>
     <div class="subheader-divider"></div>
     <div class="subheader-group">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" style="opacity:0.5"><path d="M0 0h11.4v11.4H0zm12.6 0H24v11.4H12.6zM0 12.6h11.4V24H0zm12.6 12.6H24V12.6H12.6z" fill="currentColor"/></svg>
-      <span class="subheader-label">Windows</span>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.5"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+      <span class="subheader-label" id="testerOsLabel">—</span>
       <span id="sdkToggle" class="sdk-toggle">
         <span id="sdkJs" onclick="setSDK('js')" class="sdk-toggle-opt active">BLUE JS</span>
         <span id="sdkCs" onclick="setSDK('csharp')" class="sdk-toggle-opt">BLUE C#</span>
@@ -1299,6 +1299,13 @@
         ]);
         if (!vRes) { el.textContent = 'SDK versions unavailable'; return; }
         _sdkVersionCache = vRes;
+        // Reflect the tester's actual OS (was hardcoded to "Windows").
+        const _osEl = document.getElementById('testerOsLabel');
+        if (_osEl) {
+          const OS_NAMES = { win32: 'Windows', darwin: 'macOS', linux: 'Linux' };
+          const p = vRes.tester?.platform;
+          _osEl.textContent = OS_NAMES[p] || p || 'Unknown';
+        }
         renderSdkChips(el, vRes, lRes || {});
       } catch {
         el.textContent = 'SDK versions unavailable';
