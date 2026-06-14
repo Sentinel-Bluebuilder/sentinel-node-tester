@@ -2806,8 +2806,9 @@ app.delete('/api/runs/:num', adminOnly, (req, res) => {
     // saved run (if any) so they keep seeing a real run. Only truly empty (no
     // saved runs left) stays cleared.
     const latest = latestRunNumber();
-    if (latest != null) {
-      loadRunIntoState(latest);
+    // Guard on the load actually succeeding (a stale index entry could point at a
+    // missing snapshot dir) — mirrors the boot branch. If it fails, stay cleared.
+    if (latest != null && loadRunIntoState(latest)) {
       // clearActiveRunView already flushed a snapshot with activeRunNumber=null;
       // re-flush now that we've loaded the latest run so the reserved state is
       // durable across a bounce.
