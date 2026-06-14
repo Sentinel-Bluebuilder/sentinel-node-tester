@@ -400,6 +400,33 @@ export function updateRunOnFinish(runId, { finished_at, node_count, pass_count, 
   `).run({ id: runId, finished_at, node_count, pass_count });
 }
 
+/**
+ * Recover a saved run's spend/refund by matching the SQLite runs row to a
+ * file-snapshot run. saveCurrentRun writes the snapshot's ISO `date` and the
+ * SQLite `finished_at` in the same call with identical node counts, so closest
+ * finish time + matching node_count is a precise (not heuristic) match.
+ * Returns { spent_udvpn, refunded_udvpn } or null.
+ *
+ * @param {number} finishedAt - ms epoch (Date.parse of the snapshot date)
+ * @param {number} nodeCount  - the snapshot's total node count
+ * @param {number} [toleranceMs=15000]
+ */
+export function getRunSpendByFinish(finishedAt, nodeCount, toleranceMs = 15000, which) {
+  if (!Number.isFinite(finishedAt)) return null;
+  const db = getDb(which);
+  const row = db.prepare(`
+    SELECT spent_udvpn, refunded_udvpn
+    FROM runs
+    WHERE finished_at IS NOT NULL
+      AND node_count = @nodeCount
+      AND ABS(finished_at - @finishedAt) <= @tol
+    ORDER BY ABS(finished_at - @finishedAt) ASC
+    LIMIT 1
+  `).get({ nodeCount, finishedAt, tol: toleranceMs });
+  if (!row) return null;
+  return { spent_udvpn: Number(row.spent_udvpn) || 0, refunded_udvpn: Number(row.refunded_udvpn) || 0 };
+}
+
 // ─── Result Mutations ─────────────────────────────────────────────────────────
 
 /**

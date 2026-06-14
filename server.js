@@ -20,7 +20,7 @@ import { ensureLcd, getActiveLcd, cleanupRpc, getAllNodes } from './core/chain.j
 import { nodeStatusV3 } from './protocol/v3protocol.js';
 import { createState, runAudit, runRetestSkips, runPlanTest, runSubPlanTest, getResults, saveResults, setActiveRunDir, setActiveDbRunId, triggerPipelineStop } from './audit/pipeline.js';
 import {
-  insertRun, updateRunOnFinish,
+  insertRun, updateRunOnFinish, getRunSpendByFinish,
   insertResult, insertErrorLog,
   searchNodes, getNodeDetail, getNodeErrors, getCountryList,
   getActiveRun, getLastCompletedRun, getBandwidthHistory,
@@ -2333,14 +2333,29 @@ app.post('/api/runs/load/:num', adminOnly, (req, res) => {
   saveResults();
   rehydrateState(data);
   // Restore this run's spend/refund totals (rehydrateState only recomputes
-  // per-node counts) so the header's Net Spend / Refunded reflect the run.
-  // spentUdvpn is already net (refunds decrement it in pipeline.js).
-  const _runMeta = loadRunsIndex().runs.find(r => r.number === num);
-  state.spentUdvpn = Number(_runMeta?.spentUdvpn) || 0;
-  state.refundedUdvpn = Number(_runMeta?.refundedUdvpn) || 0;
-  state.estimatedTotalCost = state.spentUdvpn > 0
-    ? `${(state.spentUdvpn / 1_000_000).toFixed(4)} P2P`
-    : '0 P2P';
+  // per-node counts). spentUdvpn is already net (refunds decrement it).
+  const _idx = loadRunsIndex();
+  const _runMeta = _idx.runs.find(r => r.number === num);
+  let _spent = Number(_runMeta?.spentUdvpn) || 0;
+  let _refunded = Number(_runMeta?.refundedUdvpn) || 0;
+  // Runs saved before spend was stored in the snapshot: recover it from the
+  // SQLite runs table (matched by finish time + node count) and backfill the
+  // index so later loads are instant.
+  if (_runMeta && _runMeta.spentUdvpn == null && _runMeta.date) {
+    try {
+      const m = getRunSpendByFinish(Date.parse(_runMeta.date), Number(_runMeta.total) || 0);
+      if (m) {
+        _spent = m.spent_udvpn;
+        _refunded = m.refunded_udvpn;
+        _runMeta.spentUdvpn = _spent;
+        _runMeta.refundedUdvpn = _refunded;
+        saveRunsIndex(_idx);
+      }
+    } catch (e) { console.error('[runs] spend backfill failed:', e.message); }
+  }
+  state.spentUdvpn = _spent;
+  state.refundedUdvpn = _refunded;
+  state.estimatedTotalCost = _spent > 0 ? `${(_spent / 1_000_000).toFixed(4)} P2P` : '0 P2P';
   state.activeRunNumber = num;
   state.status = 'idle';
   broadcastStateFresh();
