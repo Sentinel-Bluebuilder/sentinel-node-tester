@@ -179,7 +179,7 @@ The server boot path was hardened after a silent-zombie incident: `node server.j
 - `core/db.js:_openHandle` sets `PRAGMA busy_timeout = 5000` so writers wait instead of failing immediately with `SQLITE_BUSY` when ad-hoc scripts compete for the WAL lock.
 - `core/db.js` registers `process.on('exit', closeDb)` so any importer (the server, CLI commands, ad-hoc `node -e "import('./core/db.js')..."` verifiers) releases the WAL lock cleanly on exit. **A hung verifier without this hook deadlocks every subsequent `getDb()` call.**
 - Never run an ad-hoc `node -e` import of `core/db.js` while the server is starting. If you must verify migrations, kill the server first or use a `:memory:` handle.
-- Scripts in `scripts/` (backfill-runs, cleanup-runaway-runs, probe-plan36-scan) hold the WAL lock for their full lifetime — don't run them in parallel with the server.
+- Scripts in `scripts/` (cleanup, probe-plan36-scan) hold the WAL lock for their full lifetime — don't run them in parallel with the server. `cleanup.mjs` opens the DB read-only in report mode; only `--fix` writes (after backing up audit.db + index.json).
 
 ### When boot still hangs
 The server now logs loudly on boot failure. If a future regression brings back the silent-zombie pattern, the diagnosis order is:

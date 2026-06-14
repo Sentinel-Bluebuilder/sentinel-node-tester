@@ -40,7 +40,7 @@
     "audit": "node server.js",
     "test": "node test/smoke.test.js && node test/db.smoke.test.js && node test/continuous.smoke.test.js && node test/security.test.js",
     "test:ui": "node test/ui.smoke.test.js",
-    "backfill": "node scripts/backfill-runs.mjs"
+    "cleanup": "node scripts/cleanup.mjs"
   },
   "keywords": [
     "sentinel",
@@ -86,8 +86,7 @@
     "types/",
     "docs/",
     "scripts/postinstall.js",
-    "scripts/backfill-runs.mjs",
-    "scripts/cleanup-runaway-runs.mjs",
+    "scripts/cleanup.mjs",
     "bin/cli.js",
     "bin/commands/",
     "bin/lib/",
