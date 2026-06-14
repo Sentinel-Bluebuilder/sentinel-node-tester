@@ -1902,6 +1902,13 @@ app.post('/api/resume', adminOnly, async (req, res) => {
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const results = getResults();
   if (results.length === 0) return res.json({ error: 'No results to resume from. Use Start to begin a new test.' });
+  // Resume only continues an INCOMPLETE run. A completed run has nothing left to
+  // test — Retest Failed is the action there. (Defense-in-depth: the UI already
+  // hides Resume when complete.)
+  const _doneNodes = (state.testedNodes || 0) + (state.failedNodes || 0) + (state.skippedNodes || 0);
+  if ((state.totalNodes || 0) - _doneNodes <= 0) {
+    return res.json({ error: 'RUN_COMPLETE', message: 'Run is complete — nothing to resume. Use Retest Failed to re-test failures.' });
+  }
   // Ensure run directory exists and is active for continuous saves
   const resumeRunDir = path.join(RUNS_DIR, `test-${String(state.activeRunNumber).padStart(3, '0')}`);
   try { _mkd(resumeRunDir, { recursive: true }); } catch { }

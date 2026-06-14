@@ -1562,10 +1562,27 @@
       const btnResume = document.getElementById('btnResume');
       const btnRetest = document.getElementById('btnRetestFails');
       const btnStop = document.getElementById('btnStop');
+
+      // Resume only continues an INCOMPLETE run (nodes still untested). A
+      // completed run has nothing to resume — Retest Failed is the action there.
+      const _done = (state.testedNodes || 0) + (state.failedNodes || 0) + (state.skippedNodes || 0);
+      const _remaining = (state.totalNodes || 0) - _done;
+      const _failCount = (resultsArr || []).filter(r => r && r.actualMbps == null && !r.skipped && r.errorCode !== 'TEST_RUN_SKIP').length;
+
       btnStart.disabled = active;
-      if (btnResume) btnResume.disabled = active;
-      if (btnRetest) btnRetest.disabled = active;
       btnStop.disabled = !active;
+      // Resume: visible only for an incomplete, not-running run.
+      if (btnResume) {
+        const showResume = !active && _remaining > 0;
+        btnResume.style.display = showResume ? '' : 'none';
+        btnResume.disabled = !showResume;
+      }
+      // Retest Failed: visible only when there are failures and not running.
+      if (btnRetest) {
+        const showRetest = !active && _failCount > 0;
+        btnRetest.style.display = showRetest ? '' : 'none';
+        btnRetest.disabled = !showRetest;
+      }
 
       if (active) {
         const label = paused ? 'Paused' : 'Running...';
@@ -1577,7 +1594,7 @@
       } else {
         btnStart.textContent = 'New Test';
         btnStart.classList.remove('loading');
-        if (btnResume) { btnResume.textContent = 'Resume'; btnResume.classList.remove('loading'); btnResume.disabled = false; }
+        if (btnResume) { btnResume.textContent = 'Resume'; btnResume.classList.remove('loading'); }
         btnStop.textContent = 'Stop Test';
         btnStop.classList.remove('loading');
       }
