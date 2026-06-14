@@ -1562,6 +1562,10 @@
       const _failCount = (resultsArr || []).filter(r => r && r.actualMbps == null && !r.skipped && r.errorCode !== 'TEST_RUN_SKIP').length;
 
       btnStart.disabled = active;
+      // NEW TEST: visible only when NO run is in progress (idle/done). A run
+      // that's running OR paused is still in progress and /api/start is refused,
+      // so the button hides. Run status is conveyed by the header dot + badge.
+      btnStart.style.display = active ? 'none' : '';
       // STOP: visible ONLY while actively running. A paused run is parked /
       // auto-resuming — there's nothing live to interrupt from here.
       btnStop.style.display = running ? '' : 'none';

@@ -809,6 +809,12 @@ function loadRunIntoState(num) {
   state.loadedReadonly = true;
   // Saved iff this run has an index entry (it does when _runMeta was found).
   state.activeRunSaved = !!_runMeta;
+  // Point the pipeline at THIS run's SQLite row (or detach when unknown) so a
+  // later Retest → persistActiveRun updates the correct runs row instead of a
+  // stale prior-run id left in state from an earlier live run.
+  state.activeDbRunId = _runMeta?.dbRunId != null ? Number(_runMeta.dbRunId) : null;
+  try { setActiveDbRunId(state.activeDbRunId); }
+  catch (e) { console.error('[runs] setActiveDbRunId on load failed:', e.message); }
   return data;
 }
 
