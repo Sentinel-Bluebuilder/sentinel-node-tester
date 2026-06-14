@@ -54,7 +54,12 @@
 
 /**
  * @typedef {Object} AuditState
- * @property {'idle'|'running'|'paused'|'done'|'error'} status
+ * @property {'idle'|'running'|'paused'|'paused_balance'|'paused_internet'|'stopped'|'done'|'error'} status
+ *   Run lifecycle status. The pause states self-resume via internal poll loops:
+ *   'paused_balance' (insufficient funds) and 'paused_internet' (no connectivity)
+ *   keep the pipeline goroutine alive. 'paused' is the diagnostics-subsystem
+ *   pause. server.js isPipelineBusy()/isAuditBusy() are the source of truth for
+ *   which of these count as "an audit is in-flight".
  * @property {number} totalNodes
  * @property {number} testedNodes
  * @property {number} failedNodes - Was skippedNodes, now counts FAIL results
