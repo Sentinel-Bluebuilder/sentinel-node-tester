@@ -1133,7 +1133,16 @@ function rehydrateState(results) {
       const cand = index.activeRun != null ? index.activeRun
                  : (index.runs.length > 0 ? index.runs[index.runs.length - 1].number : null);
       const candData = cand != null ? loadRun(cand) : null;
-      const reused = candData && candData.length === results.length;
+      // Strengthen "is the working set the SAME run as `cand`?" beyond length:
+      // two DIFFERENT audits of the same chain set have identical length but
+      // different per-node timestamps/speeds. Matching on length alone aliased
+      // them, so a later save overwrote a real saved run (the "Test #11"
+      // corruption). Compare an order-independent content key; err STRICT (fresh
+      // number when unsure) — a fresh number can never overwrite a saved run.
+      const _runKey = rows => rows.map(r => `${r.address}|${r.timestamp || ''}|${r.actualMbps == null ? 'x' : r.actualMbps}`).sort().join('\n');
+      const reused = candData
+        && candData.length === results.length
+        && _runKey(candData) === _runKey(results);
       state.activeRunNumber = reused ? cand : getNextRunNumber();
       // When we assigned a FRESH number (not reusing a saved run), reserve it by
       // persisting it into the snapshot immediately. getNextRunNumber() only
