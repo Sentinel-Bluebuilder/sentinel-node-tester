@@ -751,6 +751,10 @@ function deleteRun(num) {
  * wrong SQLite row.
  */
 function clearActiveRunView() {
+  // Detach the pipeline's run dir + db id FIRST so saveResults() below doesn't
+  // try a crash-safe copy into the directory deleteRun just removed.
+  try { setActiveDbRunId(null); } catch (e) { console.error('[deleteRun] setActiveDbRunId(null) failed:', e.message); }
+  try { setActiveRunDir(null); } catch (e) { console.error('[deleteRun] setActiveRunDir(null) failed:', e.message); }
   const results = getResults();
   results.length = 0;
   saveResults();
@@ -764,8 +768,6 @@ function clearActiveRunView() {
   state.estimatedTotalCost = '0 P2P';
   state.auditLogPath = null;
   logBuffer.length = 0;
-  try { setActiveDbRunId(null); } catch (e) { console.error('[deleteRun] setActiveDbRunId(null) failed:', e.message); }
-  try { setActiveRunDir(null); } catch (e) { console.error('[deleteRun] setActiveRunDir(null) failed:', e.message); }
   try { flushStateSnapshot(); } catch (e) { console.error('[deleteRun] snapshot flush failed:', e.message); }
 }
 
@@ -2734,11 +2736,16 @@ app.post('/api/runs/load/:num', adminOnly, (req, res) => {
 app.delete('/api/runs/:num', adminOnly, (req, res) => {
   const num = parseInt(req.params.num);
   if (!Number.isInteger(num)) return res.status(400).json({ error: 'Invalid run number' });
-  // Only refuse deletion when an audit is ACTIVELY running/paused on this run —
+  // Only refuse deletion when an audit is ACTIVELY running/parked on this run —
   // yanking the dir out from under a live writer would corrupt it. A stopped /
   // done / idle run that merely happens to still be the loaded/selected run can
   // be deleted: we reset the live view below so nothing dangles at a gone dir.
-  const inFlight = state.status === 'running' || state.status === 'paused' || continuous.status().running;
+  // NOTE: the pipeline's real mid-run pause states are 'paused_balance' and
+  // 'paused_internet' (it parks in a poll loop that still holds the run dir +
+  // db id and resumes writing on recovery) — they MUST count as in-flight. Bare
+  // 'paused' is only ever set by protocol/diagnostics, never the audit pipeline.
+  const IN_FLIGHT_STATUSES = ['running', 'paused', 'paused_balance', 'paused_internet'];
+  const inFlight = IN_FLIGHT_STATUSES.includes(state.status) || continuous.status().running;
   if (state.activeRunNumber === num && inFlight) {
     return res.status(409).json({
       error: 'RUN_ACTIVE',
