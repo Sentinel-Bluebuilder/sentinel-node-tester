@@ -739,6 +739,75 @@ function loadRun(num) {
   return JSON.parse(_rfs(resultsPath, 'utf8'));
 }
 
+/**
+ * Load a saved run's snapshot into the live `state` + working results so the
+ * dashboard displays it as a read-only historical run. Single source of truth
+ * for "show this run", used by:
+ *   - POST /api/runs/load/:num (operator picks a run from the dropdown)
+ *   - the boot path (admin always lands on the latest run, never a blank "new")
+ *   - the delete-of-active fallback (drop back to the latest remaining run)
+ * Returns the loaded results array, or null when the snapshot is missing. Does
+ * NOT broadcast — callers broadcast/respond as appropriate.
+ */
+function loadRunIntoState(num) {
+  const data = loadRun(num);
+  if (!data) return null;
+  // Replace the working set with the loaded run.
+  const results = getResults();
+  results.length = 0;
+  results.push(...data);
+  saveResults();
+  rehydrateState(data);
+  // A loaded run is a complete set, so its Total is its own node count — not the
+  // last live audit's chain total (which rehydrateState deliberately leaves in
+  // place). Without this the header's Total/Remaining stuck on the prior run.
+  state.totalNodes = data.length;
+  // Restore this run's spend total (rehydrateState only recomputes per-node
+  // counts). spentUdvpn is already net.
+  const _idx = loadRunsIndex();
+  const _runMeta = _idx.runs.find(r => r.number === num);
+  let _spent = Number(_runMeta?.spentUdvpn) || 0;
+  if (_runMeta && _runMeta.spentUdvpn == null) {
+    // Preferred path: a stored dbRunId makes the spend lookup deterministic.
+    // Fall back to the getRunSpendByFinish time+count heuristic only when no
+    // dbRunId was recorded (runs saved before that field existed).
+    let recovered = false;
+    if (_runMeta.dbRunId) {
+      try {
+        const row = getRun(Number(_runMeta.dbRunId));
+        if (row) { _spent = Number(row.spent_udvpn) || 0; _runMeta.spentUdvpn = _spent; saveRunsIndex(_idx); recovered = true; }
+      } catch (e) { console.error('[runs] spend lookup by dbRunId failed:', e.message); }
+    }
+    if (!recovered && _runMeta.date) {
+      try {
+        const m = getRunSpendByFinish(Date.parse(_runMeta.date), Number(_runMeta.total) || 0);
+        if (m) { _spent = m.spent_udvpn; _runMeta.spentUdvpn = _spent; saveRunsIndex(_idx); }
+      } catch (e) { console.error('[runs] spend backfill failed:', e.message); }
+    }
+  }
+  state.spentUdvpn = _spent;
+  state.estimatedTotalCost = _spent > 0 ? `${(_spent / 1_000_000).toFixed(4)} P2P` : '0 P2P';
+  // Live Log follows the loaded run: replace the rolling buffer with this run's
+  // saved execution log (empty if the run predates per-run log capture).
+  const _runLogPath = path.join(RUNS_DIR, `test-${String(num).padStart(3, '0')}`, 'audit.log');
+  logBuffer.length = 0;
+  if (_ex(_runLogPath)) { try { hydrateLogBufferFromFile(_runLogPath); } catch { } }
+  state.activeRunNumber = num;
+  state.status = 'idle';
+  // Mark as a loaded, read-only historical snapshot. /api/resume refuses while
+  // this is set so a resume can't append live rows onto a past run. Cleared by
+  // startFreshRun() (New Test / Retest) and a genuine in-flight resume.
+  state.loadedReadonly = true;
+  return data;
+}
+
+/** Highest saved run number, or null when no runs are saved. */
+function latestRunNumber() {
+  const index = loadRunsIndex();
+  if (!index.runs.length) return null;
+  return index.runs.reduce((max, r) => (r.number > max ? r.number : max), index.runs[0].number);
+}
+
 function deleteRun(num) {
   const index = loadRunsIndex();
   const i = index.runs.findIndex(r => r.number === num);
@@ -937,6 +1006,20 @@ function rehydrateState(results) {
     }
 
     console.log(`Resuming Test #${state.activeRunNumber} | ${results.length} results: ${state.testedNodes} passed, ${state.failedNodes} failed | SDK: ${state.activeSDK}`);
+  } else {
+    // No working-set results on disk (fresh boot after a delete-of-active or a
+    // wipe) — but saved runs may still exist. Land the admin on the LATEST saved
+    // run so login shows a real run, never a blank "new" one. A new run only
+    // appears when the operator clicks Start New Test.
+    try {
+      const latest = latestRunNumber();
+      if (latest != null && loadRunIntoState(latest)) {
+        console.log(`[boot] no live results — showing latest saved run Test #${latest}`);
+        // Reserve the loaded run + read-only marker in the snapshot now so a
+        // bounce before the next periodic write doesn't drop back to blank.
+        try { flushStateSnapshot(); } catch (e) { console.error('[boot] snapshot flush after autoload failed:', e.message); }
+      }
+    } catch (e) { console.error('[boot] latest-run autoload failed:', e.message); }
   }
 }
 
@@ -2690,67 +2773,8 @@ app.get('/api/runs/:num', adminOnly, (req, res) => {
 
 app.post('/api/runs/load/:num', adminOnly, (req, res) => {
   const num = parseInt(req.params.num);
-  const data = loadRun(num);
+  const data = loadRunIntoState(num);
   if (!data) return res.status(404).json({ error: `Test #${num} not found` });
-
-  // Replace current results with loaded run
-  const results = getResults();
-  results.length = 0;
-  results.push(...data);
-  saveResults();
-  rehydrateState(data);
-  // A loaded run is a complete set, so its Total is its own node count — not the
-  // last live audit's chain total, which rehydrateState deliberately leaves in
-  // place. Without this the header's Total/Remaining stayed stuck on the last
-  // run no matter which saved run you selected.
-  state.totalNodes = data.length;
-  // Restore this run's spend total (rehydrateState only recomputes
-  // per-node counts). spentUdvpn is already net.
-  const _idx = loadRunsIndex();
-  const _runMeta = _idx.runs.find(r => r.number === num);
-  let _spent = Number(_runMeta?.spentUdvpn) || 0;
-  if (_runMeta && _runMeta.spentUdvpn == null) {
-    // Preferred path: a stored dbRunId makes the spend lookup deterministic.
-    // Fall back to the getRunSpendByFinish time+count heuristic only when no
-    // dbRunId was recorded (runs saved before this field existed).
-    let recovered = false;
-    if (_runMeta.dbRunId) {
-      try {
-        const row = getRun(Number(_runMeta.dbRunId));
-        if (row) {
-          _spent = Number(row.spent_udvpn) || 0;
-          _runMeta.spentUdvpn = _spent;
-          saveRunsIndex(_idx);
-          recovered = true;
-        }
-      } catch (e) { console.error('[runs] spend lookup by dbRunId failed:', e.message); }
-    }
-    if (!recovered && _runMeta.date) {
-      try {
-        const m = getRunSpendByFinish(Date.parse(_runMeta.date), Number(_runMeta.total) || 0);
-        if (m) {
-          _spent = m.spent_udvpn;
-          _runMeta.spentUdvpn = _spent;
-          saveRunsIndex(_idx);
-        }
-      } catch (e) { console.error('[runs] spend backfill failed:', e.message); }
-    }
-  }
-  state.spentUdvpn = _spent;
-  state.estimatedTotalCost = _spent > 0 ? `${(_spent / 1_000_000).toFixed(4)} P2P` : '0 P2P';
-  // Live Log follows the loaded run: replace the rolling buffer with this run's
-  // saved execution log (empty if the run predates per-run log capture). Admin
-  // loadRun() reloads the page, so the SSE init then paints this buffer.
-  const _runLogPath = path.join(RUNS_DIR, `test-${String(num).padStart(3, '0')}`, 'audit.log');
-  logBuffer.length = 0;
-  if (_ex(_runLogPath)) { try { hydrateLogBufferFromFile(_runLogPath); } catch { } }
-  state.activeRunNumber = num;
-  state.status = 'idle';
-  // Mark this as a loaded, read-only historical snapshot. /api/resume refuses
-  // while this flag is set so a resume can't append live results onto a past
-  // run and mint a duplicate run number with a stale db-run-id/mode. Cleared
-  // by startFreshRun() (New Test / Retest) and by a genuine in-flight resume.
-  state.loadedReadonly = true;
   broadcastStateFresh();
   broadcast('log', { msg: `📂 Loaded Test #${num} (${data.length} results)` });
   res.json({ ok: true, number: num, total: data.length });
@@ -2778,6 +2802,17 @@ app.delete('/api/runs/:num', adminOnly, (req, res) => {
   if (!ok) return res.status(404).json({ error: `Test #${num} not found` });
   if (wasActive) {
     clearActiveRunView();
+    // Don't strand the admin on a blank view — fall back to the latest remaining
+    // saved run (if any) so they keep seeing a real run. Only truly empty (no
+    // saved runs left) stays cleared.
+    const latest = latestRunNumber();
+    if (latest != null) {
+      loadRunIntoState(latest);
+      // clearActiveRunView already flushed a snapshot with activeRunNumber=null;
+      // re-flush now that we've loaded the latest run so the reserved state is
+      // durable across a bounce.
+      try { flushStateSnapshot(); } catch (e) { console.error('[deleteRun] snapshot flush after fallback failed:', e.message); }
+    }
     broadcastStateFresh();
   }
   broadcast('log', { msg: `🗑 Deleted Test #${num}` });
