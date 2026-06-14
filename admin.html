@@ -772,7 +772,7 @@
 </head>
 
 <body class="boot-pending">
-<script>document.documentElement.dataset.theme = localStorage.getItem('theme') || 'dark'; document.addEventListener('DOMContentLoaded', () => document.body.classList.remove('boot-pending'));</script>
+<script>document.documentElement.dataset.theme = localStorage.getItem('theme') || 'dark'; (function(){var f=function(){document.body.classList.remove('boot-pending');};if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',f);else f();})();</script>
 
 
   <header>
@@ -1119,6 +1119,16 @@
   </main>
 
   <script>
+    // Run init once the DOM is parsed. Some deploy paths execute this script
+    // AFTER DOMContentLoaded has already fired (e.g. the admin page swapped in
+    // after login) — a listener added then never runs, which silently killed
+    // /api/stats, SDK versions and the SSE connect (all gated on the event).
+    // When the event has already passed, defer to a macrotask so the rest of
+    // this script (top-level const/let) finishes initialising before init runs.
+    function onReady(fn) {
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fn);
+      else setTimeout(fn, 0);
+    }
     function toggleTheme() {
       const cur = document.documentElement.dataset.theme || 'dark';
       const next = cur === 'dark' ? 'light' : 'dark';
@@ -1134,7 +1144,7 @@
       if (cur === 'dark') { dark.style.display = ''; light.style.display = 'none'; }
       else { dark.style.display = 'none'; light.style.display = ''; }
     }
-    document.addEventListener('DOMContentLoaded', updateThemeIcon);
+    onReady(updateThemeIcon);
 
     async function doLogout() {
       if (!confirm('Log out and clear session? You will need the admin token to log back in.')) return;
@@ -1239,7 +1249,7 @@
       } catch {}
     }
 
-    window.addEventListener('DOMContentLoaded', () => {
+    onReady(() => {
       // Load stats instantly (tiny payload, no results)
       fetch('/api/stats').then(r => r.json()).then(d => {
         if (d.state) { state = Object.assign(state, d.state); applyState(); }
@@ -3443,43 +3453,11 @@ Record (28 bytes × count)
     }
 
     // Plan test
-    async function loadPlans() {
-      const sel = document.getElementById('planSelect');
-      sel.innerHTML = '<option value="">Loading plans...</option>';
-      try {
-        const res = await fetch('/api/plans');
-        const data = await res.json();
-        sel.innerHTML = '<option value="">Select Plan...</option>';
-        for (const p of (data.plans || [])) {
-          const priceLabel = p.price ? `${(parseInt(p.price.amount || 0) / 1e6).toFixed(0)} P2P` : 'Free';
-          sel.innerHTML += `<option value="${p.id}">Plan ${p.id} — ${p.nodes} nodes, ${p.subs} subs (${priceLabel})</option>`;
-        }
-      } catch (e) {
-        sel.innerHTML = '<option value="">Failed to load plans</option>';
-      }
-    }
-
-    async function testPlan() {
-      const sel = document.getElementById('planSelect');
-      const planId = sel.value;
-      if (!planId) { appendLog('Select a plan first'); return; }
-      const btn = document.getElementById('btnPlanTest');
-      btn.disabled = true;
-      btn.textContent = 'Testing...';
-      document.getElementById('btnStop').disabled = false;
-      try {
-        const res = await fetch('/api/test-plan', { method: 'POST', headers: {'Content-Type':'application/json','X-Admin-Request':'1'}, body: JSON.stringify({ planId }) });
-        const data = await res.json();
-        if (data.error) appendLog('Plan test failed: ' + data.error);
-      } catch (e) {
-        appendLog('Plan test error: ' + e.message);
-      }
-      btn.disabled = false;
-      btn.textContent = 'Test via Plan';
-    }
-
-    // Load plans on page load
-    loadPlans();
+    // NOTE: the legacy "Test via Plan" picker (loadPlans/testPlan + #planSelect /
+    // #btnPlanTest) was removed when subscription-plan testing moved to the modal
+    // flow (testPlanFlow / runSubPlanTest -> POST /api/test-sub-plan). The old
+    // top-level loadPlans() call crashed on the now-missing #planSelect element
+    // ("Cannot set properties of null (setting 'innerHTML')"). Intentionally gone.
 
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -4133,7 +4111,7 @@ Record (28 bytes × count)
       } catch {}
     }
 
-    window.addEventListener('DOMContentLoaded', () => {
+    onReady(() => {
       loadBroadcastState();
     });
 
