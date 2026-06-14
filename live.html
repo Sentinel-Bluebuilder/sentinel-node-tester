@@ -380,6 +380,18 @@
       z-index: 10;
     }
 
+    /* DEFINITIVE single-line header — matches admin.html's working results table.
+       The outset box-shadow above kept rendering TWO lines because the 4px
+       border-spacing gap below the sticky header is a second element no shadow
+       tuning fully hides. Instead: an INSET shadow paints the 1px divider exactly
+       AT the th's bottom edge, and row gaps come from a transparent td
+       bottom-border (background-clip:padding-box keeps the card out of the gap)
+       rather than border-spacing — so there is no 4px gap directly under the
+       header to render a second line. Scoped to .table-wrap (results table only). */
+    .table-wrap table { border-spacing: 0; }
+    .table-wrap thead th { box-shadow: inset 0 -1px 0 var(--border); }
+    .table-wrap tbody td { border-bottom: 4px solid transparent; background-clip: padding-box; }
+
     td {
       padding: 6px 6px;
       font-size: 12px;
