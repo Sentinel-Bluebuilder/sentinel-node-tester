@@ -1154,7 +1154,41 @@ export function getNodeErrors(addr, { limit = 50, stage = null } = {}, which) {
     ORDER BY r.tested_at DESC
     LIMIT @limit
   `).all(params);
-  return fallback;
+  if (fallback.length > 0) return fallback;
+
+  // Second fallback: continuous-loop (public) runs persist per node ONLY to
+  // batch_results — never to results/error_logs — so a node that failed only
+  // inside a loop has no row in either table queried above. batch_results does
+  // store error + error_code, so synthesize a failure entry from the most recent
+  // failed batch_results row. Without this the public failure-drawer is empty for
+  // loop-only failures, violating the failure-log MUST contract. batch_results
+  // has no `stage`, so a specific stage filter can't match here.
+  if (stage && stage !== 'unknown') return fallback; // empty — no stage in batch_results
+  const batchFallback = db.prepare(`
+    SELECT NULL AS id, NULL AS result_id,
+           'unknown'                                   AS stage,
+           COALESCE(br.error_code, 'UNKNOWN')          AS error_code,
+           COALESCE(br.error, '(no message captured)') AS error_message,
+           NULL                                        AS log_snippet,
+           br.tested_at                                AS captured_at,
+           br.tested_at, br.actual_mbps,
+           br.node_address     AS node_addr, br.moniker,
+           br.country          AS country,
+           br.city             AS city,
+           br.country_code     AS country_code,
+           br.type             AS service_type,
+           NULL AS advertised_mbps, NULL AS latency_ms,
+           NULL AS handshake_ok, NULL AS session_ok, NULL AS pass,
+           NULL AS sdk, NULL AS continent, NULL AS tester_os,
+           NULL AS run_id, NULL AS raw_json,
+           1                   AS synthesized
+    FROM batch_results br
+    WHERE br.node_address = @addr
+      AND (br.actual_mbps IS NULL OR br.error_code IS NOT NULL)
+    ORDER BY br.tested_at DESC
+    LIMIT @limit
+  `).all(params);
+  return batchFallback;
 }
 
 /**

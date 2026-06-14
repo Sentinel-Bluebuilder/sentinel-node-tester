@@ -961,7 +961,12 @@ function deleteRun(num) {
   if (entry && entry.auditLog) {
     const rawLog = path.join(__dirname, 'results', entry.auditLog);
     const isActive = state.auditLogPath && path.basename(state.auditLogPath) === entry.auditLog;
-    if (!isActive && _ex(rawLog)) {
+    // Don't delete a log file still referenced by ANOTHER saved run — resume
+    // reuses one audit-*.log across passes, so deleting this run's basename would
+    // orphan another run's Live Log. index.runs here is already post-splice (this
+    // entry removed), so .some() checks only the runs that remain.
+    const sharedByOther = index.runs.some(r => r.auditLog === entry.auditLog);
+    if (!isActive && !sharedByOther && _ex(rawLog)) {
       try { _rm(rawLog, { force: true }); }
       catch (err) { console.error(`[deleteRun] failed to remove log: ${err.message}`); }
     }
