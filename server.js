@@ -527,6 +527,11 @@ function saveCurrentRun(label) {
     failed: failed.length,
     pass10: pass10.length,
     sdk: state.activeSDK,
+    // Persist this run's net spend + refunds (raw udvpn) so loading it later can
+    // restore the header's Net Spend / Refunded. rehydrateState only recomputes
+    // per-node counts, so without this they reset to 0 / -- on load.
+    spentUdvpn: Number(state.spentUdvpn) || 0,
+    refundedUdvpn: Number(state.refundedUdvpn) || 0,
   });
   index.activeRun = num;
   saveRunsIndex(index);
@@ -2327,6 +2332,15 @@ app.post('/api/runs/load/:num', adminOnly, (req, res) => {
   results.push(...data);
   saveResults();
   rehydrateState(data);
+  // Restore this run's spend/refund totals (rehydrateState only recomputes
+  // per-node counts) so the header's Net Spend / Refunded reflect the run.
+  // spentUdvpn is already net (refunds decrement it in pipeline.js).
+  const _runMeta = loadRunsIndex().runs.find(r => r.number === num);
+  state.spentUdvpn = Number(_runMeta?.spentUdvpn) || 0;
+  state.refundedUdvpn = Number(_runMeta?.refundedUdvpn) || 0;
+  state.estimatedTotalCost = state.spentUdvpn > 0
+    ? `${(state.spentUdvpn / 1_000_000).toFixed(4)} P2P`
+    : '0 P2P';
   state.activeRunNumber = num;
   state.status = 'idle';
   broadcastStateFresh();
