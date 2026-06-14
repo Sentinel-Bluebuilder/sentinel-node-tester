@@ -673,6 +673,10 @@ const app = express();
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 app.use(express.json({ limit: '512kb' }));
+// Parse HTML form posts (application/x-www-form-urlencoded) — the admin login
+// form submits the token this way; without this req.body is undefined for it.
+// extended:false (querystring, no nested objects) + small 64kb cap is plenty.
+app.use(express.urlencoded({ extended: false, limit: '64kb' }));
 // cookie-parser with HMAC signing so admin_token cookie cannot be forged
 app.use(cookieParser(COOKIE_SECRET));
 // Serve static assets (logo, fonts etc.) but do NOT auto-serve index files.
