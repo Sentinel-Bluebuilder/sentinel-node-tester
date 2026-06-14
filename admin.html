@@ -572,7 +572,11 @@
       text-transform: uppercase;
     }
 
-    .table-wrap { overflow-y: auto; flex: 1; min-height: 0; padding: 0 8px 8px 8px; margin-top: 8px; }
+    .table-wrap { overflow-y: auto; scrollbar-gutter: stable; flex: 1; min-height: 0; padding: 0 8px 8px 8px; }
+    /* Fixed header table (outside the scroll area). scrollbar-gutter:stable on
+       both wraps reserves an equal right-side gutter so the header columns line
+       up with the scrolling body even when its scrollbar appears. */
+    .results-head-wrap { overflow-y: auto; scrollbar-gutter: stable; flex-shrink: 0; padding: 0 8px; margin-top: 8px; }
 
     table { width: 100%; border-collapse: separate; border-spacing: 0 4px; table-layout: fixed; }
 
@@ -1014,7 +1018,13 @@
             <span style="font-size:11px; color:var(--text-secondary)" id="resultsCountLabel">0 Entries</span>
           </div>
         </div>
-        <div class="table-wrap">
+        <!-- Header lives in its own NON-scrolling table so it's truly fixed —
+             no position:sticky inside the scroll area (which caused the header
+             to jitter while scrolling and the scrollbar to run beside it).
+             scrollbar-gutter:stable on both wraps reserves an equal gutter so
+             the header columns stay aligned with the scrolling body below. The
+             two <colgroup>s must stay identical. -->
+        <div class="results-head-wrap">
           <table class="results-table">
             <colgroup>
               <col style="width:54px">   <!-- SDK -->
@@ -1048,6 +1058,25 @@
                 <th style="text-align:center">Log</th>
               </tr>
             </thead>
+          </table>
+        </div>
+        <div class="table-wrap">
+          <table class="results-table">
+            <colgroup>
+              <col style="width:54px">   <!-- SDK -->
+              <col style="width:108px">  <!-- Transport -->
+              <col>                      <!-- Moniker (flex) -->
+              <col style="width:150px">  <!-- Node -->
+              <col style="width:90px">   <!-- Country -->
+              <col style="width:120px">  <!-- City -->
+              <col style="width:58px">   <!-- Peers -->
+              <col style="width:96px">   <!-- Speed -->
+              <col style="width:92px">   <!-- Total BW -->
+              <col style="width:92px">   <!-- Baseline -->
+              <col style="width:74px">   <!-- Result -->
+              <col style="width:96px">   <!-- Other SDKs -->
+              <col style="width:48px">   <!-- Log -->
+            </colgroup>
             <tbody id="resultsBody"></tbody>
           </table>
         </div>
