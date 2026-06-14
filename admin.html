@@ -1031,6 +1031,7 @@
         <div class="results-head-wrap">
           <table class="results-table">
             <colgroup>
+              <col style="width:64px">   <!-- SDK -->
               <col style="width:130px">  <!-- Transport -->
               <col>                      <!-- Moniker (flex) -->
               <col style="width:150px">  <!-- Node -->
@@ -1046,6 +1047,7 @@
             </colgroup>
             <thead>
               <tr>
+                <th style="text-align:center">SDK</th>
                 <th style="text-align:left">Transport</th>
                 <th style="text-align:left">Moniker</th>
                 <th style="text-align:left">Node</th>
@@ -1065,6 +1067,7 @@
         <div class="table-wrap">
           <table class="results-table">
             <colgroup>
+              <col style="width:64px">   <!-- SDK -->
               <col style="width:130px">  <!-- Transport -->
               <col>                      <!-- Moniker (flex) -->
               <col style="width:150px">  <!-- Node -->
@@ -1997,11 +2000,12 @@
         }
       }
 
-      // sdkLabel/sdkColors are retained for the "Other SDKs" cross-reference
-      // column below. The per-row SDK badge was removed (it lived in a 54px
-      // column that truncated and duplicated the WG/V2 transport badge).
+      // sdkLabel/sdkColors are used by both the per-row SDK column and the
+      // "Other SDKs" cross-reference column below. The SDK column renders the
+      // short label as plain readable text (no badge background, no truncation).
       const sdkLabel = r.sdk || state.activeSDK || 'js';
       const sdkColors = { js: { bg: 'var(--bg-input)', fg: 'var(--text)', label: 'JS' }, csharp: { bg: 'var(--bg-input)', fg: 'var(--text)', label: 'C#' }, tkd: { bg: 'var(--bg-input)', fg: 'var(--text)', label: 'TKD' } };
+      const sdkShort = (sdkColors[sdkLabel] || sdkColors.js).label;
 
       // ─── Other SDKs column: cross-reference this node against other run results ──
       let otherSdkHtml = '<span style="color:var(--text-muted)">-</span>';
@@ -2040,6 +2044,7 @@
         : '<span style="color:var(--text-muted)">—</span>';
 
       tr.innerHTML = `
+        <td style="text-align:center;font-size:10px;color:var(--text-dim);white-space:nowrap">${sdkShort}</td>
         <td>${proto} ${transportHtml}</td>
         <td style="font-weight:500">${escHtml(monikerText)}</td>
         <td style="font-family:var(--font-mono);font-size:11px;color:var(--text-secondary)">${addr}</td>
@@ -2401,9 +2406,9 @@
     }
 
     async function openP2pSettingsDrawer() {
-      // Tear down any previous drawer
+      // Tear down any previous drawer (and its leaked keydown listener)
       const existing = document.getElementById('p2pSettingsBackdrop');
-      if (existing) existing.remove();
+      if (existing) { if (existing._onEsc) document.removeEventListener('keydown', existing._onEsc); existing.remove(); }
 
       let payload = { settings: {}, defaults: {} };
       try {
@@ -2420,7 +2425,12 @@
       const panel = document.createElement('div');
       panel.style.cssText = 'background:var(--bg-card-solid);border:1px solid var(--border-hover);border-radius:12px;padding:20px;width:min(520px,92vw);max-height:88vh;overflow:auto;color:var(--text);font-family:var(--font-display)';
 
-      const close = () => backdrop.remove();
+      const close = () => { document.removeEventListener('keydown', onEsc); backdrop.remove(); };
+      // Esc closes THIS drawer (the top-most popup). stopImmediatePropagation so the
+      // underlying chooser's own keydown listener doesn't also fire on the same Esc.
+      const onEsc = (e) => { if (e.key === 'Escape') { e.stopImmediatePropagation(); close(); } };
+      backdrop._onEsc = onEsc;
+      document.addEventListener('keydown', onEsc);
       const _esc = (v) => String(v).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 
       panel.innerHTML = `
@@ -2851,9 +2861,15 @@
       const modal = document.createElement('div');
       modal.style.cssText = 'background:var(--bg-card-solid);border:1px solid var(--border-hover);border-radius:10px;padding:28px;max-width:920px;width:92%;max-height:90vh;overflow:auto;color:var(--text);font-family:var(--font-display);';
 
-      const close = () => backdrop.remove();
+      // close() always removes onKey so the listener never leaks on ANY close path
+      // (×, backdrop click, tile click, Esc). A leaked onKey would otherwise linger
+      // on document and — via the bail below — silently swallow a later Escape.
+      const close = () => { document.removeEventListener('keydown', onKey); backdrop.remove(); };
       backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
-      const onKey = (e) => { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } };
+      // Bail if the P2P-settings drawer is open on top of us: its own Esc handler
+      // closes that drawer first. This listener is registered before the drawer's,
+      // so it fires first — returning here leaves the top-most popup to be closed.
+      const onKey = (e) => { if (e.key === 'Escape') { if (document.getElementById('p2pSettingsBackdrop')) return; close(); } };
       document.addEventListener('keydown', onKey);
 
       modal.innerHTML = `
