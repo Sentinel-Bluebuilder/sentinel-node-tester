@@ -1929,8 +1929,18 @@ app.post('/api/stop', adminOnly, (req, res) => {
   // current node's session/handshake/speedtest timers to expire.
   (async () => {
     try {
-      const { killAllV2Ray } = await import('./platforms/windows/v2ray.js');
-      killAllV2Ray();
+      // Pick the platform-correct v2ray module. Importing the Windows one on
+      // Linux ran `taskkill … 2>nul`, which (taskkill is Windows-only) failed
+      // and left a stray file literally named `nul` in the cwd.
+      let killAllV2Ray;
+      if (process.platform === 'win32') {
+        ({ killAllV2Ray } = await import('./platforms/windows/v2ray.js'));
+      } else if (process.platform === 'linux') {
+        ({ killAllV2Ray } = await import('./platforms/linux/v2ray.js'));
+      } else if (process.platform === 'darwin') {
+        ({ killAllV2Ray } = await import('./platforms/macos/v2ray.js'));
+      }
+      killAllV2Ray?.();
     } catch {}
     try { emergencyCleanupSync(); } catch {}
     broadcast('state', { state });

@@ -3,7 +3,7 @@
  * Extracted from server.js testNode V2Ray section.
  */
 
-import { spawn, execSync } from 'child_process';
+import { spawn, execSync, execFileSync } from 'child_process';
 import { existsSync, writeFileSync } from 'fs';
 import net from 'net';
 import path from 'path';
@@ -56,12 +56,13 @@ export async function nextSocksPort() {
 // ─── Kill V2Ray by PID ──────────────────────────────────────────────────────
 export function killV2RayByPid(pid) {
   if (!pid) return;
-  try { execSync(`taskkill /F /PID ${pid} 2>nul`, { stdio: 'ignore' }); } catch { }
+  // execFileSync (no shell) — injection-safe and can't create a `nul` file.
+  try { execFileSync('taskkill', ['/F', '/PID', String(pid)], { stdio: 'ignore' }); } catch { }
 }
 
 /** Kill all v2ray.exe processes — use ONLY for pre-test cleanup */
 export function killAllV2Ray() {
-  try { execSync('taskkill /F /IM v2ray.exe 2>nul', { stdio: 'ignore' }); } catch { }
+  try { execFileSync('taskkill', ['/F', '/IM', 'v2ray.exe'], { stdio: 'ignore' }); } catch { }
 }
 
 /**
