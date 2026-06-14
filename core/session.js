@@ -81,6 +81,12 @@ export function isPaid(nodeAddr) {
 export function clearPaidNodes() {
   paidNodesThisRun.clear();
 }
+// Clear the paid flag for ONE node (retest re-payment of a single node). Do NOT
+// use clearPaidNodes() for that — it wipes every node's flag and re-opens the
+// duplicate-payment guard for the whole run (double-pay vector).
+export function clearPaidNode(nodeAddr) {
+  paidNodesThisRun.delete(nodeAddr);
+}
 
 /** Invalidate session map after payment creates new sessions */
 export function invalidateSessionCache() { sessionMap = null; }

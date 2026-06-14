@@ -14,7 +14,7 @@ import { BRIDGE_AVAILABLE, bridgeNodeStatus, bridgeHandshakeWG, bridgeHandshakeV
 import { TKD_AVAILABLE, tkdNodeStatus, tkdHandshakeWG, tkdHandshakeV2Ray } from '../core/tkd-bridge.js';
 import {
   getCredential, saveCredential, clearCredential,
-  markSessionPoisoned, isPaid, markPaid, clearPaidNodes,
+  markSessionPoisoned, isPaid, markPaid, clearPaidNode,
   addToSessionMap, findExistingSession, invalidateSessionCache,
   waitForSessionActive, parseNodePriceUdvpn,
 } from '../core/session.js';
@@ -294,8 +294,10 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
     }
   }
   if (!sessionId && isPaid(node.address) && state.retestMode) {
-    // In retest: clear stale paid flag, allow fresh payment
-    clearPaidNodes();
+    // In retest: clear the stale paid flag for THIS node only, so it can be
+    // re-paid. clearPaidNodes() (clear-all) here was a double-pay vector — it
+    // dropped every other node's paid flag too, re-opening the dup-pay guard.
+    clearPaidNode(node.address);
   }
 
 // Balance check — return PAUSE signal instead of failing
