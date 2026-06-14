@@ -588,7 +588,9 @@
       color: var(--text-secondary);
       position: sticky;
       top: 0;
-      background: var(--glass-bg);
+      /* Opaque (not glass) so rows scrolling underneath don't bleed through the
+         sticky header — translucent --glass-bg let both show at once. */
+      background: var(--bg-card-solid);
       z-index: 10;
     }
 
