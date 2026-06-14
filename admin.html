@@ -630,6 +630,13 @@
        rows bled through the sticky header. This higher-specificity rule makes
        the results-table header opaque so rows scroll cleanly underneath. */
     .results-table thead th { background: var(--bg-card-solid); }
+    /* Make row gaps with transparent bottom borders instead of border-spacing:
+       table border-spacing makes a position:sticky header jitter up/down while
+       scrolling (Chromium quirk). background-clip:padding-box stops the row card
+       from painting into the 4px gap. Also removes the gap directly under the
+       header, so rows slide cleanly beneath it. */
+    .results-table { border-spacing: 0; }
+    .results-table tbody td { border-bottom: 4px solid transparent; background-clip: padding-box; }
 
     /* Pagination controls */
     .pager { font-family: var(--font-mono); }
