@@ -519,6 +519,12 @@ function saveCurrentRun(label) {
   const failLog = path.join(__dirname, 'results', 'failures.jsonl');
   if (_ex(failLog)) _cp(failLog, path.join(runDir, 'failures.jsonl'));
 
+  // Snapshot the run's execution log so loading the run later shows ITS log
+  // (not the last live run's rolling buffer).
+  if (state.auditLogPath && _ex(state.auditLogPath)) {
+    try { _cp(state.auditLogPath, path.join(runDir, 'audit.log')); } catch { }
+  }
+
   // Update index
   const index = loadRunsIndex();
   index.runs.push({
@@ -535,6 +541,8 @@ function saveCurrentRun(label) {
     // per-node counts, so without this they reset to 0 / -- on load.
     spentUdvpn: Number(state.spentUdvpn) || 0,
     refundedUdvpn: Number(state.refundedUdvpn) || 0,
+    // Raw execution-log filename, so deleting this run also purges its log.
+    auditLog: state.auditLogPath ? path.basename(state.auditLogPath) : null,
   });
   index.activeRun = num;
   saveRunsIndex(index);
@@ -568,14 +576,25 @@ function deleteRun(num) {
   const index = loadRunsIndex();
   const i = index.runs.findIndex(r => r.number === num);
   if (i === -1) return false;
+  const entry = index.runs[i];
   index.runs.splice(i, 1);
   if (index.activeRun === num) index.activeRun = null;
   saveRunsIndex(index);
-  // Remove the on-disk snapshot dir (results.json, summary.txt, failures.jsonl).
+  // Remove the snapshot dir (results.json, summary.txt, failures.jsonl, audit.log).
   const runDir = path.join(RUNS_DIR, `test-${String(num).padStart(3, '0')}`);
   if (_ex(runDir)) {
     try { _rm(runDir, { recursive: true, force: true }); }
     catch (err) { console.error(`[deleteRun] failed to remove ${runDir}: ${err.message}`); }
+  }
+  // Also purge the run's raw execution log so a deleted run can't linger in the
+  // Live Log on next boot — but never the currently-active run's log.
+  if (entry && entry.auditLog) {
+    const rawLog = path.join(__dirname, 'results', entry.auditLog);
+    const isActive = state.auditLogPath && path.basename(state.auditLogPath) === entry.auditLog;
+    if (!isActive && _ex(rawLog)) {
+      try { _rm(rawLog, { force: true }); }
+      catch (err) { console.error(`[deleteRun] failed to remove log: ${err.message}`); }
+    }
   }
   return true;
 }
@@ -2412,6 +2431,12 @@ app.post('/api/runs/load/:num', adminOnly, (req, res) => {
   state.spentUdvpn = _spent;
   state.refundedUdvpn = _refunded;
   state.estimatedTotalCost = _spent > 0 ? `${(_spent / 1_000_000).toFixed(4)} P2P` : '0 P2P';
+  // Live Log follows the loaded run: replace the rolling buffer with this run's
+  // saved execution log (empty if the run predates per-run log capture). Admin
+  // loadRun() reloads the page, so the SSE init then paints this buffer.
+  const _runLogPath = path.join(RUNS_DIR, `test-${String(num).padStart(3, '0')}`, 'audit.log');
+  logBuffer.length = 0;
+  if (_ex(_runLogPath)) { try { hydrateLogBufferFromFile(_runLogPath); } catch { } }
   state.activeRunNumber = num;
   state.status = 'idle';
   broadcastStateFresh();
