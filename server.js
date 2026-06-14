@@ -1140,7 +1140,7 @@ function rehydrateState(results) {
     // overwrite — a real saved run (the bug that corrupted Test #11).
     if (state.activeRunNumber == null) {
       const cand = index.activeRun != null ? index.activeRun
-                 : (index.runs.length > 0 ? index.runs[index.runs.length - 1].number : null);
+                 : (index.runs.length > 0 ? Math.max(...index.runs.map(r => r.number)) : null);
       const candData = cand != null ? loadRun(cand) : null;
       // Strengthen "is the working set the SAME run as `cand`?" beyond length:
       // two DIFFERENT audits of the same chain set have identical length but
@@ -1160,6 +1160,12 @@ function rehydrateState(results) {
       // could overwrite a different run. Forcing a snapshot now means the next
       // boot restores this number instead of recomputing it.
       if (!reused) {
+        // Fresh number → a NEW unsaved run with no SQLite row of its own. Drop any
+        // activeDbRunId the snapshot restored: it points at a DIFFERENT run, and
+        // keeping it would make a later Save updateRunOnFinish the wrong row
+        // (clobbering that run's counts/spend). Same intent as startFreshRun,
+        // which overwrites it via insertRun — here there's no insertRun, so null.
+        state.activeDbRunId = null;
         try { flushStateSnapshot(); }
         catch (e) { console.error('[boot] reserve run-number snapshot failed:', e.message); }
       }
@@ -2744,6 +2750,9 @@ app.post('/api/clear', adminOnly, (req, res) => {
   state.currentNode = null;
   state.resumeHeadAddr = null;
   state.activeBatchId = 0;
+  // Drop a stale 'stopped'/'error' status so the wiped view isn't shown under a
+  // paused/error overlay with zero rows.
+  state.status = 'idle';
   saveResults(state);
   broadcastStateFresh();
   res.json({ ok: true });

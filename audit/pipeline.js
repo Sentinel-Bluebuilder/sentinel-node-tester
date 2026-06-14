@@ -1260,6 +1260,11 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
   state.errorMessage = null;
   state.retryCount = 0;
   state.retestMode = true;
+  // A retest actively works the run in place (persistActiveRun writes fresh rows),
+  // so it's no longer a pristine read-only snapshot — clear loadedReadonly so an
+  // interrupted retest can be resumed (matches loadRunIntoState's documented
+  // "cleared by Retest" contract).
+  state.loadedReadonly = false;
   state.retestTotal = skipAddrs.length;
   state.retestTested = 0;
   state.retestPassed = 0;
