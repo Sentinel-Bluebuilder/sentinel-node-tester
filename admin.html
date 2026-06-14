@@ -833,14 +833,9 @@
         <div class="header-stat-value" id="headerBaseline">--</div>
       </div>
       <div class="header-divider"></div>
-      <div class="header-stat" title="Net spend = gross paid this iteration minus refunds already credited back to wallet. Refunds are already reflected in Balance — they are not money owed.">
+      <div class="header-stat" title="Net spend = P2P paid this iteration. Cancelled-session deposits recovered by the chain are reflected in Balance.">
         <div class="header-stat-label">Net Spend</div>
         <div class="header-stat-value" style="color:var(--text-muted)" id="estCost">--</div>
-      </div>
-      <div class="header-divider"></div>
-      <div class="header-stat" title="Cumulative refunds credited back to your wallet during this iteration. Already included in Balance — this is informational, not a pending receivable.">
-        <div class="header-stat-label">Refunded (in balance)</div>
-        <div class="header-stat-value" style="color:var(--green)" id="refundedAmt">--</div>
       </div>
       <div class="header-divider"></div>
       <button id="btnTheme" class="theme-toggle-btn" onclick="toggleTheme()" title="Toggle light/dark theme" aria-label="Toggle theme">
@@ -1621,12 +1616,6 @@
       }
 
       if (state.estimatedTotalCost) document.getElementById('estCost').textContent = state.estimatedTotalCost;
-
-      const refEl = document.getElementById('refundedAmt');
-      if (refEl) {
-        const refUd = Number(state.refundedUdvpn || 0);
-        refEl.textContent = refUd > 0 ? (refUd / 1_000_000).toFixed(4) + ' P2P' : '--';
-      }
 
       // Avg baseline in header — true mean of baselineHistory (last-10
       // direct-connection readings), falling back to the latest sample when

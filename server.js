@@ -547,12 +547,11 @@ function saveCurrentRun(label) {
     failed: failed.length,
     pass10: pass10.length,
     sdk: state.activeSDK,
-    // Persist this run's net spend + refunds (raw udvpn) so loading it later can
-    // restore the header's Net Spend / Refunded. rehydrateState only recomputes
-    // per-node counts, so without this they reset to 0 / -- on load.
+    // Persist this run's net spend (raw udvpn) so loading it later can
+    // restore the header's Net Spend. rehydrateState only recomputes
+    // per-node counts, so without this it resets to 0 / -- on load.
     spentUdvpn: Number(state.spentUdvpn) || 0,
-    refundedUdvpn: Number(state.refundedUdvpn) || 0,
-    // SQLite runs.id for this run, so loading it later can look up spend/refund
+    // SQLite runs.id for this run, so loading it later can look up spend
     // deterministically via getRun(dbRunId) instead of the getRunSpendByFinish
     // time+count heuristic.
     dbRunId: state.activeDbRunId || null,
@@ -570,7 +569,6 @@ function saveCurrentRun(label) {
         node_count:     results.length,
         pass_count:     passed.length,
         spent_udvpn:    Number(state.spentUdvpn)    || 0,
-        refunded_udvpn: Number(state.refundedUdvpn) || 0,
       });
     } catch (dbErr) {
       console.error(`[db] updateRunOnFinish failed: ${dbErr.message}`);
@@ -610,8 +608,8 @@ function persistActiveRun(label, { accumulateSpend = true } = {}) {
   const failed = results.filter(r => r.actualMbps == null);
   const pass10 = passed.filter(r => r.actualMbps >= 10);
 
-  // Spend/refund accounting on the retest-persist path:
-  // runRetestSkips resets state.spentUdvpn/refundedUdvpn to 0 at its top so the
+  // Spend accounting on the retest-persist path:
+  // runRetestSkips resets state.spentUdvpn to 0 at its top so the
   // LIVE header shows ONLY this retest pass's spend. The run's STORED total must
   // therefore ACCUMULATE: read the prior cumulative from the existing index
   // entry (default 0) and write prior + this-pass to BOTH the index entry and
@@ -622,16 +620,13 @@ function persistActiveRun(label, { accumulateSpend = true } = {}) {
   const index = loadRunsIndex();
   const entry = index.runs.find(r => r.number === num);
   const priorSpent    = accumulateSpend ? (Number(entry?.spentUdvpn)    || 0) : 0;
-  const priorRefunded = accumulateSpend ? (Number(entry?.refundedUdvpn) || 0) : 0;
   const cumulativeSpent    = priorSpent    + (Number(state.spentUdvpn)    || 0);
-  const cumulativeRefunded = priorRefunded + (Number(state.refundedUdvpn) || 0);
   if (entry) {
     entry.total = results.length;
     entry.passed = passed.length;
     entry.failed = failed.length;
     entry.pass10 = pass10.length;
     entry.spentUdvpn = cumulativeSpent;
-    entry.refundedUdvpn = cumulativeRefunded;
     if (label) entry.label = label;
     if (state.activeDbRunId) entry.dbRunId = state.activeDbRunId;
     saveRunsIndex(index);
@@ -644,7 +639,6 @@ function persistActiveRun(label, { accumulateSpend = true } = {}) {
         node_count:     results.length,
         pass_count:     passed.length,
         spent_udvpn:    cumulativeSpent,
-        refunded_udvpn: cumulativeRefunded,
       });
     } catch (dbErr) {
       console.error(`[persistActiveRun] updateRunOnFinish failed: ${dbErr.message}`);
@@ -1468,9 +1462,6 @@ const PUBLIC_STATE_KEYS = [
   // "Plan #N / P2P / Test Run" badge the admin shows.
   'runMode',
   'runPlanId',
-  // Cumulative refund credited back to the wallet during the active run.
-  // Spend totals on /live derive from this; spentUdvpn itself is admin-only.
-  'refundedUdvpn',
   'estimatedTotalCost',
   // SDK key the tester is currently using ('js' | 'tkd' | 'csharp'). Surfaces
   // on /live next to the run-mode label so viewers see which client produced
@@ -2575,12 +2566,11 @@ app.post('/api/runs/load/:num', adminOnly, (req, res) => {
   // place. Without this the header's Total/Remaining stayed stuck on the last
   // run no matter which saved run you selected.
   state.totalNodes = data.length;
-  // Restore this run's spend/refund totals (rehydrateState only recomputes
-  // per-node counts). spentUdvpn is already net (refunds decrement it).
+  // Restore this run's spend total (rehydrateState only recomputes
+  // per-node counts). spentUdvpn is already net.
   const _idx = loadRunsIndex();
   const _runMeta = _idx.runs.find(r => r.number === num);
   let _spent = Number(_runMeta?.spentUdvpn) || 0;
-  let _refunded = Number(_runMeta?.refundedUdvpn) || 0;
   if (_runMeta && _runMeta.spentUdvpn == null) {
     // Preferred path: a stored dbRunId makes the spend lookup deterministic.
     // Fall back to the getRunSpendByFinish time+count heuristic only when no
@@ -2591,9 +2581,7 @@ app.post('/api/runs/load/:num', adminOnly, (req, res) => {
         const row = getRun(Number(_runMeta.dbRunId));
         if (row) {
           _spent = Number(row.spent_udvpn) || 0;
-          _refunded = Number(row.refunded_udvpn) || 0;
           _runMeta.spentUdvpn = _spent;
-          _runMeta.refundedUdvpn = _refunded;
           saveRunsIndex(_idx);
           recovered = true;
         }
@@ -2604,16 +2592,13 @@ app.post('/api/runs/load/:num', adminOnly, (req, res) => {
         const m = getRunSpendByFinish(Date.parse(_runMeta.date), Number(_runMeta.total) || 0);
         if (m) {
           _spent = m.spent_udvpn;
-          _refunded = m.refunded_udvpn;
           _runMeta.spentUdvpn = _spent;
-          _runMeta.refundedUdvpn = _refunded;
           saveRunsIndex(_idx);
         }
       } catch (e) { console.error('[runs] spend backfill failed:', e.message); }
     }
   }
   state.spentUdvpn = _spent;
-  state.refundedUdvpn = _refunded;
   state.estimatedTotalCost = _spent > 0 ? `${(_spent / 1_000_000).toFixed(4)} P2P` : '0 P2P';
   // Live Log follows the loaded run: replace the rolling buffer with this run's
   // saved execution log (empty if the run predates per-run log capture). Admin

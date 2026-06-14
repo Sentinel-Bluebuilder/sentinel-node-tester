@@ -161,7 +161,7 @@ if (indexUnparseable) {
       repairable(`orphan snapshot dir test-${m[1]} (no index entry, ${rows.length} rows)`);
       const c = recompute(rows);
       let date; try { date = statSync(snapResults(num)).mtime.toISOString(); } catch { date = new Date().toISOString(); }
-      const entry = { number: num, label: 'Recovered (orphan dir)', date, ...c, sdk: null, spentUdvpn: null, refundedUdvpn: null, auditLog: null };
+      const entry = { number: num, label: 'Recovered (orphan dir)', date, ...c, sdk: null, spentUdvpn: null, auditLog: null };
       known.add(num); // track existence in both modes so the activeRun check below is accurate
       if (FIX) { cleanRuns.push(entry); indexChanged = true; fixd(`registered orphan test-${m[1]} as #${num}`); } else todo(`register orphan test-${m[1]}`);
     }
@@ -184,7 +184,7 @@ if (rdb && cleanRuns.length) {
     const row = rdb.prepare('SELECT spent_udvpn, refunded_udvpn FROM runs WHERE finished_at IS NOT NULL AND node_count = ? AND ABS(finished_at - ?) <= ? ORDER BY ABS(finished_at - ?) ASC LIMIT 1').get(e.total, finishedAt, MATCH_TOLERANCE_MS, finishedAt);
     if (!row) { unmatched++; continue; }
     matched++;
-    if (e.spentUdvpn != null && (Number(e.spentUdvpn) !== row.spent_udvpn || Number(e.refundedUdvpn) !== row.refunded_udvpn)) spendDiff++;
+    if (e.spentUdvpn != null && Number(e.spentUdvpn) !== row.spent_udvpn) spendDiff++;
   }
   info(`${matched} index run(s) matched a SQLite row, ${unmatched} unmatched (normal for continuous/auto-saved runs)`);
   if (spendDiff) info(`${spendDiff} matched run(s) differ on spend/refund vs SQLite — review manually, not auto-fixed`);
