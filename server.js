@@ -18,7 +18,7 @@ import { queryReports as queryOnchainReports } from './core/onchain-report.js';
 import { cachedWalletSetup, createFreshClient } from './core/wallet.js';
 import { ensureLcd, getActiveLcd, cleanupRpc, getAllNodes } from './core/chain.js';
 import { nodeStatusV3 } from './protocol/v3protocol.js';
-import { createState, runAudit, runRetestSkips, runPlanTest, runSubPlanTest, getResults, saveResults, setActiveRunDir, setActiveDbRunId, triggerPipelineStop } from './audit/pipeline.js';
+import { createState, runAudit, runRetestSkips, runPlanTest, runSubPlanTest, getResults, saveResults, triggerPipelineStop } from './audit/pipeline.js';
 import {
   insertRun, updateRunOnFinish, getRunSpendByFinish, getRun,
   insertResult, insertErrorLog,
@@ -267,7 +267,7 @@ function saveStateSnapshot(force = false) {
       // creating a fresh `audit-<ts>.log` and orphaning prior entries.
       auditLogPath: state.auditLogPath || null,
       // SQLite runs.id of the in-flight run. Without this, /api/resume after
-      // a process bounce leaves _activeDbRunId=null and post-resume failures
+      // a process bounce leaves state.activeDbRunId=null and post-resume failures
       // skip insertErrorLog — the node-detail popup then has nothing to show.
       activeDbRunId: state.activeDbRunId || null,
       // The run currently displayed (dropdown selection + save/resume dir). Must
@@ -837,7 +837,7 @@ function loadRunIntoState(num) {
   const results = getResults();
   results.length = 0;
   results.push(...data);
-  saveResults();
+  saveResults(state);
   rehydrateState(data);
   // A loaded run is a complete set, so its Total is its own node count — not the
   // last live audit's chain total (which rehydrateState deliberately leaves in
@@ -886,8 +886,6 @@ function loadRunIntoState(num) {
   // later Retest → persistActiveRun updates the correct runs row instead of a
   // stale prior-run id left in state from an earlier live run.
   state.activeDbRunId = _runMeta?.dbRunId != null ? Number(_runMeta.dbRunId) : null;
-  try { setActiveDbRunId(state.activeDbRunId); }
-  catch (e) { console.error('[runs] setActiveDbRunId on load failed:', e.message); }
   // Route-isolation: a loaded run is a read-only historical snapshot. Reset the
   // run-mode context so a subsequent Retest (which clears loadedReadonly) can't
   // inherit a stale mode from the PRIOR live run — e.g. loading a P2P run after a
@@ -979,13 +977,13 @@ function deleteRun(num) {
  * wrong SQLite row.
  */
 function clearActiveRunView() {
-  // Detach the pipeline's run dir + db id FIRST so saveResults() below doesn't
+  // Detach the run dir + db id FIRST so saveResults() below doesn't
   // try a crash-safe copy into the directory deleteRun just removed.
-  try { setActiveDbRunId(null); } catch (e) { console.error('[deleteRun] setActiveDbRunId(null) failed:', e.message); }
-  try { setActiveRunDir(null); } catch (e) { console.error('[deleteRun] setActiveRunDir(null) failed:', e.message); }
+  state.activeDbRunId = null;
+  state.activeRunDir = null;
   const results = getResults();
   results.length = 0;
-  saveResults();
+  saveResults(state);
   rehydrateState([]);            // zero every per-node counter
   state.totalNodes = 0;
   state.activeRunNumber = null;
@@ -1091,8 +1089,6 @@ function rehydrateState(results) {
       if (snap.auditLogPath) state.auditLogPath = snap.auditLogPath;
       if (snap.activeDbRunId) {
         state.activeDbRunId = Number(snap.activeDbRunId);
-        try { setActiveDbRunId(state.activeDbRunId); }
-        catch (e) { console.error('[boot] setActiveDbRunId failed:', e.message); }
       }
       if (snap.activeRunNumber != null) state.activeRunNumber = snap.activeRunNumber;
       // H-1: restore the read-only marker so an incomplete loaded run can't be
@@ -2269,7 +2265,7 @@ function startFreshRun(label, { mode = 'p2p', plan_id = null } = {}) {
 
   const newRunDir = path.join(RUNS_DIR, `test-${String(newNum).padStart(3, '0')}`);
   try { _mkd(newRunDir, { recursive: true }); } catch { }
-  setActiveRunDir(newRunDir);
+  state.activeRunDir = newRunDir;
 
   const idx2 = loadRunsIndex();
   idx2.activeRun = newNum;
@@ -2285,7 +2281,6 @@ function startFreshRun(label, { mode = 'p2p', plan_id = null } = {}) {
       tester_sdk:     state.activeSDK || 'js',
       tester_os:      process.platform,
     });
-    setActiveDbRunId(dbRunId);
     state.activeDbRunId = Number(dbRunId);
   } catch (dbErr) {
     console.error(`[db] insertRun failed: ${dbErr.message}`);
@@ -2423,7 +2418,7 @@ app.post('/api/resume', adminOnly, async (req, res) => {
   // Ensure run directory exists and is active for continuous saves
   const resumeRunDir = path.join(RUNS_DIR, `test-${String(state.activeRunNumber).padStart(3, '0')}`);
   try { _mkd(resumeRunDir, { recursive: true }); } catch { }
-  setActiveRunDir(resumeRunDir);
+  state.activeRunDir = resumeRunDir;
 
   // Re-hydrate the live log buffer from the in-flight audit log. Without this,
   // a Stop that happened earlier in the same process (no bounce) leaves the
@@ -2456,12 +2451,9 @@ app.post('/api/resume', adminOnly, async (req, res) => {
   // too so the live table re-paints any rows the client may have wiped.
   state.status = 'running';
   state.stopRequested = false;
-  // Re-arm the pipeline's _activeDbRunId so post-resume failures still write to
-  // error_logs. Without this, the node-detail "View error details" popup on
-  // /live and admin shows "No stored failure log" for any node tested after Resume.
-  if (state.activeDbRunId) {
-    try { setActiveDbRunId(Number(state.activeDbRunId)); } catch {}
-  }
+  // The runner reads state.activeDbRunId directly, so post-resume failures still
+  // write to error_logs — no global to re-arm. (Without DB persistence the
+  // node-detail "View error details" popup would show "No stored failure log".)
   broadcast('log', { msg: `▶ Resuming Test #${state.activeRunNumber} (${modeTag}) from node ${results.length + 1} (${results.length} already tested, SDK: ${state.activeSDK.toUpperCase()})` });
   broadcastStateFresh();
   res.json({ ok: true, testNumber: state.activeRunNumber, resumeFrom: results.length, runMode });
@@ -2561,7 +2553,7 @@ app.post('/api/retest-skips', adminOnly, async (req, res) => {
   if (state.activeRunNumber != null) {
     const retestRunDir = path.join(RUNS_DIR, `test-${String(state.activeRunNumber).padStart(3, '0')}`);
     try { _mkd(retestRunDir, { recursive: true }); } catch (e) { console.error('[retest-skips] mkdir failed:', e.message); }
-    setActiveRunDir(retestRunDir);
+    state.activeRunDir = retestRunDir;
   }
   const tracked = withBatchTracking(broadcast, state.runMode || 'p2p');
   runRetestSkips(skipAddrs, state, tracked).then(() => {
@@ -2601,7 +2593,7 @@ app.post('/api/retest-fails', adminOnly, async (req, res) => {
   if (state.activeRunNumber != null) {
     const retestRunDir = path.join(RUNS_DIR, `test-${String(state.activeRunNumber).padStart(3, '0')}`);
     try { _mkd(retestRunDir, { recursive: true }); } catch (e) { console.error('[retest-fails] mkdir failed:', e.message); }
-    setActiveRunDir(retestRunDir);
+    state.activeRunDir = retestRunDir;
   }
   const tracked = withBatchTracking(broadcast, state.runMode || 'p2p');
   runRetestSkips(failAddrs, state, tracked).then(() => {
@@ -2747,7 +2739,7 @@ app.post('/api/clear', adminOnly, (req, res) => {
   state.currentNode = null;
   state.resumeHeadAddr = null;
   state.activeBatchId = 0;
-  saveResults();
+  saveResults(state);
   broadcastStateFresh();
   res.json({ ok: true });
 });
@@ -2930,7 +2922,7 @@ app.post('/api/auto-retest', adminOnly, async (req, res) => {
   if (state.activeRunNumber != null) {
     const retestRunDir = path.join(RUNS_DIR, `test-${String(state.activeRunNumber).padStart(3, '0')}`);
     try { _mkd(retestRunDir, { recursive: true }); } catch (e) { console.error('[auto-retest] mkdir failed:', e.message); }
-    setActiveRunDir(retestRunDir);
+    state.activeRunDir = retestRunDir;
   }
 
   const { runRetestSkips } = await import('./audit/pipeline.js');

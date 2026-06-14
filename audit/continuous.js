@@ -23,7 +23,7 @@ import { EventEmitter } from 'events';
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createState, setActiveDbRunId, getActiveDbRunId, triggerPipelineStop } from './pipeline.js';
+import { createState, triggerPipelineStop } from './pipeline.js';
 import { sleep } from '../protocol/speedtest.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -304,12 +304,17 @@ async function _runOnePass(loopState, batchId, frozenNodes = null) {
           batchBroadcast,
         )
       : (st) => {
-          const prev = getActiveDbRunId();
-          setActiveDbRunId(null);
+          // The continuous loop persists per-node to batch_results separately;
+          // null this loop-state's run dir + db id so runAudit's results-table /
+          // run-dir writes stay out of the runs/results tables. `st` is the loop's
+          // own createState() instance, isolated from any direct run's state —
+          // no restore needed (nothing else reads these fields off loopState).
+          st.activeDbRunId = null;
+          st.activeRunDir = null;
           return pipeline.runAudit(false, st, batchBroadcast, frozenNodes, {
             testRun:     !!_ctrl.testRun,
             pricingMode: _ctrl.pricingMode || null,
-          }).finally(() => setActiveDbRunId(prev));
+          });
         };
   }
 

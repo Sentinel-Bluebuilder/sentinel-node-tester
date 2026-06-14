@@ -166,15 +166,9 @@ export function getResults() { return results; }
 // ─── Crash-Safe Results Persistence ────────────────────────────────────────
 // Write to temp file then rename (atomic on most filesystems).
 // Also continuously save to the active run directory so a kill never loses data.
-let _activeRunDir = null;
-let _activeDbRunId = null;
-
-export function setActiveRunDir(dir) { _activeRunDir = dir; }
-
-/** Set the SQLite run_id for the current audit run (called from server.js). */
-export function setActiveDbRunId(id) { _activeDbRunId = id; }
-/** Get the current SQLite run_id (null if not yet set). */
-export function getActiveDbRunId() { return _activeDbRunId; }
+// Run context (run dir + SQLite run_id) lives on the per-run `state` object
+// (`state.activeRunDir` / `state.activeDbRunId`) so two overlapping runs can never
+// alias each other's destination — there is no shared module global anymore.
 
 // ─── On-chain reporter (per-run state) ───────────────────────────────────────
 // Buffers per-node records during a run and self-sends a memo TX with the
@@ -276,15 +270,17 @@ async function _finalizeOnchainReporter() {
   _onchainReporter = null;
 }
 
-export function saveResults() {
+export function saveResults(state) {
   const data = JSON.stringify(results, null, 2);
   const tmpFile = RESULTS_FILE + '.tmp';
   writeFileSync(tmpFile, data, 'utf8');
   try { renameSync(tmpFile, RESULTS_FILE); } catch { writeFileSync(RESULTS_FILE, data, 'utf8'); }
 
-  // Also save to the active run directory (crash-safe copy)
-  if (_activeRunDir) {
-    const runFile = path.join(_activeRunDir, 'results.json');
+  // Also save to the active run directory (crash-safe copy). Run dir is carried
+  // on the per-run state so overlapping runs can't write to each other's dir.
+  const _runDir = state && state.activeRunDir;
+  if (_runDir) {
+    const runFile = path.join(_runDir, 'results.json');
     const runTmp = runFile + '.tmp';
     try {
       writeFileSync(runTmp, data, 'utf8');
@@ -322,7 +318,7 @@ function _sanitizeSnippet(raw) {
   return s.length > _MAX_SNIPPET ? s.slice(-_MAX_SNIPPET) : s;
 }
 
-function upsertResult(result, logSnippet = null) {
+function upsertResult(state, result, logSnippet = null) {
   const idx = results.findIndex(r => r.address === result.address);
   if (idx !== -1) results[idx] = result;
   else results.push(result);
@@ -333,9 +329,12 @@ function upsertResult(result, logSnippet = null) {
   }
 
   // ─── SQLite persistence (non-blocking — failure must not stop the audit) ─
-  if (_activeDbRunId != null) {
+  // DB run_id lives on the per-run state so overlapping runs can't write into
+  // each other's results table.
+  const _dbRunId = state && state.activeDbRunId;
+  if (_dbRunId != null) {
     try {
-      const resultId = _dbInsertResult(_activeDbRunId, result);
+      const resultId = _dbInsertResult(_dbRunId, result);
       // For ANY failed test (no speed measured OR error/errorCode set), write a
       // detailed error_log row. The popup contract from CLAUDE.md says every
       // failure MUST have a copyable log — never fall through silently.
@@ -407,6 +406,11 @@ export function createState() {
     // with that exact node first instead of whatever order the parallel
     // online-scan happens to return.
     resumeHeadAddr: null,
+    // Run context — set by server.js (startFreshRun / loadRunIntoState) and by
+    // the continuous loop. Read by saveResults() (crash-safe run-dir copy) and
+    // upsertResult() (SQLite run_id gate). Per-run so overlapping runs can't alias.
+    activeRunDir: null,
+    activeDbRunId: null,
   };
 }
 
@@ -628,7 +632,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
     state.passedBaseline = 0;
     state.nodeSpeedHistory = [];
     state.baselineHistory = [];
-    saveResults();
+    saveResults(state);
   }
 
   broadcast('log', { msg: `Balance: ${state.balance}` });
@@ -933,9 +937,9 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
           state.failedNodes++;
         }
         commitBaselineSample(node.address); // 1 baseline sample per recorded node
-        upsertResult(result); // success — no snippet needed
+        upsertResult(state, result); // success — no snippet needed
         state.resumeHeadAddr = null;
-        saveResults();
+        saveResults(state);
         broadcast('result', { result, state });
         if (result.actualMbps != null) {
           const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
@@ -1002,9 +1006,9 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
         const failResult = buildFailResult(node, status, state, errMsg, error?.diag || {});
         state.failedNodes++;
         commitBaselineSample(node.address); // 1 baseline sample per recorded node
-        upsertResult(failResult, _logSnippet);
+        upsertResult(state, failResult, _logSnippet);
         state.resumeHeadAddr = null;
-        saveResults();
+        saveResults(state);
         broadcast('result', { result: failResult, state });
         const retryLabel = retried > 0 ? ` (${retried} retries)` : '';
         const label = /timeout/i.test(errMsg) ? '⏱ Timeout' : /already exists/i.test(errMsg) ? '🚫 Node bug' : 'FAIL';
@@ -1128,22 +1132,22 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
         state.failedNodes = Math.max(0, state.failedNodes - 1);
         state.testedNodes++;
         if (result.pass10mbps) state.passed10++;
-        upsertResult(result);
-        saveResults();
+        upsertResult(state, result);
+        saveResults(state);
         broadcast('result', { result, state });
         broadcast('log', { msg: `  ✓ Internet-recovery retest PASS: ${result.actualMbps} Mbps` });
       } else if (result) {
         // Truthy result but null mbps — still a failure (it was already counted
         // as failed before this retest). Persist it without touching counters.
-        upsertResult(result, _sanitizeSnippet(_irSnippet));
-        saveResults();
+        upsertResult(state, result, _sanitizeSnippet(_irSnippet));
+        saveResults(state);
         broadcast('result', { result, state });
         broadcast('log', { msg: `  ✗ Internet-recovery retest FAIL: ${result.errorCode || 'no speed'}` });
       } else {
         const errMsg = error?.message || 'Unknown';
         const failResult = buildFailResult(node, status, state, errMsg, error?.diag || {});
-        upsertResult(failResult, _sanitizeSnippet(_irSnippet));
-        saveResults();
+        upsertResult(state, failResult, _sanitizeSnippet(_irSnippet));
+        saveResults(state);
         broadcast('result', { result: failResult, state });
         broadcast('log', { msg: `  ✗ Internet-recovery retest FAIL: ${errMsg.slice(0, 80)}` });
       }
@@ -1204,23 +1208,23 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
         state.failedNodes = Math.max(0, state.failedNodes - 1);
         state.testedNodes++;
         if (result.pass10mbps) state.passed10++;
-        upsertResult(result);
-        saveResults();
+        upsertResult(state, result);
+        saveResults(state);
         broadcast('result', { result, state });
         broadcast('log', { msg: `  ✓ Retest PASS: ${result.actualMbps} Mbps` });
       } else if (result) {
         // Truthy result but null mbps (e.g. SESSION_UNMAPPED) — still a failure (it
         // was already counted as failed before this retest). Persist without touching
         // counters; flipping to "tested" here would wrongly clear a still-failed node.
-        upsertResult(result, _sanitizeSnippet(_ironSnippet));
-        saveResults();
+        upsertResult(state, result, _sanitizeSnippet(_ironSnippet));
+        saveResults(state);
         broadcast('result', { result, state });
         broadcast('log', { msg: `  ✗ Retest FAIL: ${result.errorCode || 'no speed'}` });
       } else {
         const errMsg = error?.message || 'Unknown';
         const failResult = buildFailResult(node, status, state, errMsg, error?.diag || {});
-        upsertResult(failResult, _sanitizeSnippet(_ironSnippet));
-        saveResults();
+        upsertResult(state, failResult, _sanitizeSnippet(_ironSnippet));
+        saveResults(state);
         broadcast('result', { result: failResult, state });
         broadcast('log', { msg: `  ✗ Retest FAIL: ${errMsg.slice(0, 80)}` });
       }
@@ -1401,8 +1405,8 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
 
     if (result && result.actualMbps != null) {
       recomputeCounters(state);
-      upsertResult(result);
-      saveResults();
+      upsertResult(state, result);
+      saveResults(state);
       broadcast('result', { result, state });
       state.retestPassed++;
       const sla = result.actualMbps >= 10 ? 'SLA:PASS' : 'SLA:FAIL';
@@ -1413,8 +1417,8 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
       const errMsg = error?.message || result?.error || 'Unknown';
       const failResult = result || buildFailResult(node, null, state, errMsg, error?.diag || {});
       recomputeCounters(state);
-      upsertResult(failResult, _sanitizeSnippet(_rrSnippet));
-      saveResults();
+      upsertResult(state, failResult, _sanitizeSnippet(_rrSnippet));
+      saveResults(state);
       broadcast('result', { result: failResult, state });
       state.retestFailed++;
       broadcast('log', { msg: `  ✗ #${testNum} FAIL: ${errMsg.slice(0, 80)}` });
@@ -1686,8 +1690,8 @@ export async function runPlanTest(planId, state, broadcast) {
       const errResult = buildFailResult(node, status, state, `plan-session: ${_sanitizeSnippet(err.message)}`, { planId, subscriptionId });
       errResult.inPlan = true;
       errResult.planIds = [planId];
-      upsertResult(errResult, _sanitizeSnippet(_ptSnippetSess));
-      saveResults();
+      upsertResult(state, errResult, _sanitizeSnippet(_ptSnippetSess));
+      saveResults(state);
       broadcast('result', { result: errResult, state });
       continue;
     }
@@ -1717,8 +1721,8 @@ export async function runPlanTest(planId, state, broadcast) {
       if (result.slaApplicable && result.pass15mbps) state.passed15++;
       if (result.pass10mbps) state.passed10++;
       if (result.passBaseline) state.passedBaseline++;
-      upsertResult(result);
-      saveResults();
+      upsertResult(state, result);
+      saveResults(state);
       broadcast('result', { result, state });
       if (result.actualMbps != null) {
         planPassed++;
@@ -1737,8 +1741,8 @@ export async function runPlanTest(planId, state, broadcast) {
       const failResult = buildFailResult(node, status, state, `plan-test: ${errMsg}`, error?.diag || {});
       failResult.inPlan = true;
       failResult.planIds = [planId];
-      upsertResult(failResult, _sanitizeSnippet(_ptSnippet));
-      saveResults();
+      upsertResult(state, failResult, _sanitizeSnippet(_ptSnippet));
+      saveResults(state);
       broadcast('result', { result: failResult, state });
       broadcast('log', { msg: `  ✗ Test error: ${errMsg}` });
     }
@@ -2058,9 +2062,9 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
         evictResult.diag = evictResult.diag || {};
         evictResult.diag.viaSubscription = true;
         evictResult.diag.evicted = true;
-        upsertResult(evictResult, _sanitizeSnippet(`PLAN_EVICTED: node ${node.address} not in plan ${planId} (refreshed ${_refreshAge}ms ago)`));
+        upsertResult(state, evictResult, _sanitizeSnippet(`PLAN_EVICTED: node ${node.address} not in plan ${planId} (refreshed ${_refreshAge}ms ago)`));
         state.resumeHeadAddr = null;
-        saveResults();
+        saveResults(state);
         broadcast('result', { result: evictResult, state });
         continue;
       }
@@ -2076,9 +2080,9 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
         evictResult.diag = evictResult.diag || {};
         evictResult.diag.viaSubscription = true;
         evictResult.diag.evicted = true;
-        upsertResult(evictResult, _sanitizeSnippet(`PLAN_EVICTED: chain refresh confirmed node ${node.address} not in plan ${planId}`));
+        upsertResult(state, evictResult, _sanitizeSnippet(`PLAN_EVICTED: chain refresh confirmed node ${node.address} not in plan ${planId}`));
         state.resumeHeadAddr = null;
-        saveResults();
+        saveResults(state);
         broadcast('result', { result: evictResult, state });
         continue;
       }
@@ -2160,9 +2164,9 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
       errResult.diag.selfGranter = _selfGranter;
       errResult.diag.granter = granterAddr;
       if (_isEviction) errResult.diag.evicted = true;
-      upsertResult(errResult, _sanitizeSnippet(_spSnippetSess));
+      upsertResult(state, errResult, _sanitizeSnippet(_spSnippetSess));
       state.resumeHeadAddr = null;
-      saveResults();
+      saveResults(state);
       broadcast('result', { result: errResult, state });
       continue;
     }
@@ -2194,9 +2198,9 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
       if (result.slaApplicable && result.pass15mbps) state.passed15++;
       if (result.pass10mbps) state.passed10++;
       if (result.passBaseline) state.passedBaseline++;
-      upsertResult(result);
+      upsertResult(state, result);
       state.resumeHeadAddr = null;
-      saveResults();
+      saveResults(state);
       broadcast('result', { result, state });
       if (result.actualMbps != null) {
         subPassed++;
@@ -2220,9 +2224,9 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
       failResult.diag.feeGranted = !_selfGranter;
       failResult.diag.selfGranter = _selfGranter;
       failResult.diag.granter = granterAddr;
-      upsertResult(failResult, _sanitizeSnippet(_spSnippet));
+      upsertResult(state, failResult, _sanitizeSnippet(_spSnippet));
       state.resumeHeadAddr = null;
-      saveResults();
+      saveResults(state);
       broadcast('result', { result: failResult, state });
       broadcast('log', { msg: `  ✗ Test error: ${errMsg}` });
     }
