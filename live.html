@@ -873,16 +873,33 @@
     // Pull the persisted log backlog over REST. Used when SSE was already
     // open before broadcast flipped on, or as a defensive seed on visibility
     // changes — the SSE init only fires on the initial connection.
+    // Replay a persisted log backlog into the panel without freezing the page.
+    // The panel only ever keeps the last MAX_LOG entries, so replaying more is
+    // wasted work — cap to the tail. appendLog forces a layout reflow per call
+    // (scrollTop=scrollHeight); _logSeeding suppresses that during the bulk
+    // loop and we scroll once at the end. The server buffer is LOG_BUFFER_MAX
+    // (5000) lines, so the naive replay was up to ~5000 synchronous reflows.
+    function seedLogBacklog(lines) {
+      const body = document.getElementById('logBody');
+      if (!body || body.children.length !== 0) return;
+      if (!Array.isArray(lines) || !lines.length) return;
+      const tail = lines.length > MAX_LOG ? lines.slice(-MAX_LOG) : lines;
+      _logSeeding = true;
+      try {
+        for (const line of tail) appendLog(line);
+      } finally {
+        _logSeeding = false;
+      }
+      body.scrollTop = body.scrollHeight;
+    }
+
     async function seedLogsFromRest() {
       try {
         const r = await fetch('/api/public/logs', { cache: 'no-store' });
         if (!r.ok) return;
         const j = await r.json();
         if (!j || !Array.isArray(j.logs) || !j.logs.length) return;
-        const body = document.getElementById('logBody');
-        if (body && body.children.length === 0) {
-          for (const line of j.logs) appendLog(line);
-        }
+        seedLogBacklog(j.logs);
       } catch {}
     }
 
@@ -1048,6 +1065,9 @@
     const LIVE_PAGE_SIZE = 50;
     let _livePage = 1;
     const MAX_LOG  = 400;
+    // Suppresses appendLog's per-line scrollTop=scrollHeight (a forced layout
+    // reflow) during bulk backlog replay — see seedLogBacklog().
+    let _logSeeding = false;
 
     // ─── Helpers ───
     function escHtml(s) {
@@ -1452,7 +1472,10 @@
 
       div.innerHTML = parts.join('');
       body.appendChild(div);
-      body.scrollTop = body.scrollHeight;
+      // During bulk backlog replay we scroll once at the end (seedLogBacklog) —
+      // reading scrollHeight here per line forces a synchronous layout reflow,
+      // which froze the page when replaying thousands of buffered lines.
+      if (!_logSeeding) body.scrollTop = body.scrollHeight;
       if (body.children.length > MAX_LOG) body.removeChild(body.firstChild);
 
       if (!_logEntryMatches(div, _logFilter)) div.style.display = 'none';
@@ -2146,10 +2169,7 @@
           // Seed the log panel with the persisted backlog so a page refresh
           // mid-audit doesn't blank the activity log.
           if (Array.isArray(d.logs) && d.logs.length) {
-            const body = document.getElementById('logBody');
-            if (body && body.children.length === 0) {
-              for (const line of d.logs) appendLog(line);
-            }
+            seedLogBacklog(d.logs);
           }
           // Mirror admin: full state snapshot + per-node results so /live paints
           // identically on connect — not only on subsequent updates.
