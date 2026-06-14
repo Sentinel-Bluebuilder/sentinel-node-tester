@@ -744,6 +744,32 @@ function deleteRun(num) {
 }
 
 /**
+ * Reset the live/displayed view to an empty idle state. Called when the operator
+ * deletes the run that is currently loaded/selected. Without this, results,
+ * totalNodes, activeRunNumber and activeDbRunId would keep pointing at a now-gone
+ * run dir, and a later Save/Resume would build a `test-null` dir or overwrite the
+ * wrong SQLite row.
+ */
+function clearActiveRunView() {
+  const results = getResults();
+  results.length = 0;
+  saveResults();
+  rehydrateState([]);            // zero every per-node counter
+  state.totalNodes = 0;
+  state.activeRunNumber = null;
+  state.activeDbRunId = null;
+  state.loadedReadonly = false;
+  state.status = 'idle';
+  state.spentUdvpn = 0;
+  state.estimatedTotalCost = '0 P2P';
+  state.auditLogPath = null;
+  logBuffer.length = 0;
+  try { setActiveDbRunId(null); } catch (e) { console.error('[deleteRun] setActiveDbRunId(null) failed:', e.message); }
+  try { setActiveRunDir(null); } catch (e) { console.error('[deleteRun] setActiveRunDir(null) failed:', e.message); }
+  try { flushStateSnapshot(); } catch (e) { console.error('[deleteRun] snapshot flush failed:', e.message); }
+}
+
+/**
  * Repair stale run-index labels: recompute each run's total/passed/failed/pass10
  * from its actual saved results.json. A snapshot dir can be overwritten (e.g. an
  * interrupted run auto-saved into an existing run's dir when the run pointer was
@@ -2708,20 +2734,29 @@ app.post('/api/runs/load/:num', adminOnly, (req, res) => {
 app.delete('/api/runs/:num', adminOnly, (req, res) => {
   const num = parseInt(req.params.num);
   if (!Number.isInteger(num)) return res.status(400).json({ error: 'Invalid run number' });
-  // Refuse to delete the currently-active/loaded run. Deleting it would leave
-  // live results/totalNodes/activeDbRunId pointing at a now-gone run dir, and a
-  // later resume would build a `test-null` dir. Operator must load another run
-  // first.
-  if (state.activeRunNumber === num) {
+  // Only refuse deletion when an audit is ACTIVELY running/paused on this run —
+  // yanking the dir out from under a live writer would corrupt it. A stopped /
+  // done / idle run that merely happens to still be the loaded/selected run can
+  // be deleted: we reset the live view below so nothing dangles at a gone dir.
+  const inFlight = state.status === 'running' || state.status === 'paused' || continuous.status().running;
+  if (state.activeRunNumber === num && inFlight) {
     return res.status(409).json({
       error: 'RUN_ACTIVE',
-      message: "Can't delete the run that's currently loaded/active — load another run first.",
+      message: "Can't delete a run while it's still testing — stop it first.",
     });
   }
+  const wasActive = state.activeRunNumber === num;
+  // Detach the active run's raw log first so deleteRun is free to remove it
+  // (deleteRun otherwise preserves the currently-active run's log file).
+  if (wasActive) state.auditLogPath = null;
   const ok = deleteRun(num);
   if (!ok) return res.status(404).json({ error: `Test #${num} not found` });
+  if (wasActive) {
+    clearActiveRunView();
+    broadcastStateFresh();
+  }
   broadcast('log', { msg: `🗑 Deleted Test #${num}` });
-  res.json({ ok: true, number: num });
+  res.json({ ok: true, number: num, clearedActive: wasActive });
 });
 
 // ─── SDK Toggle ─────────────────────────────────────────────────────────────

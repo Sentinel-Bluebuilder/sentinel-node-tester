@@ -2099,7 +2099,13 @@
           headers: { 'X-Admin-Request': '1' },
         });
         const data = await res.json();
-        if (data.ok) loadRunsList();
+        if (data.ok) {
+          // If we just deleted the run that was loaded/displayed, the server
+          // reset the live view to empty — reload so the header/table reflect
+          // that cleanly (same as the load flow). Otherwise just refresh the list.
+          if (data.clearedActive) location.reload();
+          else loadRunsList();
+        }
         else alert('Delete failed: ' + (data.error || 'unknown'));
       } catch (e) {
         alert('Delete error: ' + e.message);
