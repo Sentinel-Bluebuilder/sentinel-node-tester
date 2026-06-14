@@ -1081,7 +1081,10 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
     broadcast('log', { msg: `\n🌐 Retesting ${internetFailAddrs.size} nodes that failed during internet outage...` });
     state.retestMode = true;
     clearPoisonedSessions();
-    clearPaidNodes();
+    // Do NOT clearPaidNodes() here — these nodes were paid in the main pass and
+    // (autoCancel off) their sessions are still active. Keeping the paid flag
+    // lets node-test.js re-query & REUSE the live session instead of paying
+    // twice; it pays fresh only if the session is genuinely gone.
     const retestNodes = viableNodes.filter(n => internetFailAddrs.has(n.node.address));
 
     for (let ri = 0; ri < retestNodes.length; ri++) {
@@ -1154,7 +1157,9 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
     broadcast('log', { msg: `🔄 Auto-retesting ${failedWithPeers.length} failures with peers > 0 (Iron Rule)...` });
     state.retestMode = true;
     clearPoisonedSessions();
-    clearPaidNodes();
+    // Do NOT clearPaidNodes() here — same reason as the internet-failure block:
+    // keep the paid flag so node-test.js reuses the still-active session instead
+    // of double-paying; it pays fresh only if the session is gone.
     const failAddrs = failedWithPeers.map(r => r.address);
     const retestNodes = viableNodes.filter(n => failAddrs.includes(n.node.address));
 

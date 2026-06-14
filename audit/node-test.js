@@ -294,10 +294,31 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
     }
   }
   if (!sessionId && isPaid(node.address) && state.retestMode) {
-    // In retest: clear the stale paid flag for THIS node only, so it can be
-    // re-paid. clearPaidNodes() (clear-all) here was a double-pay vector — it
-    // dropped every other node's paid flag too, re-opening the dup-pay guard.
-    clearPaidNode(node.address);
+    // Retest of an already-paid node. With autoCancelAfterTest OFF (the default)
+    // the main-pass session is still ACTIVE on-chain — re-query and REUSE it so
+    // we don't pay twice while the first deposit is locked (double-pay vector).
+    // Only if no session is found (autoCancel cancelled it, or it expired) do we
+    // clear the paid flag so a fresh payment is made below. Mirrors the
+    // !retestMode "charged-yet-untested" recovery above.
+    let reSid = null;
+    try {
+      reSid = await findExistingSession(node.address, account.address, broadcast);
+      if (!reSid) {
+        await sleep(5_000);
+        invalidateSessionCache();
+        reSid = await findExistingSession(node.address, account.address, broadcast);
+      }
+    } catch (reErr) {
+      console.error('[node-test] retest session re-query failed:', reErr?.message || String(reErr));
+    }
+    if (reSid) {
+      sessionId = BigInt(reSid);
+      addToSessionMap(node.address, sessionId);
+      if (broadcast) broadcast('log', { msg: `  ✓ Retest: reusing existing session ${sessionId} (no new payment)` });
+    } else {
+      // Old session gone (cancelled/expired) — allow a fresh payment below.
+      clearPaidNode(node.address);
+    }
   }
 
 // Balance check — return PAUSE signal instead of failing
