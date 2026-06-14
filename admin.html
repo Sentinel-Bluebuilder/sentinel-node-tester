@@ -540,6 +540,10 @@
       display: grid;
       grid-template-columns: 1fr 380px;
       gap: 16px;
+      /* One bounded, definite height so both columns — dVPN Node Connections
+         and Live Log — are exactly the same height and scroll internally,
+         instead of the table growing the page while the log stays capped. */
+      height: calc(100vh - 240px);
       min-height: 480px;
     }
 
@@ -563,7 +567,7 @@
       text-transform: uppercase;
     }
 
-    .table-wrap { overflow-y: auto; flex: 1; padding: 0 8px 8px 8px; margin-top: 8px; }
+    .table-wrap { overflow-y: auto; flex: 1; min-height: 0; padding: 0 8px 8px 8px; margin-top: 8px; }
 
     table { width: 100%; border-collapse: separate; border-spacing: 0 4px; table-layout: fixed; }
 
@@ -673,8 +677,7 @@
 
     .logs {
       flex: 1 1 auto;
-      min-height: 320px;
-      max-height: calc(100vh - 240px);
+      min-height: 0;
       overflow-y: auto;
       padding: 12px;
       display: flex;
