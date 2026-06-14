@@ -579,13 +579,13 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   }
   const logLine = (msg) => { try { appendFileSync(auditLogPath, msg + '\n', 'utf8'); } catch {} };
   if (resume) {
-    logLine(`${'='.repeat(80)}`);
+    logLine(`${'='.repeat(32)}`);
     logLine(`RESUMED: ${new Date().toISOString()}`);
-    logLine(`${'='.repeat(80)}`);
+    logLine(`${'='.repeat(32)}`);
   } else {
     logLine(`Sentinel Node Tester — Full Audit Log`);
     logLine(`Started: ${state.startedAt} | Resume: ${resume}`);
-    logLine(`${'='.repeat(80)}`);
+    logLine(`${'='.repeat(32)}`);
   }
 
   // Wrap broadcast to also write to log file
@@ -1232,7 +1232,7 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
   logLine(`Sentinel Node Tester — Retest Log`);
   logLine(`Started: ${state.startedAt}`);
   logLine(`Nodes to retest: ${skipAddrs.length}`);
-  logLine(`${'='.repeat(80)}`);
+  logLine(`${'='.repeat(32)}`);
 
   broadcast('log', { msg: `🔄 Retesting ${skipAddrs.length} previously-failed nodes...` });
   broadcast('log', { msg: `📝 Log file: results/retest-${logTs}.log` });
@@ -1313,7 +1313,7 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
 
   logLine(`Nodes found on chain: ${toTest.length}/${skipAddrs.length}`);
   logLine(`Baseline: ${state.baselineMbps || '?'} Mbps`);
-  logLine(`${'─'.repeat(80)}`);
+  logLine(`${'─'.repeat(32)}`);
 
   for (let i = 0; i < toTest.length; i++) {
     if (state.stopRequested) { broadcast('log', { msg: '⏹ Stop requested.' }); logLine('STOPPED by user'); break; }
@@ -1393,7 +1393,7 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
 
   const summary = `✅ Retest complete. ${state.retestPassed} now working, ${state.retestFailed} still failing out of ${toTest.length} retested.`;
   broadcast('log', { msg: summary });
-  logLine(`\n${'='.repeat(80)}`);
+  logLine(`\n${'='.repeat(32)}`);
   logLine(summary);
   logLine(`Grand total: ${state.testedNodes} passed, ${state.failedNodes} failed out of ${state.testedNodes + state.failedNodes}`);
   logLine(`Success rate: ${((state.testedNodes / (state.testedNodes + state.failedNodes)) * 100).toFixed(1)}%`);

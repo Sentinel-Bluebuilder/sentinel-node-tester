@@ -1384,7 +1384,7 @@
     </div>
     <div class="drawer-body">
       <div class="addr-row">
-        <code id="dAddr">—</code>
+        <a id="dAddrLink" href="#" target="_blank" rel="noopener noreferrer" title="Open in Sentinel Explorer" style="color:var(--accent);text-decoration:none;"><code id="dAddr">—</code></a>
         <button class="copy-btn" id="copyAddrBtn">Copy</button>
         <a id="dFullPageLink" href="#" style="margin-left:8px;color:var(--accent);font-size:12px;text-decoration:none;">Full page ↗</a>
       </div>
@@ -2334,6 +2334,8 @@
       document.getElementById('dTitle').textContent    = node.moniker || node.address;
       document.getElementById('dSubtitle').textContent = [node.country, node.city].filter(Boolean).join(' · ') || node.address;
       document.getElementById('dAddr').textContent     = node.address;
+      const dl = document.getElementById('dAddrLink');
+      if (dl) dl.href = 'https://explorer.sentinel.co/address/' + encodeURIComponent(node.address);
       const fp = document.getElementById('dFullPageLink');
       if (fp) fp.href = '/node/' + encodeURIComponent(node.address);
 
@@ -2629,15 +2631,18 @@
 
     // ─── Search (debounced) ───
     document.getElementById('searchInput').addEventListener('input', () => {
+      // Instant client-side filter over the already-loaded set so the visible
+      // list updates on every keystroke (no waiting on the network).
+      searchQuery   = document.getElementById('searchInput').value.trim();
+      currentOffset = 0;
+      filterAndSort();
+      renderPage();
+      updateFilterChips();
+      stateToUrl();
+      // Debounced server re-fetch keeps results correct when broadening the
+      // query beyond the current 500-node client cache (server applies ?q).
       clearTimeout(searchTimer);
-      searchTimer = setTimeout(() => {
-        searchQuery   = document.getElementById('searchInput').value.trim();
-        currentOffset = 0;
-        filterAndSort();
-        renderPage();
-        updateFilterChips();
-        stateToUrl();
-      }, DEBOUNCE_MS);
+      searchTimer = setTimeout(() => { loadNodes(); }, DEBOUNCE_MS);
     });
 
     // ─── Country filter ───

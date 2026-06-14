@@ -624,8 +624,6 @@
     .results-table td:first-child { padding-left: 8px; }
     .results-table th:last-child,
     .results-table td:last-child { padding-right: 8px; }
-    /* Center the SDK badge inside its narrow column */
-    .results-table tbody td:first-child { text-align: center; }
     /* Sticky-header fix: sentinel.css `thead th { background: var(--bg-input) }`
        (a ~4% alpha, near-transparent fill) outweighs the generic `th` rule, so
        rows bled through the sticky header. This higher-specificity rule makes
@@ -1019,8 +1017,7 @@
         <div class="results-head-wrap">
           <table class="results-table">
             <colgroup>
-              <col style="width:54px">   <!-- SDK -->
-              <col style="width:108px">  <!-- Transport -->
+              <col style="width:130px">  <!-- Transport -->
               <col>                      <!-- Moniker (flex) -->
               <col style="width:150px">  <!-- Node -->
               <col style="width:90px">   <!-- Country -->
@@ -1035,7 +1032,6 @@
             </colgroup>
             <thead>
               <tr>
-                <th style="text-align:center">SDK</th>
                 <th style="text-align:left">Transport</th>
                 <th style="text-align:left">Moniker</th>
                 <th style="text-align:left">Node</th>
@@ -1055,8 +1051,7 @@
         <div class="table-wrap">
           <table class="results-table">
             <colgroup>
-              <col style="width:54px">   <!-- SDK -->
-              <col style="width:108px">  <!-- Transport -->
+              <col style="width:130px">  <!-- Transport -->
               <col>                      <!-- Moniker (flex) -->
               <col style="width:150px">  <!-- Node -->
               <col style="width:90px">   <!-- Country -->
@@ -1919,7 +1914,10 @@
       const addrFull = r.address || '';
       const monikerText = r.moniker || r.nodeName || r.name || '(unknown)';
       const addrShort = addrFull ? `${addrFull.slice(0, 12)}…${addrFull.slice(-5)}` : '--';
-      const addr = addrFull ? `<span class="copyable" data-addr="${escHtml(addrFull)}" title="${escHtml(addrFull)}" onclick="copyAddrFromData(event)">${escHtml(addrShort)}</span>` : '--';
+      const addr = addrFull
+        ? `<span class="copyable" data-addr="${escHtml(addrFull)}" title="${escHtml(addrFull)}" onclick="copyAddrFromData(event)">${escHtml(addrShort)}</span>`
+          + `<a href="https://explorer.sentinel.co/address/${encodeURIComponent(addrFull)}" target="_blank" rel="noopener noreferrer" title="Open in Sentinel Explorer" onclick="event.stopPropagation()" style="margin-left:6px;color:var(--accent);text-decoration:none;font-size:11px">↗</a>`
+        : '--';
       const cc = r.countryCode || _countryToCode(r.country) || '';
       const flag = cc.length === 2
         ? `<img class="flag-img" src="https://flagcdn.com/${cc.toLowerCase()}.svg" alt="${escHtml(cc.toUpperCase())}" loading="lazy" onerror="this.style.display='none'">`
@@ -1978,10 +1976,11 @@
         }
       }
 
+      // sdkLabel/sdkColors are retained for the "Other SDKs" cross-reference
+      // column below. The per-row SDK badge was removed (it lived in a 54px
+      // column that truncated and duplicated the WG/V2 transport badge).
       const sdkLabel = r.sdk || state.activeSDK || 'js';
       const sdkColors = { js: { bg: 'var(--bg-input)', fg: 'var(--text)', label: 'JS' }, csharp: { bg: 'var(--bg-input)', fg: 'var(--text)', label: 'C#' }, tkd: { bg: 'var(--bg-input)', fg: 'var(--text)', label: 'TKD' } };
-      const sc = sdkColors[sdkLabel] || sdkColors.js;
-      const sdkBadge = `<span style="font-size:10px;padding:2px 5px;border-radius:3px;background:${sc.bg};color:${sc.fg};font-weight:600">${sc.label}</span>`;
 
       // ─── Other SDKs column: cross-reference this node against other run results ──
       let otherSdkHtml = '<span style="color:var(--text-muted)">-</span>';
@@ -2020,8 +2019,7 @@
         : '<span style="color:var(--text-muted)">—</span>';
 
       tr.innerHTML = `
-        <td>${sdkBadge} ${proto}</td>
-        <td>${transportHtml}</td>
+        <td>${proto} ${transportHtml}</td>
         <td style="font-weight:500">${escHtml(monikerText)}</td>
         <td style="font-family:var(--font-mono);font-size:11px;color:var(--text-secondary)">${addr}</td>
         <td>${countryCol}</td>
@@ -3721,7 +3719,7 @@ Record (28 bytes × count)
         document.getElementById('dTitle').textContent = nd.moniker || addr;
 
         document.getElementById('dMeta').innerHTML = [
-          ['Address', '<span style="font-family:var(--font-mono);font-size:10px;word-break:break-all">' + escHtml(nd.addr || addr) + '</span>'],
+          ['Address', (function(){ const a = nd.addr || addr; return a ? '<a href="https://explorer.sentinel.co/address/' + encodeURIComponent(a) + '" target="_blank" rel="noopener noreferrer" title="Open in Sentinel Explorer" style="font-family:var(--font-mono);font-size:10px;word-break:break-all;color:var(--accent);text-decoration:none">' + escHtml(a) + ' ↗</a>' : '<span style="font-family:var(--font-mono);font-size:10px">—</span>'; })()],
           ['Country', escHtml(nd.country || '—')],
           ['City', escHtml(nd.city || '—')],
           ['Service', escHtml(nd.service_type || '—')],
