@@ -533,6 +533,15 @@ function isPipelineBusy() { return PIPELINE_BUSY_STATUSES.includes(state.status)
 // separate continuous-takeover handling (delete, SDK swap).
 function isAuditBusy() { return isPipelineBusy() || continuous.status().running; }
 
+// Synchronous "an audit is being launched" guard. /api/start and /api/resume have
+// an AWAIT (the continuous-takeover pause-poll) between the isPipelineBusy() check
+// and the moment runAudit sets status='running'. Without a flag set before that
+// await, two near-simultaneous starts both pass the check, mint duplicate run
+// numbers, and overlap on the shared pipeline run dir. Set true before the
+// takeover await, cleared once it completes — the rest of the launch is
+// synchronous up to status='running', so no concurrent request can interleave.
+let _auditLaunching = false;
+
 // Persist Broadcast Live across restarts so the operator's choice survives
 // process bounces — without this, every restart silently flips public /live
 // back to "paused" even though the admin UI still shows BROADCAST ON.
@@ -2273,16 +2282,28 @@ app.post('/api/start', adminOnly, async (req, res) => {
   const infiniteLoop = !!(req.body?.infiniteLoop || req.query.infiniteLoop);
   const pricingMode = (req.body?.pricingMode === 'hours' || req.query.pricingMode === 'hours') ? 'hours' : 'gigabytes';
 
-  if (isPipelineBusy()) return res.json({ error: 'Already running' });
+  if (isPipelineBusy() || _auditLaunching) return res.json({ error: 'Already running' });
   if (continuous.status().running) {
     if (!req.body?.takeover) {
       return res.status(409).json({ error: 'PUBLIC_RUN_ACTIVE', message: 'A public run is active. Pause it and start an audit?' });
     }
-    const pr = continuous.pause();
-    if (!pr.ok) return res.status(500).json({ error: 'pause failed: ' + pr.error });
-    for (let i = 0; i < 100; i++) {
-      if (!continuous.status().running) break;
-      await new Promise(r => setTimeout(r, 100));
+    // Synchronously claim the launch BEFORE the pause-poll await so a second
+    // concurrent start/resume can't slip through the isPipelineBusy() check.
+    // try/finally guarantees the flag clears on EVERY path (return or throw) so
+    // it can never get stuck true and wedge all future starts. The flag clears
+    // at the END of this block — safe ONLY because the remaining launch path is
+    // synchronous up to status='running'. DO NOT add an await between here and
+    // status='running', or the TOCTOU window silently reopens.
+    _auditLaunching = true;
+    try {
+      const pr = continuous.pause();
+      if (!pr.ok) return res.status(500).json({ error: 'pause failed: ' + pr.error });
+      for (let i = 0; i < 100; i++) {
+        if (!continuous.status().running) break;
+        await new Promise(r => setTimeout(r, 100));
+      }
+    } finally {
+      _auditLaunching = false;
     }
   }
   if (!testRun && !MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
@@ -2338,16 +2359,28 @@ app.post('/api/start', adminOnly, async (req, res) => {
 
 // Resume CURRENT test from where it left off (skips already-tested nodes).
 app.post('/api/resume', adminOnly, async (req, res) => {
-  if (isPipelineBusy()) return res.json({ error: 'Already running' });
+  if (isPipelineBusy() || _auditLaunching) return res.json({ error: 'Already running' });
   if (continuous.status().running) {
     if (!req.body?.takeover) {
       return res.status(409).json({ error: 'PUBLIC_RUN_ACTIVE', message: 'A public run is active. Pause it and start an audit?' });
     }
-    const pr = continuous.pause();
-    if (!pr.ok) return res.status(500).json({ error: 'pause failed: ' + pr.error });
-    for (let i = 0; i < 100; i++) {
-      if (!continuous.status().running) break;
-      await new Promise(r => setTimeout(r, 100));
+    // Synchronously claim the launch BEFORE the pause-poll await so a second
+    // concurrent start/resume can't slip through the isPipelineBusy() check.
+    // try/finally guarantees the flag clears on EVERY path (return or throw) so
+    // it can never get stuck true and wedge all future starts. The flag clears
+    // at the END of this block — safe ONLY because the remaining launch path is
+    // synchronous up to status='running'. DO NOT add an await between here and
+    // status='running', or the TOCTOU window silently reopens.
+    _auditLaunching = true;
+    try {
+      const pr = continuous.pause();
+      if (!pr.ok) return res.status(500).json({ error: 'pause failed: ' + pr.error });
+      for (let i = 0; i < 100; i++) {
+        if (!continuous.status().running) break;
+        await new Promise(r => setTimeout(r, 100));
+      }
+    } finally {
+      _auditLaunching = false;
     }
   }
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
@@ -2496,7 +2529,7 @@ app.post('/api/stop', adminOnly, (req, res) => {
 });
 
 app.post('/api/retest-skips', adminOnly, async (req, res) => {
-  if (isPipelineBusy()) return res.json({ error: 'Already running' });
+  if (isPipelineBusy() || _auditLaunching) return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const results = getResults();
   const skipAddrs = results.filter(r => r.actualMbps == null && /unreachable/i.test(r.error || '')).map(r => r.address);
@@ -2530,7 +2563,7 @@ app.post('/api/retest-skips', adminOnly, async (req, res) => {
 });
 
 app.post('/api/retest-fails', adminOnly, async (req, res) => {
-  if (isPipelineBusy()) return res.json({ error: 'Already running' });
+  if (isPipelineBusy() || _auditLaunching) return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const results = getResults();
   const specific = req.body?.addresses;
@@ -2567,7 +2600,7 @@ app.post('/api/retest-fails', adminOnly, async (req, res) => {
 
 // DEPRECATED: Plan testing is WIP — hidden from dashboard, endpoint still functional for API callers
 app.post('/api/test-plan', adminOnly, async (req, res) => {
-  if (isPipelineBusy()) return res.json({ error: 'Already running' });
+  if (isPipelineBusy() || _auditLaunching) return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const { planId } = req.body;
   if (!planId) return res.status(400).json({ error: 'planId required' });
@@ -2620,7 +2653,7 @@ app.get('/api/sub-plans', adminOnly, async (req, res) => {
 
 // Sub. Plan mode: run fee-granted plan test — starts as a fresh run with clean counters.
 app.post('/api/test-sub-plan', adminOnly, async (req, res) => {
-  if (isPipelineBusy()) return res.json({ error: 'Already running' });
+  if (isPipelineBusy() || _auditLaunching) return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const { planId, subscriptionId, granter } = req.body || {};
   if (!planId) return res.status(400).json({ error: 'planId required' });
@@ -2847,7 +2880,7 @@ app.get('/api/transport-cache', adminOnly, (req, res) => {
 
 // Auto-retest: analyze failures, retest all retestable nodes in one shot
 app.post('/api/auto-retest', adminOnly, async (req, res) => {
-  if (isPipelineBusy()) return res.json({ error: 'Already running' });
+  if (isPipelineBusy() || _auditLaunching) return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
 
   const force = req.body?.force === true;
