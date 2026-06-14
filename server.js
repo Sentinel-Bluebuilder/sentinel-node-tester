@@ -815,6 +815,29 @@ function loadRunIntoState(num) {
   state.activeDbRunId = _runMeta?.dbRunId != null ? Number(_runMeta.dbRunId) : null;
   try { setActiveDbRunId(state.activeDbRunId); }
   catch (e) { console.error('[runs] setActiveDbRunId on load failed:', e.message); }
+  // Route-isolation: a loaded run is a read-only historical snapshot. Reset the
+  // run-mode context so a subsequent Retest (which clears loadedReadonly) can't
+  // inherit a stale mode from the PRIOR live run — e.g. loading a P2P run after a
+  // TEST RUN would otherwise leave state.testRun=true / runMode='test' and the
+  // Retest would hijack into TEST_RUN_SKIP rows (the hijack CLAUDE.md warns of).
+  // Derive the loaded run's mode from its SQLite row when known; default to
+  // 'p2p' and NEVER leave 'test'.
+  let _loadedMode = 'p2p';
+  if (state.activeDbRunId != null) {
+    try {
+      const _runRow = getRun(state.activeDbRunId);
+      if (_runRow && _runRow.mode && _runRow.mode !== 'test') _loadedMode = _runRow.mode;
+    } catch (e) { console.error('[runs] mode lookup on load failed:', e.message); }
+  }
+  state.testRun = false;
+  state.runMode = _loadedMode;
+  state.runPlanId = null;
+  state.runSubscriptionId = null;
+  state.runGranter = null;
+  state.activeBatchId = 0;
+  state.resumeHeadAddr = null;
+  state.currentNode = null;
+  state.continuousLoop = false;
   return data;
 }
 
@@ -900,6 +923,15 @@ function clearActiveRunView() {
   state.spentUdvpn = 0;
   state.estimatedTotalCost = '0 P2P';
   state.auditLogPath = null;
+  // Charts + transient run pointers also belong to the now-deleted run: without
+  // clearing these the dashboard's "Last 10 baseline" / "Last 10 node speeds"
+  // and currentNode keep rendering the DELETED run's data, and a stale
+  // activeBatchId/resumeHeadAddr could mis-target a later resume.
+  state.baselineHistory = [];
+  state.nodeSpeedHistory = [];
+  state.currentNode = null;
+  state.resumeHeadAddr = null;
+  state.activeBatchId = 0;
   logBuffer.length = 0;
   try { flushStateSnapshot(); } catch (e) { console.error('[deleteRun] snapshot flush failed:', e.message); }
 }
@@ -2576,11 +2608,25 @@ app.post('/api/test-sub-plan', adminOnly, async (req, res) => {
 });
 
 app.post('/api/clear', adminOnly, (req, res) => {
+  // Guard: clearing mid-run corrupts state — the pipeline keeps pushing rows
+  // into the same results array we'd be emptying. Refuse while a run is live.
+  if (isPipelineBusy()) return res.status(409).json({ error: 'RUN_ACTIVE', message: 'Stop the run before clearing.' });
   getResults().length = 0;
   state.testedNodes = state.failedNodes = state.skippedNodes = state.passed15 = state.passed10 = state.passedBaseline = 0;
   state.retryCount = 0;
   state.baselineHistory = [];
   state.nodeSpeedHistory = [];
+  // /api/clear wipes the DISPLAYED rows but keeps the active-run identity
+  // (activeRunNumber / activeDbRunId / pipeline run dir stay attached — use
+  // clearActiveRunView()/deleteRun to drop the identity). The counters above
+  // leave spend/total/currentNode stale, so the header would still show the old
+  // Net Spend / Total. Reset those transient fields too for a consistent wipe.
+  state.spentUdvpn = 0;
+  state.estimatedTotalCost = '0 P2P';
+  state.totalNodes = 0;
+  state.currentNode = null;
+  state.resumeHeadAddr = null;
+  state.activeBatchId = 0;
   saveResults();
   broadcastStateFresh();
   res.json({ ok: true });
@@ -3141,10 +3187,15 @@ app.listen(PORT, LISTEN_HOST, async () => {
   // ─── Periodic balance refresh (runs even when idle) ────────────────────────
   if (MNEMONIC) {
     setInterval(async () => {
-      // Skip refresh while the pipeline is doing its OWN balance refresh
-      // (actively testing, or parked in the insufficient-funds poll loop). This
-      // is deliberately NOT isPipelineBusy() — during paused_internet/'paused'
-      // the pipeline isn't touching balance, so the periodic refresh is fine.
+      // Whether this refresher may zero spentUdvpn. It must NOT while a run is
+      // in-progress OR resumable: the tester is an on-chain spend oracle, and a
+      // paused_internet/'paused' or 'stopped'-but-resumable run still has
+      // cumulative spend that a later Resume must report. Zeroing it here makes
+      // the resumed run under-report. Only when truly idle ('idle'/'done') is
+      // the live chain balance the sole truth and spentUdvpn safe to reset.
+      const spendLocked = isPipelineBusy() || state.status === 'stopped';
+      // Skip entirely while the pipeline does its OWN balance refresh (actively
+      // testing, or parked in the insufficient-funds poll loop).
       if (state.status === 'running' || state.status === 'paused_balance') return;
       try {
         const w = await DirectSecp256k1HdWallet.fromMnemonic(MNEMONIC, { prefix: 'sent' });
@@ -3155,11 +3206,13 @@ app.listen(PORT, LISTEN_HOST, async () => {
         tmpClient.disconnect();
         if (fresh !== state.balanceUdvpn) {
           state.balanceUdvpn = fresh;
-          state.spentUdvpn = 0;
+          // Only reset the spend estimate when truly idle — never on a paused or
+          // stopped-but-resumable run (see spendLocked above).
+          if (!spendLocked) state.spentUdvpn = 0;
           state.balance = `${(fresh / 1_000_000).toFixed(4)} P2P`;
           broadcast('state', { state });
         }
-      } catch { /* non-critical */ }
+      } catch (e) { console.error('[balance-refresh] periodic refresh failed:', e.message); }
     }, 2 * 60_000); // Every 2 minutes
   }
 });
