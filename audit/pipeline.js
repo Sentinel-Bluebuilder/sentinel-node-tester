@@ -1229,7 +1229,18 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
   const balRes = await client.getBalance(account.address, DENOM);
   state.balanceUdvpn = parseInt(balRes?.amount || '0', 10);
   state.balance = `${(state.balanceUdvpn / 1_000_000).toFixed(4)} P2P`;
-  state.spentUdvpn = 0;
+  // NEEDS PRODUCT DECISION (retest spend accounting): this used to hard-reset
+  // state.spentUdvpn = 0 at the top of every retest. When the operator loaded a
+  // past run (whose net spend was restored from the index) and then hit Retest
+  // Failed, that zeroing discarded the loaded run's prior spend — and because
+  // the retest now persists results back to the SAME run (see persistActiveRun
+  // in server.js), the wiped value would overwrite the stored spend, losing
+  // data. CONSERVATIVE FIX: preserve the prior spend as the baseline so the
+  // retest's per-node payments accumulate on top of it instead of replacing it.
+  // If the intended semantics are "show only THIS pass's spend", this should be
+  // reverted to `= 0` — but that must be a deliberate product call, not a
+  // silent default. Whichever way it goes, do not lose the loaded run's spend.
+  state.spentUdvpn = Number(state.spentUdvpn) || 0;
   broadcast('state', { state });
 
   const v2rayAvailable = await checkV2Ray();

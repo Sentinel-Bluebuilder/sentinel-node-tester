@@ -2086,6 +2086,15 @@
     }
 
     // ─── Render current page ───
+    // Coalesce live-broadcast re-renders into one per animation frame so a burst
+    // of SSE events doesn't trigger a full re-sort + DOM rebuild per event.
+    let _renderQueued = false;
+    function scheduleRenderPage() {
+      if (_renderQueued) return;
+      _renderQueued = true;
+      requestAnimationFrame(() => { _renderQueued = false; filterAndSort(); renderPage(); });
+    }
+
     function renderPage() {
       const total = filteredNodes.length;
       document.getElementById('resultsMeta').textContent = total + ' node' + (total !== 1 ? 's' : '');
@@ -3037,8 +3046,7 @@
             });
             const idx = allNodes.findIndex(n => n.address === norm.address);
             if (idx >= 0) allNodes[idx] = norm; else allNodes.push(norm);
-            filterAndSort();
-            renderPage();
+            scheduleRenderPage();
           } catch (_) {}
           break;
         }

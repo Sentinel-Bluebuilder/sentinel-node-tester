@@ -20,7 +20,7 @@ import { ensureLcd, getActiveLcd, cleanupRpc, getAllNodes } from './core/chain.j
 import { nodeStatusV3 } from './protocol/v3protocol.js';
 import { createState, runAudit, runRetestSkips, runPlanTest, runSubPlanTest, getResults, saveResults, setActiveRunDir, setActiveDbRunId, triggerPipelineStop } from './audit/pipeline.js';
 import {
-  insertRun, updateRunOnFinish, getRunSpendByFinish,
+  insertRun, updateRunOnFinish, getRunSpendByFinish, getRun,
   insertResult, insertErrorLog,
   searchNodes, getNodeDetail, getNodeErrors, getCountryList,
   getActiveRun, getLastCompletedRun, getBandwidthHistory,
@@ -180,6 +180,9 @@ process.on('exit', onProcessExit);
 // hard exit fires after 2s regardless so Ctrl-C is still snappy.
 function gracefulShutdown(signal, exitCode) {
   console.log(`[server] ${signal} received — stopping continuous loop`);
+  // Force a final snapshot before teardown so a Ctrl-C / SIGTERM within the
+  // throttle window still persists the latest in-flight state for resume.
+  try { flushStateSnapshot(); } catch (e) { console.error('[shutdown] snapshot flush failed:', e.message); }
   try { continuous.stop(); } catch {}
   onProcessExit();
   setTimeout(() => process.exit(exitCode), 2_000).unref();
@@ -222,10 +225,13 @@ const logBuffer = [];
 const STATE_SNAPSHOT_FILE = path.join(__dirname, 'results', '.state-snapshot.json');
 let _lastSnapshotTs = 0;
 
-function saveStateSnapshot() {
-  // Throttle: save at most every 5 seconds to avoid disk thrashing
+function saveStateSnapshot(force = false) {
+  // Throttle: save at most every 5 seconds to avoid disk thrashing — unless
+  // `force` is set. Terminal status transitions (stop/done/error) and explicit
+  // flush points pass force=true so a crash/stop within the 5s window can't
+  // lose the latest activeBatchId / spend / resumeHeadAddr / activeDbRunId.
   const now = Date.now();
-  if (now - _lastSnapshotTs < 5_000) return;
+  if (!force && now - _lastSnapshotTs < 5_000) return;
   _lastSnapshotTs = now;
   try {
     _wfs(STATE_SNAPSHOT_FILE, JSON.stringify({
@@ -267,8 +273,13 @@ function saveStateSnapshot() {
       // survive a bounce so boot doesn't re-alias an unsaved run onto a saved one.
       activeRunNumber: state.activeRunNumber ?? null,
     }), 'utf8');
-  } catch { }
+  } catch (e) { console.error('[snapshot] write failed:', e.message); }
 }
+
+// Force a non-throttled snapshot write. Call on terminal status transitions
+// and in /api/stop so the latest volatile fields survive a stop/crash that
+// lands inside the 5s throttle window.
+function flushStateSnapshot() { saveStateSnapshot(true); }
 
 function broadcast(type, data = {}) {
   if (type === 'log' && data.msg) {
@@ -541,6 +552,10 @@ function saveCurrentRun(label) {
     // per-node counts, so without this they reset to 0 / -- on load.
     spentUdvpn: Number(state.spentUdvpn) || 0,
     refundedUdvpn: Number(state.refundedUdvpn) || 0,
+    // SQLite runs.id for this run, so loading it later can look up spend/refund
+    // deterministically via getRun(dbRunId) instead of the getRunSpendByFinish
+    // time+count heuristic.
+    dbRunId: state.activeDbRunId || null,
     // Raw execution-log filename, so deleting this run also purges its log.
     auditLog: state.auditLogPath ? path.basename(state.auditLogPath) : null,
   });
@@ -562,6 +577,66 @@ function saveCurrentRun(label) {
     }
   }
 
+  return num;
+}
+
+/**
+ * Persist the current in-memory results back to the ACTIVE run's snapshot dir
+ * (test-NNN/) + its index entry, WITHOUT allocating a new run number. Used by
+ * retest endpoints so a retest's mutated results land on disk + SQLite for the
+ * same run the operator was viewing — otherwise file / index / SQLite / live
+ * state diverge (the retest-divergence bug). Re-syncs the index counts in place
+ * and updates the SQLite run row when one is attached.
+ *
+ * Returns the run number written, or null when there's nothing/nowhere to save.
+ */
+function persistActiveRun(label) {
+  const num = state.activeRunNumber;
+  if (num == null) return null;
+  const results = getResults();
+  if (results.length === 0) return null;
+
+  const runDir = path.join(RUNS_DIR, `test-${String(num).padStart(3, '0')}`);
+  try { _mkd(runDir, { recursive: true }); } catch (e) { console.error('[persistActiveRun] mkdir failed:', e.message); }
+  _wfs(path.join(runDir, 'results.json'), JSON.stringify(results, null, 2), 'utf8');
+
+  const failLog = path.join(__dirname, 'results', 'failures.jsonl');
+  if (_ex(failLog)) { try { _cp(failLog, path.join(runDir, 'failures.jsonl')); } catch (e) { console.error('[persistActiveRun] failures copy failed:', e.message); } }
+  if (state.auditLogPath && _ex(state.auditLogPath)) {
+    try { _cp(state.auditLogPath, path.join(runDir, 'audit.log')); } catch (e) { console.error('[persistActiveRun] log copy failed:', e.message); }
+  }
+
+  const passed = results.filter(r => r.actualMbps != null);
+  const failed = results.filter(r => r.actualMbps == null);
+  const pass10 = passed.filter(r => r.actualMbps >= 10);
+
+  const index = loadRunsIndex();
+  const entry = index.runs.find(r => r.number === num);
+  if (entry) {
+    entry.total = results.length;
+    entry.passed = passed.length;
+    entry.failed = failed.length;
+    entry.pass10 = pass10.length;
+    entry.spentUdvpn = Number(state.spentUdvpn) || 0;
+    entry.refundedUdvpn = Number(state.refundedUdvpn) || 0;
+    if (label) entry.label = label;
+    if (state.activeDbRunId) entry.dbRunId = state.activeDbRunId;
+    saveRunsIndex(index);
+  }
+
+  if (state.activeDbRunId) {
+    try {
+      updateRunOnFinish(state.activeDbRunId, {
+        finished_at:    Date.now(),
+        node_count:     results.length,
+        pass_count:     passed.length,
+        spent_udvpn:    Number(state.spentUdvpn)    || 0,
+        refunded_udvpn: Number(state.refundedUdvpn) || 0,
+      });
+    } catch (dbErr) {
+      console.error(`[persistActiveRun] updateRunOnFinish failed: ${dbErr.message}`);
+    }
+  }
   return num;
 }
 
@@ -724,7 +799,18 @@ function rehydrateState(results) {
       const cand = index.activeRun != null ? index.activeRun
                  : (index.runs.length > 0 ? index.runs[index.runs.length - 1].number : null);
       const candData = cand != null ? loadRun(cand) : null;
-      state.activeRunNumber = (candData && candData.length === results.length) ? cand : getNextRunNumber();
+      const reused = candData && candData.length === results.length;
+      state.activeRunNumber = reused ? cand : getNextRunNumber();
+      // When we assigned a FRESH number (not reusing a saved run), reserve it by
+      // persisting it into the snapshot immediately. getNextRunNumber() only
+      // looks at the saved index — across repeated crashes before this run is
+      // ever saved, it would hand out the SAME number again and a later save
+      // could overwrite a different run. Forcing a snapshot now means the next
+      // boot restores this number instead of recomputing it.
+      if (!reused) {
+        try { flushStateSnapshot(); }
+        catch (e) { console.error('[boot] reserve run-number snapshot failed:', e.message); }
+      }
     }
 
     console.log(`Resuming Test #${state.activeRunNumber} | ${results.length} results: ${state.testedNodes} passed, ${state.failedNodes} failed | SDK: ${state.activeSDK}`);
@@ -1619,7 +1705,13 @@ app.post('/api/public/test/start', attachAdminFlag, async (req, res) => {
   if (process.env.ALLOW_PUBLIC_TEST !== 'true') {
     return res.status(403).json({ error: 'Public test start disabled' });
   }
-  const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim();
+  // Use req.ip (populated from X-Forwarded-For only via the single trusted
+  // proxy hop configured by `app.set('trust proxy', 1)`), NOT the raw
+  // X-Forwarded-For header — that header is fully attacker-spoofable and would
+  // let a single client mint unlimited distinct "IPs" to bypass this limiter on
+  // the only unauthenticated wallet-spending route. Matches clientIp() in
+  // core/rate-limit.js (F-02).
+  const ip = req.ip || req.socket?.remoteAddress || 'unknown';
   if (!publicStartRateOk(ip)) {
     return res.status(429).json({ error: 'Rate limit: one start per minute per IP' });
   }
@@ -1676,10 +1768,17 @@ app.post('/api/settings', adminOnly, (req, res) => {
 // ─── On-chain reports (RPC tx_search by tester wallet) ───────────────────────
 // Returns recent decoded report TXs posted by this tester. Open endpoint —
 // the data is already public on-chain. Limit capped at 50 per request.
-app.get('/api/onchain-reports', async (req, res) => {
+app.get('/api/onchain-reports', rlPublicRead, async (req, res) => {
   try {
+    // Prefer the explicit ?address, then the already-cached tester wallet
+    // (set at boot). Only re-derive from the mnemonic as a last resort — that
+    // path does key-derivation work on the request thread and is rate-limited
+    // above, but we'd rather not run it at all on the common case.
     let address = req.query.address || state.walletAddress || null;
     if (!address) {
+      if (!process.env.MNEMONIC) {
+        return res.status(503).json({ error: 'tester wallet not yet initialized' });
+      }
       try {
         const { account } = await cachedWalletSetup(process.env.MNEMONIC);
         address = account.address;
@@ -1771,6 +1870,9 @@ function startFreshRun(label, { mode = 'p2p', plan_id = null } = {}) {
 
   const newNum = getNextRunNumber();
   state.activeRunNumber = newNum;
+  // A fresh run is live/writable — clear any read-only marker left by a prior
+  // /api/runs/load so /api/resume works again for this new run.
+  state.loadedReadonly = false;
   state.stopRequested = false;
   state.testedNodes = 0;
   state.failedNodes = 0;
@@ -1902,6 +2004,15 @@ app.post('/api/resume', adminOnly, async (req, res) => {
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const results = getResults();
   if (results.length === 0) return res.json({ error: 'No results to resume from. Use Start to begin a new test.' });
+  // A loaded historical snapshot is read-only — resuming it would append live
+  // results onto a past run and mint a duplicate run number with a stale
+  // db-run-id/mode. Force the operator to start a New Test or Retest Failed.
+  if (state.loadedReadonly) {
+    return res.status(409).json({
+      error: 'LOADED_RUN_READONLY',
+      message: 'This is a loaded past run — start a New Test or Retest Failed instead.',
+    });
+  }
   // Resume only continues an INCOMPLETE run. A completed run has nothing left to
   // test — Retest Failed is the action there. (Defense-in-depth: the UI already
   // hides Resume when complete.)
@@ -2003,6 +2114,10 @@ app.post('/api/stop', adminOnly, (req, res) => {
   // Snap the UI to stopped immediately — the pipeline still has to finish unwinding,
   // but the user gets feedback the moment they click Stop.
   state.status = 'stopped';
+  // Force a non-throttled snapshot NOW so a process exit within the next 5s
+  // can't lose the in-flight activeBatchId / spend / resumeHeadAddr needed for
+  // a later /api/resume.
+  flushStateSnapshot();
   broadcast('log', { msg: '⏹ Stop — force-terminating in-flight test.' });
   broadcast('state', { state });
 
@@ -2355,9 +2470,23 @@ app.post('/api/auto-retest', adminOnly, async (req, res) => {
   state.stopRequested = false;
   res.json({ ok: true, retesting: retestable.length, addresses: retestable.map(r => r.address) });
 
+  // Pin the retest to the active run's snapshot dir so per-node saveResults()
+  // inside the pipeline write into THIS run's dir, and persist the mutated
+  // result set back to disk + SQLite + index on completion — otherwise the
+  // retest updates only in-memory results and the file/index/SQLite snapshot
+  // for state.activeRunNumber diverges from what's on screen.
+  if (state.activeRunNumber != null) {
+    const retestRunDir = path.join(RUNS_DIR, `test-${String(state.activeRunNumber).padStart(3, '0')}`);
+    try { _mkd(retestRunDir, { recursive: true }); } catch (e) { console.error('[auto-retest] mkdir failed:', e.message); }
+    setActiveRunDir(retestRunDir);
+  }
+
   const { runRetestSkips } = await import('./audit/pipeline.js');
   const tracked = withBatchTracking(broadcast, state.runMode || 'p2p');
-  runRetestSkips(retestable.map(r => r.address), state, tracked).catch(err => {
+  runRetestSkips(retestable.map(r => r.address), state, tracked).then(() => {
+    // Persist back to the SAME run number — no new run is created.
+    try { persistActiveRun(); } catch (e) { console.error('[auto-retest] persistActiveRun failed:', e.message); }
+  }).catch(err => {
     state.status = 'error';
     state.errorMessage = err.message;
     tracked('state', { state });
@@ -2420,20 +2549,36 @@ app.post('/api/runs/load/:num', adminOnly, (req, res) => {
   const _runMeta = _idx.runs.find(r => r.number === num);
   let _spent = Number(_runMeta?.spentUdvpn) || 0;
   let _refunded = Number(_runMeta?.refundedUdvpn) || 0;
-  // Runs saved before spend was stored in the snapshot: recover it from the
-  // SQLite runs table (matched by finish time + node count) and backfill the
-  // index so later loads are instant.
-  if (_runMeta && _runMeta.spentUdvpn == null && _runMeta.date) {
-    try {
-      const m = getRunSpendByFinish(Date.parse(_runMeta.date), Number(_runMeta.total) || 0);
-      if (m) {
-        _spent = m.spent_udvpn;
-        _refunded = m.refunded_udvpn;
-        _runMeta.spentUdvpn = _spent;
-        _runMeta.refundedUdvpn = _refunded;
-        saveRunsIndex(_idx);
-      }
-    } catch (e) { console.error('[runs] spend backfill failed:', e.message); }
+  if (_runMeta && _runMeta.spentUdvpn == null) {
+    // Preferred path: a stored dbRunId makes the spend lookup deterministic.
+    // Fall back to the getRunSpendByFinish time+count heuristic only when no
+    // dbRunId was recorded (runs saved before this field existed).
+    let recovered = false;
+    if (_runMeta.dbRunId) {
+      try {
+        const row = getRun(Number(_runMeta.dbRunId));
+        if (row) {
+          _spent = Number(row.spent_udvpn) || 0;
+          _refunded = Number(row.refunded_udvpn) || 0;
+          _runMeta.spentUdvpn = _spent;
+          _runMeta.refundedUdvpn = _refunded;
+          saveRunsIndex(_idx);
+          recovered = true;
+        }
+      } catch (e) { console.error('[runs] spend lookup by dbRunId failed:', e.message); }
+    }
+    if (!recovered && _runMeta.date) {
+      try {
+        const m = getRunSpendByFinish(Date.parse(_runMeta.date), Number(_runMeta.total) || 0);
+        if (m) {
+          _spent = m.spent_udvpn;
+          _refunded = m.refunded_udvpn;
+          _runMeta.spentUdvpn = _spent;
+          _runMeta.refundedUdvpn = _refunded;
+          saveRunsIndex(_idx);
+        }
+      } catch (e) { console.error('[runs] spend backfill failed:', e.message); }
+    }
   }
   state.spentUdvpn = _spent;
   state.refundedUdvpn = _refunded;
@@ -2446,6 +2591,11 @@ app.post('/api/runs/load/:num', adminOnly, (req, res) => {
   if (_ex(_runLogPath)) { try { hydrateLogBufferFromFile(_runLogPath); } catch { } }
   state.activeRunNumber = num;
   state.status = 'idle';
+  // Mark this as a loaded, read-only historical snapshot. /api/resume refuses
+  // while this flag is set so a resume can't append live results onto a past
+  // run and mint a duplicate run number with a stale db-run-id/mode. Cleared
+  // by startFreshRun() (New Test / Retest) and by a genuine in-flight resume.
+  state.loadedReadonly = true;
   broadcastStateFresh();
   broadcast('log', { msg: `📂 Loaded Test #${num} (${data.length} results)` });
   res.json({ ok: true, number: num, total: data.length });
@@ -2454,10 +2604,18 @@ app.post('/api/runs/load/:num', adminOnly, (req, res) => {
 app.delete('/api/runs/:num', adminOnly, (req, res) => {
   const num = parseInt(req.params.num);
   if (!Number.isInteger(num)) return res.status(400).json({ error: 'Invalid run number' });
+  // Refuse to delete the currently-active/loaded run. Deleting it would leave
+  // live results/totalNodes/activeDbRunId pointing at a now-gone run dir, and a
+  // later resume would build a `test-null` dir. Operator must load another run
+  // first.
+  if (state.activeRunNumber === num) {
+    return res.status(409).json({
+      error: 'RUN_ACTIVE',
+      message: "Can't delete the run that's currently loaded/active — load another run first.",
+    });
+  }
   const ok = deleteRun(num);
   if (!ok) return res.status(404).json({ error: `Test #${num} not found` });
-  // If the deleted run was the active selection, clear it.
-  if (state.activeRunNumber === num) state.activeRunNumber = null;
   broadcast('log', { msg: `🗑 Deleted Test #${num}` });
   res.json({ ok: true, number: num });
 });
@@ -2598,6 +2756,27 @@ app.get('/health', (req, res) => {
 // a fresh install never accidentally exposes the admin panel to the LAN/internet.
 // Set LISTEN_HOST=0.0.0.0 explicitly when fronting with a reverse proxy / firewall.
 const LISTEN_HOST = process.env.LISTEN_HOST || '127.0.0.1';
+
+// ─── Open-admin network-exposure guard ──────────────────────────────────────
+// When ADMIN_TOKEN is unset, adminOnly opens EVERY admin route (start/stop,
+// wallet-spending audits, settings). That's fine for a localhost-only single-
+// user setup, but binding to a non-loopback host would silently expose the
+// fully-open admin surface to the LAN/internet. Mirror the PUBLIC_MODE guard
+// above: refuse to bind and exit with a clear fatal message.
+{
+  const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+  if (!ADMIN_TOKEN && !LOOPBACK_HOSTS.has(LISTEN_HOST)) {
+    console.error('');
+    console.error(`ERROR: refusing to bind admin surface to non-loopback host "${LISTEN_HOST}" without ADMIN_TOKEN.`);
+    console.error('  With ADMIN_TOKEN unset, all admin routes (start/stop, wallet-spending audits,');
+    console.error('  settings) are open — binding to the network would expose them to anyone.');
+    console.error('  Fix: either set ADMIN_TOKEN=<value> in your .env, or keep LISTEN_HOST=127.0.0.1.');
+    console.error('  Generate a token:  node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
+    console.error('');
+    process.exit(1);
+  }
+}
+
 app.listen(PORT, LISTEN_HOST, async () => {
   console.log(`\nSentinel Node Audit Dashboard → http://${LISTEN_HOST === '0.0.0.0' ? 'localhost' : LISTEN_HOST}:${PORT}  (bound to ${LISTEN_HOST})\n`);
   // Deferred WG safety sweep — non-blocking, runs after the port is bound so

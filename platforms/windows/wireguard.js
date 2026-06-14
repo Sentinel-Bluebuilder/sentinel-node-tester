@@ -33,7 +33,7 @@ function findWireGuardExe() {
     if (existsSync(p)) return p;
   }
   try {
-    const result = execSync('where wireguard.exe', { encoding: 'utf8', stdio: 'pipe' }).trim();
+    const result = execSync('where wireguard.exe', { encoding: 'utf8', stdio: 'pipe', timeout: 3000 }).trim();
     if (result) return result.split('\n')[0].trim();
   } catch {}
   return null;
@@ -41,7 +41,7 @@ function findWireGuardExe() {
 
 function findWgQuick() {
   try {
-    execSync('wg-quick --version', { encoding: 'utf8', stdio: 'pipe' });
+    execSync('wg-quick --version', { encoding: 'utf8', stdio: 'pipe', timeout: 3000 });
     return 'wg-quick';
   } catch {}
   return null;

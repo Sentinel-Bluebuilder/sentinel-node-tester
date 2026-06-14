@@ -77,7 +77,7 @@ function _openHandle(target, cache) {
       db.close();
       throw new Error(
         `FATAL: runs table at ${target} has ${row.c.toLocaleString()} rows (limit: 100,000). ` +
-        `This indicates a runaway writer. Run: node scripts/cleanup-runaway-runs.mjs --yes`
+        `This indicates a runaway writer. Run: node scripts/cleanup.mjs --fix`
       );
     }
   }
@@ -125,8 +125,12 @@ function runMigrations(db) {
     );
   `);
 
-  const row = db.prepare('SELECT version FROM schema_version LIMIT 1').get();
-  const current = row ? row.version : 0;
+  // Read the highest applied version. The schema_version table has no
+  // uniqueness constraint, so if two rows ever exist a bare `LIMIT 1` (no
+  // ORDER BY) returns an arbitrary row and could re-run migrations. MAX()
+  // always picks the latest applied version.
+  const row = db.prepare('SELECT MAX(version) AS version FROM schema_version').get();
+  const current = row && row.version != null ? row.version : 0;
 
   // Each migration runs inside a transaction so the DDL and the version
   // bump are atomic. If the process dies mid-migration, SQLite rolls back
@@ -388,16 +392,25 @@ export function updateRunOnFinish(runId, { finished_at, node_count, pass_count, 
   const db = getDb(which);
   // Persist accounting only when caller supplied a value — orphan cleanup on
   // boot doesn't know the live spend totals and must not zero them out.
-  const setSpend = spent_udvpn != null
-    ? `, spent_udvpn = ${Number(spent_udvpn) | 0}`
-    : '';
-  const setRefund = refunded_udvpn != null
-    ? `, refunded_udvpn = ${Number(refunded_udvpn) | 0}`
-    : '';
+  // Bind via parameters (NOT string interpolation) and round to a safe JS
+  // integer: better-sqlite3 stores integers up to 2^53 exactly. The old
+  // `| 0` coercion truncated to signed int32 and corrupted any value
+  // ≥ 2,147,483,647 udvpn (~2147 P2P).
+  const params = { id: runId, finished_at, node_count, pass_count };
+  let setSpend = '';
+  if (spent_udvpn != null) {
+    setSpend = ', spent_udvpn = @spent_udvpn';
+    params.spent_udvpn = Math.round(Number(spent_udvpn));
+  }
+  let setRefund = '';
+  if (refunded_udvpn != null) {
+    setRefund = ', refunded_udvpn = @refunded_udvpn';
+    params.refunded_udvpn = Math.round(Number(refunded_udvpn));
+  }
   db.prepare(`
     UPDATE runs SET finished_at = @finished_at, node_count = @node_count, pass_count = @pass_count${setSpend}${setRefund}
     WHERE id = @id
-  `).run({ id: runId, finished_at, node_count, pass_count });
+  `).run(params);
 }
 
 /**

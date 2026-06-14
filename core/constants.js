@@ -51,7 +51,7 @@ export const V3_SUB_SESSION_TYPE = MSG_TYPES.SUB_START_SESSION;
 
 // ─── RPC Endpoints (verified 2026-05-02, sorted by latency) ─────────────────
 // Audited end-to-end: connect + /status + ABCI bank balance against a known
-// funded address (see audit/audit-rpc-endpoints.mjs). rpc.sentinel.co is kept
+// funded address (see scripts/audit-rpc-endpoints.mjs). rpc.sentinel.co is kept
 // last as a stale-fallback only — it reports catching_up=false while serving
 // state ~22k blocks behind tip.
 export const RPC_ENDPOINTS = [

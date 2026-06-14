@@ -1248,7 +1248,7 @@
 
     // ─── HTML Escape ───
     function escHtml(s) {
-      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
     }
 
     // ─── Copy to Clipboard ───
@@ -1990,9 +1990,9 @@
             if (data.passed) {
               const opacity = stale ? '0.5' : '1';
               const warn = stale ? ' (stale: ' + ageLabel + ' ago)' : '';
-              parts.push(`<span title="${col.label}: ${data.speed} Mbps | Run ${runLabel} ${ageLabel} ago${warn}" style="color:var(--text);cursor:help;opacity:${opacity}">${col.label}&#10003;</span>`);
+              parts.push(`<span title="${escHtml(col.label)}: ${escHtml(data.speed)} Mbps | Run ${escHtml(runLabel)} ${escHtml(ageLabel)} ago${escHtml(warn)}" style="color:var(--text);cursor:help;opacity:${opacity}">${col.label}&#10003;</span>`);
             } else {
-              parts.push(`<span title="${col.label}: ${(data.error||'fail').slice(0,40)} | Run ${runLabel} ${ageLabel} ago" style="color:var(--text-dim);cursor:help">${col.label}&#10007;</span>`);
+              parts.push(`<span title="${escHtml(col.label)}: ${escHtml((data.error||'fail').slice(0,40))} | Run ${escHtml(runLabel)} ${escHtml(ageLabel)} ago" style="color:var(--text-dim);cursor:help">${col.label}&#10007;</span>`);
             }
           }
           if (parts.length > 0) otherSdkHtml = parts.join(' ');
@@ -2004,8 +2004,8 @@
 
       const isFail = r.actualMbps == null && !r.skipped;
       const copyCell = isFail && addrFull
-        ? `<button class="row-copy-btn" title="Copy failure log" data-addr="${addrFull}" data-moniker="${(r.moniker || '').replace(/"/g,'&quot;')}" onclick="copyRowFailure(event)">⎘</button>
-           <button class="row-copy-btn" title="View error details" data-addr="${addrFull}" data-moniker="${(r.moniker || '').replace(/"/g,'&quot;')}" onclick="showRowFailurePopup(event)" style="margin-left:4px">👁</button>`
+        ? `<button class="row-copy-btn" title="Copy failure log" data-addr="${escHtml(addrFull)}" data-moniker="${escHtml(r.moniker || '')}" onclick="copyRowFailure(event)">⎘</button>
+           <button class="row-copy-btn" title="View error details" data-addr="${escHtml(addrFull)}" data-moniker="${escHtml(r.moniker || '')}" onclick="showRowFailurePopup(event)" style="margin-left:4px">👁</button>`
         : '<span style="color:var(--text-muted)">—</span>';
 
       tr.innerHTML = `

@@ -173,10 +173,13 @@ Contact the plan operator to issue or renew the `MsgGrantAllowance` on-chain.
 ### audit.db growing very large
 
 The database accumulates result rows, error logs, and run metadata over time.
-To remove orphaned or runaway rows from incomplete runs:
+`scripts/cleanup.mjs` is a consolidated verify/fix tool. By default it runs
+read-only and prints a report of orphaned or runaway rows from incomplete runs;
+pass `--fix` to repair them:
 
 ```bash
-node scripts/cleanup-runaway-runs.mjs
+npm run cleanup              # read-only report (no changes)
+node scripts/cleanup.mjs --fix   # repair dangling/partial records
 ```
 
 For a full database analysis (tables, row counts, size breakdown):
