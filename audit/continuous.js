@@ -23,7 +23,7 @@ import { EventEmitter } from 'events';
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createState, setActiveDbRunId, getActiveDbRunId } from './pipeline.js';
+import { createState, setActiveDbRunId, getActiveDbRunId, triggerPipelineStop } from './pipeline.js';
 import { sleep } from '../protocol/speedtest.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -144,6 +144,10 @@ const _ctrl = {
   paused: false,
   pausedBatch: null, // { batchId, mode, planId, subscriptionId, subscriptionGranter, frozenNodes, testedAddrs }
   resumeIntent: null, // { batchId, frozenNodes, testedAddrs } — set by resume(), consumed by _runLoop
+  // The pipeline state object for the currently in-flight pass. Held so pause()/stop()
+  // can raise its stopRequested flag and abort the running runAudit/runSubPlanTest sweep
+  // promptly, instead of letting the whole pass (and its payments) finish first.
+  loopState: null,
 };
 
 // Injected pipeline runner (overridable in tests)
@@ -371,6 +375,8 @@ async function _runLoop() {
       // without this, every continuous-loop result fell back to sdk:'js'.
       const loopState = createState();
       loopState.stopRequested = false;
+      // Expose the in-flight state so pause()/stop() can abort the running pipeline.
+      _ctrl.loopState = loopState;
       if (_ctrl.activeSDK)   loopState.activeSDK   = _ctrl.activeSDK;
       if (_ctrl.pricingMode) loopState.pricingMode = _ctrl.pricingMode;
       loopState.runMode             = _ctrl.mode || 'p2p';
@@ -613,6 +619,7 @@ async function _runLoop() {
   } finally {
     _ctrl.running = false;
     _ctrl.stopRequested = false;
+    _ctrl.loopState = null; // no in-flight pass anymore
     _persistLoopConfig();
     _emitScoped('loop:stopped', {
       iterations: _ctrl.iteration,
@@ -728,6 +735,10 @@ export async function start(opts = {}) {
 export function stop() {
   if (!_ctrl.running) return { ok: true, alreadyStopped: true };
   _ctrl.stopRequested = true;
+  // Propagate to the in-flight pipeline so the running runAudit/runSubPlanTest sweep
+  // (and its payments) returns promptly instead of completing the whole pass first.
+  if (_ctrl.loopState) _ctrl.loopState.stopRequested = true;
+  triggerPipelineStop();
   _emitScoped('loop:stopping', {});
   return { ok: true };
 }
@@ -744,6 +755,11 @@ export function pause() {
   if (_ctrl.paused) return { ok: false, error: 'already paused' };
   // Raise stopRequested so the in-flight pipeline returns.
   _ctrl.stopRequested = true;
+  // Propagate to the in-flight pipeline state + wake its stop-aware sleeps so the
+  // running sweep aborts promptly, rather than finishing the full pass (and its
+  // payments) before the pause takes effect — matching this function's docstring.
+  if (_ctrl.loopState) _ctrl.loopState.stopRequested = true;
+  triggerPipelineStop();
   // Sentinel for _runLoop: break out without clearing state.
   _ctrl.paused = true;
   _emitScoped('loop:stopping', {});

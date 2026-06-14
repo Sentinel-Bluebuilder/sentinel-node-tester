@@ -617,6 +617,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
     results.length = 0;
     state.testedNodes = 0;
     state.failedNodes = 0;
+    state.skippedNodes = 0;
     state.passed15 = 0;
     state.passed10 = 0;
     state.passedBaseline = 0;
@@ -666,14 +667,31 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   // ── On-chain reporter (opt-in) ─────────────────────────────────────────
   _initOnchainReporter(account, client, state, broadcast);
 
+  // Latest baseline sample measured for the node currently in-flight. refreshBaseline()
+  // (called once per ATTEMPT) only refreshes the live state.baselineMbps and stashes the
+  // sample here; commitBaselineSample() pushes it into baselineHistory at most once per
+  // node that actually records a result. This keeps the HISTORY append aligned with
+  // processed nodes (1 per result) instead of per attempt — an interrupted/pause-retried
+  // node no longer double-appends and drifts baselineHistory above nodeSpeedHistory.
+  let _pendingBaselineSample = null;
+  let _lastBaselineHistoryAddr = null;
   async function refreshBaseline() {
     try {
       const bl = await speedtestDirect();
       state.baselineMbps = bl.mbps;
       const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-      state.baselineHistory = [...state.baselineHistory, { mbps: bl.mbps, ts }].slice(-10);
+      _pendingBaselineSample = { mbps: bl.mbps, ts };
       broadcast('state', { state });
     } catch { }
+  }
+  // Append the pending baseline sample for `addr` at most once. Deduping by address means
+  // a node re-tested after Stop/Resume or a pause-retry (j--) appends exactly one sample.
+  function commitBaselineSample(addr) {
+    if (!_pendingBaselineSample) return;
+    if (addr && addr === _lastBaselineHistoryAddr) return;
+    state.baselineHistory = [...state.baselineHistory, _pendingBaselineSample].slice(-10);
+    _lastBaselineHistoryAddr = addr || null;
+    _pendingBaselineSample = null;
   }
 
   // ── Phase 1: Fetch node list ───────────────────────────────────────────
@@ -909,6 +927,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
         } else {
           state.failedNodes++;
         }
+        commitBaselineSample(node.address); // 1 baseline sample per recorded node
         upsertResult(result); // success — no snippet needed
         state.resumeHeadAddr = null;
         saveResults();
@@ -977,6 +996,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
         // FAIL result — zero-skip: explicit failure
         const failResult = buildFailResult(node, status, state, errMsg, error?.diag || {});
         state.failedNodes++;
+        commitBaselineSample(node.address); // 1 baseline sample per recorded node
         upsertResult(failResult, _logSnippet);
         state.resumeHeadAddr = null;
         saveResults();
@@ -1169,7 +1189,8 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
         break;
       }
 
-      if (result) {
+      if (result && result.actualMbps != null) {
+        // Only a real-speed result flips this node from failed → tested.
         state.failedNodes = Math.max(0, state.failedNodes - 1);
         state.testedNodes++;
         if (result.pass10mbps) state.passed10++;
@@ -1177,6 +1198,14 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
         saveResults();
         broadcast('result', { result, state });
         broadcast('log', { msg: `  ✓ Retest PASS: ${result.actualMbps} Mbps` });
+      } else if (result) {
+        // Truthy result but null mbps (e.g. SESSION_UNMAPPED) — still a failure (it
+        // was already counted as failed before this retest). Persist without touching
+        // counters; flipping to "tested" here would wrongly clear a still-failed node.
+        upsertResult(result, _sanitizeSnippet(_ironSnippet));
+        saveResults();
+        broadcast('result', { result, state });
+        broadcast('log', { msg: `  ✗ Retest FAIL: ${result.errorCode || 'no speed'}` });
       } else {
         const errMsg = error?.message || 'Unknown';
         const failResult = buildFailResult(node, status, state, errMsg, error?.diag || {});
@@ -1195,6 +1224,10 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
 
   const finalCache = getCacheStats();
   await _finalizeOnchainReporter();
+  // Reconcile the live-incremented counters against results[] so the final
+  // persisted summary matches the authoritative classifier (the per-node
+  // increments above can drift across Stop/Resume, pause-retries and retests).
+  recomputeCounters(state);
   state.status = 'done';
   state.completedAt = new Date().toISOString();
   state.currentNode = null;
@@ -1218,7 +1251,12 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
   state.retestPassed = 0;
   state.retestFailed = 0;
   recomputeCounters(state);
-  state.totalNodes = state.testedNodes + state.failedNodes; // show grand total
+  // Preserve the run's true node count. Deriving totalNodes from tested+failed
+  // collapses the grand total for a run that was Stopped partway (skipped /
+  // TEST_RUN_SKIP rows are classified as skippedNodes, not failed, so they'd
+  // vanish from the total and break "remaining"). results.length is the real
+  // count of rows; keep whichever is larger so an already-correct chain total wins.
+  state.totalNodes = Math.max(results.length, state.totalNodes || 0); // show grand total
   clearPoisonedSessions();
   clearPaidNodes();
   invalidateSessionCache(); // Force fresh session lookups — prevents stale mappings
