@@ -305,6 +305,13 @@ function classifyLogCategory(msg) {
   return 'node';
 }
 
+// Public /live shows per-NODE activity only — operator EVENTS and in-run SYS
+// diagnostics are hidden from spectators (the admin dashboard still shows all).
+// Filters the rolling string buffer for the public log endpoints.
+function publicLogBuffer() {
+  return logBuffer.filter(m => classifyLogCategory(m) === 'node');
+}
+
 // EVENTS persist to a file (separate from per-run runs/test-NNN/audit.log), with
 // a simple 1-file rotation at ~2MB so it can't grow unbounded.
 const EVENTS_LOG_FILE = path.join(__dirname, 'results', 'events.log');
@@ -1904,7 +1911,7 @@ app.get('/api/public/events', attachAdminFlag, rlPublicSse, (req, res) => {
     batchMode: activeBatchMode,
     // Persisted log backlog so /live shows full history on refresh, not a blank panel.
     // logBuffer is populated from results/audit-*.log on server boot and updated live.
-    logs: liveOn ? logBuffer.slice() : [],
+    logs: liveOn ? publicLogBuffer() : [],
     state: initState,
     results: initResults,
     // Report effective-live so the admin's own /live page flips into live mode
@@ -1918,6 +1925,8 @@ app.get('/api/public/events', attachAdminFlag, rlPublicSse, (req, res) => {
     // visitors only get events when broadcastLive is on.
     if (!state.broadcastLive && !isAdminViewer) return;
     if (!PUBLIC_EVENT_WHITELIST.has(data.type)) return;
+    // /live is per-node activity only — drop operator EVENTS + in-run SYS lines.
+    if (data.type === 'log' && (data.cat === 'events' || data.cat === 'sys')) return;
     send(sanitizeForPublic(data));
   };
   emitter.on('update', handler);
@@ -1941,7 +1950,7 @@ app.get('/api/public/logs', attachAdminFlag, rlPublicRead, (req, res) => {
   const showLive = state.broadcastLive || req.admin === true;
   if (!showLive) return res.json({ logs: [], broadcastLive: false });
   // Report effective-live so admin viewers get the live-mode UI on /live.
-  res.json({ logs: logBuffer.slice(), broadcastLive: true });
+  res.json({ logs: publicLogBuffer(), broadcastLive: true });
 });
 
 /**
