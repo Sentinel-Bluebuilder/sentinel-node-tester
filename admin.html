@@ -572,6 +572,20 @@
       text-transform: uppercase;
     }
 
+    /* Live Log category filters — mirrors public /live's .log-filters mechanism */
+    .log-filters {
+      display: inline-flex; gap: 2px;
+      border: 1px solid var(--border); border-radius: 5px;
+      overflow: hidden; font-size: 10px; letter-spacing: 0.5px;
+      font-family: var(--font-display);
+    }
+    .log-filter-btn {
+      padding: 3px 8px; color: var(--text-muted); font-weight: 600;
+      cursor: pointer; user-select: none;
+    }
+    .log-filter-btn:hover { color: var(--text); }
+    .log-filter-btn.active { background: var(--bg-input); color: var(--text); }
+
     .table-wrap { overflow-y: auto; scrollbar-gutter: stable; flex: 1; min-height: 0; padding: 0 8px 8px 8px; }
     /* Fixed header table (outside the scroll area). scrollbar-gutter:stable on
        both wraps reserves an equal right-side gutter so the header columns line
@@ -1073,6 +1087,12 @@
       <div class="glass-panel log-container">
         <div class="panel-header">
           <div class="panel-title">Live Log</div>
+          <span class="log-filters" id="logFilters">
+            <span class="log-filter-btn active" data-lf="all"    onclick="setLogFilter('all')">ALL</span>
+            <span class="log-filter-btn"        data-lf="events" onclick="setLogFilter('events')">EVENTS</span>
+            <span class="log-filter-btn"        data-lf="sys"    onclick="setLogFilter('sys')">SYS</span>
+            <span class="log-filter-btn"        data-lf="node"   onclick="setLogFilter('node')">NODE</span>
+          </span>
         </div>
         <div class="logs" id="logBody"></div>
       </div>
@@ -1440,7 +1460,8 @@
           if (msg.result) { upsertLocal(msg.result); addSingleRow(msg.result); }
           applyState();
         } else if (msg.type === 'log') {
-          appendLog(msg.msg);
+          // Live lines carry a server-sent category; prefer it over re-deriving.
+          appendLog(msg.msg, msg.cat);
         }
       };
       eventSource.onerror = () => {
@@ -2036,7 +2057,43 @@
       prepend ? tbody.insertBefore(tr, tbody.firstChild) : tbody.appendChild(tr);
     }
 
-    function appendLog(msg) {
+    // ─── Live Log category filter ────────────────────────────────────────────
+    // Every log line gets exactly ONE category: 'events' | 'sys' | 'node'.
+    // First match wins, EVENTS → SYS → NODE. These keyword lists MUST stay
+    // byte-identical to server.js's classifyLogCategory() so categorization is
+    // consistent between live SSE lines and replayed init buffer lines.
+    function logCategory(msg) {
+      const s = String(msg == null ? '' : msg);
+      const EVENTS = ['Starting Test', 'Resuming Test', 'Stop requested', '⏹', 'Loop continues', '♾', 'Deleted Test', '🗑', 'Saved', 'Loaded Test', '📂', 'DNS', '🔧', 'On-chain reporting', 'On-chain report posted', 'Setting up wallet', '🔑', 'Log file', '📝', 'subscribing', '📋', 'SDK switched', 'Broadcast'];
+      const SYS = ['baseline', 'Baseline', 'Balance', '💰', 'internet', 'Internet', 'connectivity', '🌐', 'Transport cache', '🧠', 'Fetching node list', '🔍', 'V2Ray:', 'WireGuard:', 'Admin:', 'Cloudflare', 'Discovered', 'active plans', 'online scan', 'Scanning'];
+      for (const k of EVENTS) if (s.includes(k)) return 'events';
+      for (const k of SYS) if (s.includes(k)) return 'sys';
+      return 'node';
+    }
+
+    let _logFilter = 'all'; // 'all' | 'events' | 'sys' | 'node'
+
+    function setLogFilter(f) {
+      _logFilter = f;
+      document.querySelectorAll('#logFilters .log-filter-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.lf === f);
+      });
+      const body = document.getElementById('logBody');
+      if (!body) return;
+      for (const row of body.children) {
+        row.style.display = _logEntryMatches(row, f) ? '' : 'none';
+      }
+      body.scrollTop = body.scrollHeight;
+    }
+
+    function _logEntryMatches(row, f) {
+      if (f === 'all') return true;
+      return (row.dataset.cat || 'node') === f;
+    }
+
+    // `cat` is the server-sent category for live SSE lines; replayed init buffer
+    // lines arrive as plain strings (no cat), so re-derive via logCategory().
+    function appendLog(msg, cat) {
       const body = document.getElementById('logBody');
       const div = document.createElement('div');
       let cls = '';
@@ -2044,10 +2101,12 @@
       else if (/✅|complete|✓|success/i.test(msg)) cls = 'log-ok';
       else if (/error|fail|ERR/i.test(msg)) cls = 'log-err';
       div.className = 'log-entry ' + cls;
+      div.dataset.cat = cat || logCategory(msg);
       const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
       const escaped = String(msg).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
       const linkified = escaped.replace(/(https?:\/\/[^\s<]+)/g, (u) => `<a href="${u}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">${u}</a>`);
       div.innerHTML = `<span class="log-time">${ts}</span>` + linkified;
+      if (!_logEntryMatches(div, _logFilter)) div.style.display = 'none';
       body.appendChild(div);
       body.scrollTop = body.scrollHeight;
       if (body.children.length > 500) body.removeChild(body.firstChild);

@@ -592,7 +592,10 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   const origBroadcast = broadcast;
   broadcast = (type, data) => {
     origBroadcast(type, data);
-    if (type === 'log' && data?.msg) logLine(data.msg);
+    // The per-run audit log is the TEST log (SYS + NODE). Lifecycle EVENTS live
+    // in results/events.log instead. origBroadcast runs first and sets data.cat,
+    // so this tee only writes non-events lines into runs/test-NNN/audit.log.
+    if (type === 'log' && data?.msg && data.cat !== 'events') logLine(data.msg);
   };
 
   broadcast('log', { msg: `📝 Log file: results/${path.basename(auditLogPath)}${resume ? ' (resumed — appending)' : ''}` });

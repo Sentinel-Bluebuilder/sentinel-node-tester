@@ -285,10 +285,56 @@ function saveStateSnapshot(force = false) {
 // lands inside the 5s throttle window.
 function flushStateSnapshot() { saveStateSnapshot(true); }
 
+// ─── Log categorization ──────────────────────────────────────────────────────
+// Every log line gets exactly ONE category: 'events' | 'sys' | 'node'.
+//   EVENTS — operator/lifecycle (start/stop/save/load, on-chain, wallet, DNS…)
+//   SYS    — in-run diagnostics (baseline, balance, connectivity, scan…)
+//   NODE   — per-node results incl. failures (default).
+// First match wins, checked in EVENTS → SYS → NODE order. The 📡 emoji is shared
+// by on-chain (events) and baseline (sys), so classify by the WORDS, not emoji.
+// IMPORTANT: keep these keyword lists byte-identical to admin.html's logCategory().
+function classifyLogCategory(msg) {
+  const s = String(msg == null ? '' : msg);
+  // NOTE: no bare '💾' — it also prefixes the per-node "💾 Cached:" transport
+  // line; 'Saved' already covers the lifecycle save lines. 'Resuming Test' is a
+  // lifecycle sibling of 'Starting Test'.
+  const EVENTS = ['Starting Test', 'Resuming Test', 'Stop requested', '⏹', 'Loop continues', '♾', 'Deleted Test', '🗑', 'Saved', 'Loaded Test', '📂', 'DNS', '🔧', 'On-chain reporting', 'On-chain report posted', 'Setting up wallet', '🔑', 'Log file', '📝', 'subscribing', '📋', 'SDK switched', 'Broadcast'];
+  const SYS = ['baseline', 'Baseline', 'Balance', '💰', 'internet', 'Internet', 'connectivity', '🌐', 'Transport cache', '🧠', 'Fetching node list', '🔍', 'V2Ray:', 'WireGuard:', 'Admin:', 'Cloudflare', 'Discovered', 'active plans', 'online scan', 'Scanning'];
+  for (const k of EVENTS) if (s.includes(k)) return 'events';
+  for (const k of SYS) if (s.includes(k)) return 'sys';
+  return 'node';
+}
+
+// EVENTS persist to a file (separate from per-run runs/test-NNN/audit.log), with
+// a simple 1-file rotation at ~2MB so it can't grow unbounded.
+const EVENTS_LOG_FILE = path.join(__dirname, 'results', 'events.log');
+const EVENTS_LOG_MAX_BYTES = 2 * 1024 * 1024;
+function appendEventLog(msg) {
+  try {
+    try {
+      const st = _statSync(EVENTS_LOG_FILE);
+      if (st && st.size > EVENTS_LOG_MAX_BYTES) {
+        _rfs2(EVENTS_LOG_FILE, EVENTS_LOG_FILE + '.1');
+      }
+    } catch (e) {
+      // ENOENT (no file yet) is expected — only log genuine stat/rotate errors.
+      if (e && e.code !== 'ENOENT') console.error('[events.log] rotate failed:', e.message);
+    }
+    _afs(EVENTS_LOG_FILE, `[${new Date().toISOString()}] ${msg}\n`, 'utf8');
+  } catch (e) {
+    console.error('[events.log] append failed:', e.message);
+  }
+}
+
 function broadcast(type, data = {}) {
   if (type === 'log' && data.msg) {
+    // Tag the live SSE 'log' event with a category so admin/live can filter
+    // without re-deriving it. logBuffer stays an array of strings (the client
+    // re-classifies replayed init lines). Set BEFORE emitter.emit below.
+    data.cat = data.cat || classifyLogCategory(data.msg);
     logBuffer.push(data.msg);
     if (logBuffer.length > LOG_BUFFER_MAX) logBuffer.shift();
+    if (data.cat === 'events') appendEventLog(data.msg);
   }
   if (type === 'state' || type === 'result') saveStateSnapshot();
   // NOTE: spread `data` FIRST so a payload field named `type` (e.g. the node's
@@ -509,7 +555,7 @@ function hydrateLogBufferFromFile(filePath) {
 }
 
 // ─── Test Run Management ─────────────────────────────────────────────────────
-import { readFileSync as _rfs, writeFileSync as _wfs, mkdirSync as _mkd, existsSync as _ex, readdirSync as _rd, copyFileSync as _cp, rmSync as _rm } from 'fs';
+import { readFileSync as _rfs, writeFileSync as _wfs, mkdirSync as _mkd, existsSync as _ex, readdirSync as _rd, copyFileSync as _cp, rmSync as _rm, statSync as _statSync, renameSync as _rfs2, appendFileSync as _afs } from 'fs';
 
 const RUNS_DIR = path.join(__dirname, 'results', 'runs');
 const RUNS_INDEX = path.join(RUNS_DIR, 'index.json');
@@ -1812,6 +1858,7 @@ function sanitizeForPublic(evt) {
   if (evt.errorCode != null)  safe.errorCode  = evt.errorCode;
   if (evt.testedAt != null)   safe.testedAt   = evt.testedAt;
   if (evt.msg != null)        safe.msg        = String(evt.msg).slice(0, 400);
+  if (evt.cat != null)        safe.cat        = evt.cat;
   if (evt.baselineMbps != null) safe.baselineMbps = evt.baselineMbps;
   if (evt.skipped === true)   safe.skipped    = true;
   if (evt.inPlan === true)    safe.inPlan     = true;
