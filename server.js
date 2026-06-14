@@ -621,7 +621,14 @@ function saveCurrentRun(label) {
     }
   }
 
-  const num = getNextRunNumber();
+  // Persist into the run's RESERVED number (startFreshRun pinned it as
+  // state.activeRunNumber) — NOT a freshly re-derived getNextRunNumber(). One run
+  // = one number = one dir = one index entry. Re-deriving here let a concurrent
+  // delete/save shift max(index.runs) so the snapshot dir, index entry, SQLite
+  // row, and state.activeRunNumber ended up split across two numbers. Fall back
+  // to getNextRunNumber only when no run is reserved (e.g. the first-boot
+  // "Initial Audit" save before activeRunNumber is resolved).
+  const num = state.activeRunNumber != null ? state.activeRunNumber : getNextRunNumber();
   const runDir = path.join(RUNS_DIR, `test-${String(num).padStart(3, '0')}`);
   _mkd(runDir, { recursive: true });
 
@@ -658,9 +665,13 @@ function saveCurrentRun(label) {
     try { _cp(state.auditLogPath, path.join(runDir, 'audit.log')); } catch { }
   }
 
-  // Update index
+  // Update index — find-or-update on the reserved number so re-saving the SAME
+  // run updates its entry in place instead of pushing a duplicate (one run = one
+  // entry). spentUdvpn/dbRunId persist the run's net spend + SQLite id so loading
+  // it later restores Net Spend deterministically; auditLog lets delete purge the
+  // raw log.
   const index = loadRunsIndex();
-  index.runs.push({
+  const entryData = {
     number: num,
     label: label || 'Full Audit',
     date: new Date().toISOString(),
@@ -669,17 +680,13 @@ function saveCurrentRun(label) {
     failed: failed.length,
     pass10: pass10.length,
     sdk: state.activeSDK,
-    // Persist this run's net spend (raw udvpn) so loading it later can
-    // restore the header's Net Spend. rehydrateState only recomputes
-    // per-node counts, so without this it resets to 0 / -- on load.
     spentUdvpn: Number(state.spentUdvpn) || 0,
-    // SQLite runs.id for this run, so loading it later can look up spend
-    // deterministically via getRun(dbRunId) instead of the getRunSpendByFinish
-    // time+count heuristic.
     dbRunId: state.activeDbRunId || null,
-    // Raw execution-log filename, so deleting this run also purges its log.
     auditLog: state.auditLogPath ? path.basename(state.auditLogPath) : null,
-  });
+  };
+  const _existingIdx = index.runs.findIndex(r => r.number === num);
+  if (_existingIdx !== -1) index.runs[_existingIdx] = entryData;
+  else index.runs.push(entryData);
   index.activeRun = num;
   saveRunsIndex(index);
 
@@ -2894,6 +2901,12 @@ app.get('/api/runs', adminOnly, (req, res) => {
 });
 
 app.post('/api/runs/save', adminOnly, (req, res) => {
+  // Don't snapshot while the pipeline is actively writing rows — that races the
+  // live results array and can persist a half-written run. (A paused run is fine
+  // to save; the SAVE button is shown during pause but hidden while running.)
+  if (state.status === 'running') {
+    return res.status(409).json({ error: 'RUN_ACTIVE', message: 'Stop or wait for the run before saving.' });
+  }
   const label = req.body?.label || '';
   const num = saveCurrentRun(label);
   if (num) {
