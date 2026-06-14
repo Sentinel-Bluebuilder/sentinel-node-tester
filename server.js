@@ -263,6 +263,9 @@ function saveStateSnapshot() {
       // a process bounce leaves _activeDbRunId=null and post-resume failures
       // skip insertErrorLog — the node-detail popup then has nothing to show.
       activeDbRunId: state.activeDbRunId || null,
+      // The run currently displayed (dropdown selection + save/resume dir). Must
+      // survive a bounce so boot doesn't re-alias an unsaved run onto a saved one.
+      activeRunNumber: state.activeRunNumber ?? null,
     }), 'utf8');
   } catch { }
 }
@@ -577,6 +580,32 @@ function deleteRun(num) {
   return true;
 }
 
+/**
+ * Repair stale run-index labels: recompute each run's total/passed/failed/pass10
+ * from its actual saved results.json. A snapshot dir can be overwritten (e.g. an
+ * interrupted run auto-saved into an existing run's dir when the run pointer was
+ * stale) while the index label keeps the old counts — that drift is what made
+ * "Test #11 — 19/19" actually hold a 1052-node run. Returns true if anything
+ * changed.
+ */
+function resyncRunsIndex() {
+  const index = loadRunsIndex();
+  let changed = false;
+  for (const entry of index.runs) {
+    const data = loadRun(entry.number);
+    if (!data) continue;
+    const passed = data.filter(r => r.actualMbps != null).length;
+    const failed = data.filter(r => r.actualMbps == null).length;
+    const pass10 = data.filter(r => r.actualMbps != null && r.actualMbps >= 10).length;
+    if (entry.total !== data.length || entry.passed !== passed || entry.failed !== failed || entry.pass10 !== pass10) {
+      entry.total = data.length; entry.passed = passed; entry.failed = failed; entry.pass10 = pass10;
+      changed = true;
+    }
+  }
+  if (changed) saveRunsIndex(index);
+  return changed;
+}
+
 // ─── Rehydrate state from results.json on startup ───────────────────────────
 function rehydrateState(results) {
   state.testedNodes = results.filter(r => r.actualMbps != null).length;
@@ -632,6 +661,7 @@ function rehydrateState(results) {
         try { setActiveDbRunId(state.activeDbRunId); }
         catch (e) { console.error('[boot] setActiveDbRunId failed:', e.message); }
       }
+      if (snap.activeRunNumber != null) state.activeRunNumber = snap.activeRunNumber;
       console.log(`State snapshot restored: baseline=${snap.baselineHistory?.length || 0} readings, speeds=${snap.nodeSpeedHistory?.length || 0} nodes, total=${state.totalNodes}, runMode=${state.runMode || 'none'}`);
     } catch (e) { console.error('[boot] state snapshot restore failed:', e.message); }
 
@@ -662,8 +692,21 @@ function rehydrateState(results) {
       const num = saveCurrentRun('Initial Audit');
       console.log(`Saved existing data as Test #${num}`);
     }
-    // Always resume the last active test number
-    state.activeRunNumber = index.activeRun || (index.runs.length > 0 ? index.runs[index.runs.length - 1].number : 1);
+    // Repair any stale index labels against the real snapshot contents.
+    try { if (resyncRunsIndex()) console.log('[boot] runs index labels re-synced from snapshots'); }
+    catch (e) { console.error('[boot] resyncRunsIndex failed:', e.message); }
+
+    // activeRunNumber = the run currently displayed (dropdown selection + the
+    // save/resume dir). If the snapshot restored it, keep it. Otherwise only
+    // adopt the last saved run when the restored results actually match it; an
+    // unsaved/interrupted run gets a fresh number so it can't alias — and later
+    // overwrite — a real saved run (the bug that corrupted Test #11).
+    if (state.activeRunNumber == null) {
+      const cand = index.activeRun != null ? index.activeRun
+                 : (index.runs.length > 0 ? index.runs[index.runs.length - 1].number : null);
+      const candData = cand != null ? loadRun(cand) : null;
+      state.activeRunNumber = (candData && candData.length === results.length) ? cand : getNextRunNumber();
+    }
 
     console.log(`Resuming Test #${state.activeRunNumber} | ${results.length} results: ${state.testedNodes} passed, ${state.failedNodes} failed | SDK: ${state.activeSDK}`);
   }
@@ -1679,20 +1722,28 @@ function startFreshRun(label, { mode = 'p2p', plan_id = null } = {}) {
     _wfs(path.join(runDir, 'results.json'), JSON.stringify(prevResults, null, 2), 'utf8');
     try { _cp(path.join(__dirname, 'results', 'failures.jsonl'), path.join(runDir, 'failures.jsonl')); } catch { }
     const idx = loadRunsIndex();
+    const passed = prevResults.filter(r => r.actualMbps != null).length;
+    const failed = prevResults.filter(r => r.actualMbps == null).length;
+    const pass10 = prevResults.filter(r => r.actualMbps != null && r.actualMbps >= 10).length;
     const existingRun = idx.runs.find(r => r.number === state.activeRunNumber);
-    if (!existingRun) {
+    if (existingRun) {
+      // Keep the index label in sync with the results we just wrote — otherwise
+      // the label drifts from the snapshot (what corrupted Test #11's label).
+      existingRun.total = prevResults.length;
+      existingRun.passed = passed;
+      existingRun.failed = failed;
+      existingRun.pass10 = pass10;
+    } else {
       idx.runs.push({
         number: state.activeRunNumber,
         label: `Auto-save before ${label}`,
         date: new Date().toISOString(),
         total: prevResults.length,
-        passed: prevResults.filter(r => r.actualMbps != null).length,
-        failed: prevResults.filter(r => r.actualMbps == null).length,
-        pass10: prevResults.filter(r => r.pass10mbps).length,
+        passed, failed, pass10,
         sdk: state.activeSDK || 'js',
       });
-      saveRunsIndex(idx);
     }
+    saveRunsIndex(idx);
     broadcast('log', { msg: `💾 Saved Test #${state.activeRunNumber} (${prevResults.length} results) before starting ${label}` });
   }
 

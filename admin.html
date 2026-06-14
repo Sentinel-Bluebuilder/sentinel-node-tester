@@ -2038,6 +2038,17 @@
           sel.innerHTML = '<option value="">No saved tests</option>';
           return;
         }
+        // When the displayed data isn't a saved run (an interrupted/live run),
+        // show an explicit placeholder so the dropdown can't mislabel it as a
+        // saved run number.
+        const activeIsSaved = data.runs.some(r => r.number === data.activeRun);
+        if (!activeIsSaved) {
+          const ph = document.createElement('option');
+          ph.value = '';
+          ph.textContent = '— Current run (unsaved) —';
+          ph.selected = true;
+          sel.appendChild(ph);
+        }
         for (const run of data.runs.sort((a, b) => b.number - a.number)) {
           const opt = document.createElement('option');
           opt.value = run.number;
