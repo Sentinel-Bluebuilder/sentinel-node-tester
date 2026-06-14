@@ -15,7 +15,7 @@ import { TKD_AVAILABLE, tkdNodeStatus, tkdHandshakeWG, tkdHandshakeV2Ray } from 
 import {
   getCredential, saveCredential, clearCredential,
   markSessionPoisoned, isPaid, markPaid, clearPaidNodes,
-  addToSessionMap, findExistingSession,
+  addToSessionMap, findExistingSession, invalidateSessionCache,
   waitForSessionActive, parseNodePriceUdvpn,
 } from '../core/session.js';
 import {
@@ -225,9 +225,73 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
     useCached = true;
   }
 
-  // Duplicate payment guard — skip in retest mode (nodes are known-failed, fresh payment expected)
+  // Charged-yet-untested recovery — node was paid in the batch but the post-pay
+  // chain query missed its session→node mapping (timing/pagination; the session
+  // DID get created on-chain). Instead of throwing the duplicate-payment guard
+  // (which charges the node but never tests it), re-query the chain for this
+  // node's existing session. A brief delay lets the batch query catch up to tip.
+  // CRITICAL: never make a new payment here — the node is already paid.
   if (!sessionId && isPaid(node.address) && !state.retestMode) {
-    throw new Error('Already paid this run but no session ID — duplicate payment guard');
+    if (broadcast) broadcast('log', { msg: `  🔎 Paid but no session id — re-querying chain for existing session...` });
+    let reSid = null;
+    try {
+      // findExistingSession builds the session map from chain (RPC-first) keyed
+      // by node address + this wallet, then returns the matching session id.
+      reSid = await findExistingSession(node.address, account.address, broadcast);
+      if (!reSid) {
+        // Batch query may be momentarily behind tip — wait, rebuild map, retry once.
+        await sleep(5_000);
+        invalidateSessionCache();
+        reSid = await findExistingSession(node.address, account.address, broadcast);
+      }
+    } catch (reErr) {
+      console.error('[node-test] paid-but-unmapped re-query failed:', reErr?.message || String(reErr));
+    }
+    if (reSid) {
+      // Found the on-chain session — reuse it. No new payment is issued.
+      sessionId = BigInt(reSid);
+      addToSessionMap(node.address, sessionId);
+      if (broadcast) broadcast('log', { msg: `  ✓ Recovered existing session ${sessionId} for paid node — reusing (no new payment)` });
+    } else {
+      // Genuinely unmapped after retry. Fail gracefully (do NOT throw, do NOT pay,
+      // do NOT cancel — the pipeline's _orphanSessionIds path recovers the deposit).
+      if (broadcast) broadcast('log', { msg: `  ⚠ No on-chain session found for paid node after retry — failing cleanly (deposit recovered via orphan cancel).` });
+      logFailure(node.address, 'Paid but session unmapped on chain (no session id after re-query)', {
+        type: typeName,
+        sessionId: null,
+        location: `${status.location.city}, ${status.location.country}`,
+      });
+      return {
+        timestamp: new Date().toISOString(),
+        address: node.address,
+        type: typeName,
+        moniker: status.moniker || '',
+        country: status.location.country || '',
+        countryCode: status.location.country_code || '',
+        city: status.location.city || '',
+        reportedDownloadMbps: parseFloat(reportedDownloadMbps.toFixed(2)),
+        actualMbps: null,
+        error: 'Paid but session unmapped on chain — no session id after re-query (deposit recovered via orphan cancel)',
+        errorCode: 'SESSION_UNMAPPED',
+        baselineAtTest: baselineMbps,
+        ispBottleneck: false,
+        baselineViable: baselineMbps != null && baselineMbps >= 30,
+        dynamicThreshold: null,
+        slaApplicable: false,
+        pass15mbps: false,
+        pass10mbps: false,
+        passBaseline: false,
+        peers: status.peers,
+        maxPeers: status.qos?.max_peers,
+        gigabytePrices: node.gigabyte_prices || [],
+        googleAccessible: null,
+        googleLatencyMs: null,
+        sdk: state.activeSDK || 'js',
+        os: process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux',
+        inPlan: (node.planIds || []).length > 0,
+        planIds: node.planIds || [],
+      };
+    }
   }
   if (!sessionId && isPaid(node.address) && state.retestMode) {
     // In retest: clear stale paid flag, allow fresh payment

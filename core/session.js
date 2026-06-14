@@ -344,11 +344,11 @@ export async function submitBatchPayment(client, account, denom, gigabytes, batc
       // the pipeline folds them into the batch cancel set. The node still fails
       // untested this batch, but its 1 GB deposit is no longer locked.
       //
-      // FLAG: this recovers the deposit but does NOT fix the charged-yet-untested
-      // outcome. The proper long-term rework is to fall through to an individual
-      // pay+test (or a node-targeted session re-query) for the missed node rather
-      // than abandoning it after a successful charge — that needs deeper plumbing
-      // through testNode's payment path and is out of scope for this surgical fix.
+      // This recovers the deposit. The charged-yet-untested outcome is now also
+      // handled upstream: testNode re-queries the chain for the missed node's
+      // session (node-test.js, the `isPaid && !sessionId` branch) and reuses it
+      // if found (no new payment), or fails it cleanly as SESSION_UNMAPPED — so a
+      // session the batch query merely missed gets tested instead of abandoned.
       const mappedIds = new Set([...result.values()].map(String));
       const orphanCancelIds = (sessionMap._orphanIds || [])
         .map(String)
