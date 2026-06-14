@@ -2332,6 +2332,11 @@ app.post('/api/runs/load/:num', adminOnly, (req, res) => {
   results.push(...data);
   saveResults();
   rehydrateState(data);
+  // A loaded run is a complete set, so its Total is its own node count — not the
+  // last live audit's chain total, which rehydrateState deliberately leaves in
+  // place. Without this the header's Total/Remaining stayed stuck on the last
+  // run no matter which saved run you selected.
+  state.totalNodes = data.length;
   // Restore this run's spend/refund totals (rehydrateState only recomputes
   // per-node counts). spentUdvpn is already net (refunds decrement it).
   const _idx = loadRunsIndex();
