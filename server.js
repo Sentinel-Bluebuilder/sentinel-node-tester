@@ -451,6 +451,29 @@ const state = createState();
 // startFreshRun / resume, and persisted+restored across bounces (H-1).
 state.loadedReadonly = false;
 
+// ─── Canonical "audit busy" predicates — ONE source of truth ─────────────────
+// These replace ~10 hand-copied `state.status === 'running' || ...` checks that
+// drifted out of sync: new pipeline pause states (paused_balance/paused_internet)
+// were added but only some guards were updated, so a run parked on insufficient
+// funds looked "idle" to half the guards. Always reach for these helpers.
+//
+// PIPELINE_BUSY_STATUSES = states where the audit pipeline holds the active run
+// dir + SQLite run id and a live writer is either running or parked in a poll
+// loop that RESUMES per-node writes on recovery. Launching a new run, retesting,
+// deleting the run, or swapping SDK against any of these is unsafe.
+//   running          — actively testing
+//   paused_balance   — parked in the insufficient-funds poll loop (will resume)
+//   paused_internet  — parked in the no-connectivity poll loop (will resume)
+//   paused           — diagnostics-subsystem pause (protocol/diagnostics.js)
+// NOTE: the periodic balance refresher's `running || paused_balance` check is a
+// DIFFERENT concept ("is the pipeline doing its own balance refresh right now")
+// and intentionally does NOT use this set — don't fold it in.
+const PIPELINE_BUSY_STATUSES = ['running', 'paused', 'paused_balance', 'paused_internet'];
+function isPipelineBusy() { return PIPELINE_BUSY_STATUSES.includes(state.status); }
+// Pipeline busy OR the continuous-loop runner is active. Use where there is no
+// separate continuous-takeover handling (delete, SDK swap).
+function isAuditBusy() { return isPipelineBusy() || continuous.status().running; }
+
 // Persist Broadcast Live across restarts so the operator's choice survives
 // process bounces — without this, every restart silently flips public /live
 // back to "paused" even though the admin UI still shows BROADCAST ON.
@@ -1815,7 +1838,7 @@ app.post('/api/public/test/start', attachAdminFlag, async (req, res) => {
   if (!publicStartRateOk(ip)) {
     return res.status(429).json({ error: 'Rate limit: one start per minute per IP' });
   }
-  if (state.status === 'running' || state.status === 'paused') {
+  if (isPipelineBusy()) {
     return res.status(409).json({ error: 'A regular audit is running — try again later.' });
   }
   const mode = (req.body?.mode === 'subscription') ? 'subscription' : 'p2p';
@@ -2024,7 +2047,7 @@ app.post('/api/start', adminOnly, async (req, res) => {
   const infiniteLoop = !!(req.body?.infiniteLoop || req.query.infiniteLoop);
   const pricingMode = (req.body?.pricingMode === 'hours' || req.query.pricingMode === 'hours') ? 'hours' : 'gigabytes';
 
-  if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
+  if (isPipelineBusy()) return res.json({ error: 'Already running' });
   if (continuous.status().running) {
     if (!req.body?.takeover) {
       return res.status(409).json({ error: 'PUBLIC_RUN_ACTIVE', message: 'A public run is active. Pause it and start an audit?' });
@@ -2089,7 +2112,7 @@ app.post('/api/start', adminOnly, async (req, res) => {
 
 // Resume CURRENT test from where it left off (skips already-tested nodes).
 app.post('/api/resume', adminOnly, async (req, res) => {
-  if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
+  if (isPipelineBusy()) return res.json({ error: 'Already running' });
   if (continuous.status().running) {
     if (!req.body?.takeover) {
       return res.status(409).json({ error: 'PUBLIC_RUN_ACTIVE', message: 'A public run is active. Pause it and start an audit?' });
@@ -2247,7 +2270,7 @@ app.post('/api/stop', adminOnly, (req, res) => {
 });
 
 app.post('/api/retest-skips', adminOnly, async (req, res) => {
-  if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
+  if (isPipelineBusy()) return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const results = getResults();
   const skipAddrs = results.filter(r => r.actualMbps == null && /unreachable/i.test(r.error || '')).map(r => r.address);
@@ -2281,7 +2304,7 @@ app.post('/api/retest-skips', adminOnly, async (req, res) => {
 });
 
 app.post('/api/retest-fails', adminOnly, async (req, res) => {
-  if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
+  if (isPipelineBusy()) return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const results = getResults();
   const specific = req.body?.addresses;
@@ -2318,7 +2341,7 @@ app.post('/api/retest-fails', adminOnly, async (req, res) => {
 
 // DEPRECATED: Plan testing is WIP — hidden from dashboard, endpoint still functional for API callers
 app.post('/api/test-plan', adminOnly, async (req, res) => {
-  if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
+  if (isPipelineBusy()) return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const { planId } = req.body;
   if (!planId) return res.status(400).json({ error: 'planId required' });
@@ -2371,7 +2394,7 @@ app.get('/api/sub-plans', adminOnly, async (req, res) => {
 
 // Sub. Plan mode: run fee-granted plan test — starts as a fresh run with clean counters.
 app.post('/api/test-sub-plan', adminOnly, async (req, res) => {
-  if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
+  if (isPipelineBusy()) return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
   const { planId, subscriptionId, granter } = req.body || {};
   if (!planId) return res.status(400).json({ error: 'planId required' });
@@ -2584,7 +2607,7 @@ app.get('/api/transport-cache', adminOnly, (req, res) => {
 
 // Auto-retest: analyze failures, retest all retestable nodes in one shot
 app.post('/api/auto-retest', adminOnly, async (req, res) => {
-  if (state.status === 'running' || state.status === 'paused') return res.json({ error: 'Already running' });
+  if (isPipelineBusy()) return res.json({ error: 'Already running' });
   if (!MNEMONIC) return res.json({ error: 'MNEMONIC not set in .env' });
 
   const force = req.body?.force === true;
@@ -2737,16 +2760,11 @@ app.delete('/api/runs/:num', adminOnly, (req, res) => {
   const num = parseInt(req.params.num);
   if (!Number.isInteger(num)) return res.status(400).json({ error: 'Invalid run number' });
   // Only refuse deletion when an audit is ACTIVELY running/parked on this run —
-  // yanking the dir out from under a live writer would corrupt it. A stopped /
-  // done / idle run that merely happens to still be the loaded/selected run can
-  // be deleted: we reset the live view below so nothing dangles at a gone dir.
-  // NOTE: the pipeline's real mid-run pause states are 'paused_balance' and
-  // 'paused_internet' (it parks in a poll loop that still holds the run dir +
-  // db id and resumes writing on recovery) — they MUST count as in-flight. Bare
-  // 'paused' is only ever set by protocol/diagnostics, never the audit pipeline.
-  const IN_FLIGHT_STATUSES = ['running', 'paused', 'paused_balance', 'paused_internet'];
-  const inFlight = IN_FLIGHT_STATUSES.includes(state.status) || continuous.status().running;
-  if (state.activeRunNumber === num && inFlight) {
+  // yanking the dir out from under a live writer (incl. a balance/internet poll
+  // loop that resumes writing) would corrupt it. A stopped / done / idle run
+  // that merely happens to still be the loaded/selected run CAN be deleted: we
+  // reset the live view below so nothing dangles at a gone dir.
+  if (state.activeRunNumber === num && isAuditBusy()) {
     return res.status(409).json({
       error: 'RUN_ACTIVE',
       message: "Can't delete a run while it's still testing — stop it first.",
@@ -2777,7 +2795,7 @@ app.post('/api/sdk', adminOnly, (req, res) => {
   // node, so a switch would silently split a single audit across two SDK
   // implementations and contaminate the result-row sdk tag. Stop the run
   // first, then switch.
-  if (state.status === 'running' || state.status === 'paused' || continuous.status().running) {
+  if (isAuditBusy()) {
     return res.status(409).json({
       error: 'RUN_ACTIVE',
       message: 'Cannot switch SDK while an audit is running or paused. Stop first.',
@@ -3036,7 +3054,10 @@ app.listen(PORT, LISTEN_HOST, async () => {
   // ─── Periodic balance refresh (runs even when idle) ────────────────────────
   if (MNEMONIC) {
     setInterval(async () => {
-      // Skip refresh during active audit — pipeline handles its own refresh
+      // Skip refresh while the pipeline is doing its OWN balance refresh
+      // (actively testing, or parked in the insufficient-funds poll loop). This
+      // is deliberately NOT isPipelineBusy() — during paused_internet/'paused'
+      // the pipeline isn't touching balance, so the periodic refresh is fine.
       if (state.status === 'running' || state.status === 'paused_balance') return;
       try {
         const w = await DirectSecp256k1HdWallet.fromMnemonic(MNEMONIC, { prefix: 'sent' });
