@@ -389,6 +389,17 @@ export async function testNode(client, account, privkey, node, opts, preSessionI
     if (sessionId) markSessionPoisoned(node.address, String(sessionId));
     sessionId = newId;
     addToSessionMap(node.address, sessionId);
+    // Surface the freshly-paid session id to the pipeline's batch-cancel set.
+    // addToSessionMap only updates the module-level sessionMap (used for reuse
+    // lookups); it does NOT touch the pipeline-local batchSessionMap whose
+    // .values() are cancelled post-batch. Without this hand-off, the new
+    // session's 1 GB deposit would never be cancelled (locked until natural
+    // settlement). The pipeline drains state._freshSessionIds into
+    // batchSessionMap before submitBatchCancel. (Task C.1)
+    if (state) {
+      if (!state._freshSessionIds) state._freshSessionIds = new Map();
+      state._freshSessionIds.set(node.address, String(sessionId));
+    }
     state.spentUdvpn += thisCostUdvpn + 200000;
     state.balance = `${(Math.max(0, state.balanceUdvpn - state.spentUdvpn) / 1_000_000).toFixed(4)} P2P (est. remaining)`;
     state.estimatedTotalCost = `${(state.spentUdvpn / 1_000_000).toFixed(4)} P2P`;

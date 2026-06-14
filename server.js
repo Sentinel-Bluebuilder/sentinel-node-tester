@@ -590,7 +590,7 @@ function saveCurrentRun(label) {
  *
  * Returns the run number written, or null when there's nothing/nowhere to save.
  */
-function persistActiveRun(label) {
+function persistActiveRun(label, { accumulateSpend = true } = {}) {
   const num = state.activeRunNumber;
   if (num == null) return null;
   const results = getResults();
@@ -610,15 +610,28 @@ function persistActiveRun(label) {
   const failed = results.filter(r => r.actualMbps == null);
   const pass10 = passed.filter(r => r.actualMbps >= 10);
 
+  // Spend/refund accounting on the retest-persist path:
+  // runRetestSkips resets state.spentUdvpn/refundedUdvpn to 0 at its top so the
+  // LIVE header shows ONLY this retest pass's spend. The run's STORED total must
+  // therefore ACCUMULATE: read the prior cumulative from the existing index
+  // entry (default 0) and write prior + this-pass to BOTH the index entry and
+  // the SQLite row. This is specific to persistActiveRun (the no-new-number
+  // retest path); saveCurrentRun writes a full run's spend and is NOT additive.
+  // accumulateSpend can be passed false for callers that already hold the full
+  // cumulative figure in state.
   const index = loadRunsIndex();
   const entry = index.runs.find(r => r.number === num);
+  const priorSpent    = accumulateSpend ? (Number(entry?.spentUdvpn)    || 0) : 0;
+  const priorRefunded = accumulateSpend ? (Number(entry?.refundedUdvpn) || 0) : 0;
+  const cumulativeSpent    = priorSpent    + (Number(state.spentUdvpn)    || 0);
+  const cumulativeRefunded = priorRefunded + (Number(state.refundedUdvpn) || 0);
   if (entry) {
     entry.total = results.length;
     entry.passed = passed.length;
     entry.failed = failed.length;
     entry.pass10 = pass10.length;
-    entry.spentUdvpn = Number(state.spentUdvpn) || 0;
-    entry.refundedUdvpn = Number(state.refundedUdvpn) || 0;
+    entry.spentUdvpn = cumulativeSpent;
+    entry.refundedUdvpn = cumulativeRefunded;
     if (label) entry.label = label;
     if (state.activeDbRunId) entry.dbRunId = state.activeDbRunId;
     saveRunsIndex(index);
@@ -630,8 +643,8 @@ function persistActiveRun(label) {
         finished_at:    Date.now(),
         node_count:     results.length,
         pass_count:     passed.length,
-        spent_udvpn:    Number(state.spentUdvpn)    || 0,
-        refunded_udvpn: Number(state.refundedUdvpn) || 0,
+        spent_udvpn:    cumulativeSpent,
+        refunded_udvpn: cumulativeRefunded,
       });
     } catch (dbErr) {
       console.error(`[persistActiveRun] updateRunOnFinish failed: ${dbErr.message}`);
@@ -2154,8 +2167,19 @@ app.post('/api/retest-skips', adminOnly, async (req, res) => {
   if (skipAddrs.length === 0) return res.json({ error: 'No unreachable failures to retest' });
   state.stopRequested = false;
   res.json({ ok: true, retesting: skipAddrs.length });
+  // Pin the retest to the active run's dir so per-node saveResults() writes into
+  // THIS run, and persist the mutated set back to disk + index + SQLite on
+  // completion (same treatment as /api/auto-retest) — otherwise file / index /
+  // SQLite / live state diverge from what's on screen.
+  if (state.activeRunNumber != null) {
+    const retestRunDir = path.join(RUNS_DIR, `test-${String(state.activeRunNumber).padStart(3, '0')}`);
+    try { _mkd(retestRunDir, { recursive: true }); } catch (e) { console.error('[retest-skips] mkdir failed:', e.message); }
+    setActiveRunDir(retestRunDir);
+  }
   const tracked = withBatchTracking(broadcast, state.runMode || 'p2p');
-  runRetestSkips(skipAddrs, state, tracked).catch(err => {
+  runRetestSkips(skipAddrs, state, tracked).then(() => {
+    try { persistActiveRun(); } catch (e) { console.error('[retest-skips] persistActiveRun failed:', e.message); }
+  }).catch(err => {
     state.status = 'error';
     state.errorMessage = err.message;
     tracked('state', { state });
@@ -2176,8 +2200,16 @@ app.post('/api/retest-fails', adminOnly, async (req, res) => {
   if (failAddrs.length === 0) return res.json({ error: 'No failures to retest' });
   state.stopRequested = false;
   res.json({ ok: true, retesting: failAddrs.length, addresses: failAddrs });
+  // Pin + persist to the active run's dir, same treatment as /api/auto-retest.
+  if (state.activeRunNumber != null) {
+    const retestRunDir = path.join(RUNS_DIR, `test-${String(state.activeRunNumber).padStart(3, '0')}`);
+    try { _mkd(retestRunDir, { recursive: true }); } catch (e) { console.error('[retest-fails] mkdir failed:', e.message); }
+    setActiveRunDir(retestRunDir);
+  }
   const tracked = withBatchTracking(broadcast, state.runMode || 'p2p');
-  runRetestSkips(failAddrs, state, tracked).catch(err => {
+  runRetestSkips(failAddrs, state, tracked).then(() => {
+    try { persistActiveRun(); } catch (e) { console.error('[retest-fails] persistActiveRun failed:', e.message); }
+  }).catch(err => {
     state.status = 'error';
     state.errorMessage = err.message;
     tracked('state', { state });

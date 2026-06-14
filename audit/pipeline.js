@@ -773,6 +773,14 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
     const canProceed = await checkAndPauseIfInterference(broadcast, state);
     if (!canProceed) { broadcast('log', { msg: '⏹ Aborting — VPN interference not cleared.' }); break; }
 
+    // Snapshots for this batch's refund reconciliation (Task B):
+    //  - _spentBeforeBatch lets us bound a plausible refund by this batch's
+    //    gross deposits (you can't get back more than you just paid in).
+    //  - _onchainCommittedBeforeBatch detects whether a SNTR1 self-send TX
+    //    fired during this batch so we can subtract its ~200000 udvpn fee.
+    const _spentBeforeBatch = Number(state.spentUdvpn) || 0;
+    const _onchainCommittedBeforeBatch = _onchainReporter?.committed || 0;
+
     let batchSessionMap;
     if (state.testRun) {
       batchSessionMap = new Map();
@@ -1008,37 +1016,89 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
     // bytes consumed during the ~10s speedtest) is paid out by the chain after
     // the settlement window. This is the difference between locking the full
     // 1 GB deposit per node forever vs. recovering ~98% of it per audit cycle.
-    if (autoCancelRT() && !state.testRun && batchSessionMap && batchSessionMap.size > 0) {
-      const idsToCancel = [...batchSessionMap.values()];
+    // Fold any fresh sessions paid for mid-test (payForFreshSession on a
+    // persistent 409, node-test.js) into this batch's cancel set so their
+    // deposits don't lock up. We only consume entries for addresses that were
+    // part of THIS batch, then delete them so the next batch can't double-cancel
+    // an already-cancelled id. (Task C.1)
+    if (!state.testRun && state._freshSessionIds && state._freshSessionIds.size > 0) {
+      if (!batchSessionMap) batchSessionMap = new Map();
+      for (const { node } of batch) {
+        const freshId = state._freshSessionIds.get(node.address);
+        if (freshId) {
+          batchSessionMap.set(node.address, freshId);
+          state._freshSessionIds.delete(node.address);
+        }
+      }
+    }
+
+    // Paid-but-unmapped orphan sessions (Task C.2): submitBatchPayment attaches
+    // _orphanSessionIds for sessions it paid for but couldn't map to a node via
+    // the post-pay chain query. They have no node-address key in batchSessionMap,
+    // so fold them straight into the cancel set to recover their deposits.
+    const _orphanCancelIds = (batchSessionMap && batchSessionMap._orphanSessionIds) || [];
+    if (autoCancelRT() && !state.testRun && batchSessionMap && (batchSessionMap.size > 0 || _orphanCancelIds.length > 0)) {
+      const idsToCancel = [...new Set([
+        ...[...batchSessionMap.values()].filter(Boolean).map(String),
+        ..._orphanCancelIds.map(String),
+      ])];
       try {
         await submitBatchCancel(client, account, idsToCancel, broadcast);
       } catch (cancelErr) {
         broadcast('log', { msg: `  ⚠ Batch cancel raised: ${_sanitizeSnippet(cancelErr.message)}. Continuing.` });
       }
-      // ─── Refund reconciliation ───────────────────────────────────────────
+      // ─── Refund reconciliation (best-effort, fee-aware) ──────────────────
       // Sentinel emits the actual refund (deposit minus consumed_bytes) AFTER
       // the inactive_pending settlement window — not in the cancel TX. Rather
-      // than parse chain block events, we just compare the wallet's real
-      // balance to what we expected after this batch's payments. Any positive
-      // delta is a refund landing back in the wallet; we credit it to
-      // refundedUdvpn AND decrement spentUdvpn so the dashboard's "spend"
-      // figure is the user-visible NET (gross paid − refunded). We poll once
-      // here per batch; settlements that arrive after the batch loop ends are
-      // picked up on the next batch's reconciliation, the next run's start
-      // balance read, or the idle 2-min refresher in server.js.
+      // than parse chain block events, we compare the wallet's real balance to
+      // what we expected after this batch. A positive delta is a refund landing
+      // back in the wallet; we credit it to refundedUdvpn AND decrement
+      // spentUdvpn so the dashboard's "spend" is the user-visible NET.
+      //
+      // IMPORTANT: state.spentUdvpn tracks only SESSION payments, NOT the gas/
+      // fee outflows that ALSO leave the wallet this batch — the cancel TX gas
+      // (~20000 udvpn per cancelled session) and, if a SNTR1 on-chain report
+      // fired this batch, its self-send fee (~200000 udvpn per commitBatch).
+      // Folding those known outflows into expectedBal means a normal fee
+      // outflow is no longer mis-read as a negative refund, and a genuine
+      // settlement refund is no longer netted down by them.
+      //
+      // We also clamp: only credit when delta > 0 AND delta is within a
+      // plausible bound (this batch's gross session deposits — you can't get
+      // back more than you just paid in). Implausible positive deltas (an
+      // unrelated inbound transfer, a prior batch's late settlement landing
+      // mid-window, etc.) are ignored rather than blindly credited.
+      //
+      // FLAG: this remains heuristic. The authoritative figure is the periodic
+      // real-balance refresh (_lastBalanceRefresh, above). The proper long-term
+      // fix is session-settlement-based reconciliation — match each cancelled
+      // session id to its EventRefund in the settlement block and sum exact
+      // per-session refunds — NOT a wallet-delta poll. Do not build that here.
       try {
         await sleep(2000); // small grace so cancel TX commits before we read
         const freshBalRes = await client.getBalance(account.address, DENOM);
         const realBal = parseInt(freshBalRes?.amount || '0', 10);
-        const expectedBal = Math.max(0, state.balanceUdvpn - state.spentUdvpn);
+
+        // Known fee outflows incurred this batch (NOT in state.spentUdvpn):
+        const cancelGas = 20_000 * idsToCancel.length;
+        const onchainFiredThisBatch = (_onchainReporter?.committed || 0) > _onchainCommittedBeforeBatch;
+        const onchainFee = onchainFiredThisBatch ? 200_000 : 0;
+        const feesThisBatch = cancelGas + onchainFee;
+
+        const expectedBal = Math.max(0, state.balanceUdvpn - state.spentUdvpn - feesThisBatch);
         const delta = realBal - expectedBal;
-        if (delta > 0) {
+
+        // Plausibility bound: this batch's gross session deposits.
+        const batchDeposits = Math.max(0, (Number(state.spentUdvpn) || 0) - _spentBeforeBatch);
+        if (delta > 0 && batchDeposits > 0 && delta <= batchDeposits) {
           state.refundedUdvpn = (state.refundedUdvpn || 0) + delta;
           state.spentUdvpn = Math.max(0, state.spentUdvpn - delta);
           state.balance = `${(realBal / 1_000_000).toFixed(4)} P2P`;
           state.estimatedTotalCost = `${(state.spentUdvpn / 1_000_000).toFixed(4)} P2P`;
           broadcast('log', { msg: `  ↩ Refund credited: ${(delta / 1_000_000).toFixed(4)} P2P (cumulative refunded: ${(state.refundedUdvpn / 1_000_000).toFixed(4)} P2P; net spend: ${(state.spentUdvpn / 1_000_000).toFixed(4)} P2P)` });
           broadcast('state', { state });
+        } else if (delta > 0 && batchDeposits > 0 && delta > batchDeposits) {
+          broadcast('log', { msg: `  ⚠ Refund reconciliation: implausible +${(delta / 1_000_000).toFixed(4)} P2P delta (> batch deposits ${(batchDeposits / 1_000_000).toFixed(4)} P2P) — ignored; authoritative figure comes from the periodic balance refresh.` });
         }
       } catch (recErr) {
         broadcast('log', { msg: `  ⚠ Refund reconciliation skipped: ${_sanitizeSnippet(recErr.message)}` });
@@ -1229,18 +1289,9 @@ export async function runRetestSkips(skipAddrs, state, broadcast) {
   const balRes = await client.getBalance(account.address, DENOM);
   state.balanceUdvpn = parseInt(balRes?.amount || '0', 10);
   state.balance = `${(state.balanceUdvpn / 1_000_000).toFixed(4)} P2P`;
-  // NEEDS PRODUCT DECISION (retest spend accounting): this used to hard-reset
-  // state.spentUdvpn = 0 at the top of every retest. When the operator loaded a
-  // past run (whose net spend was restored from the index) and then hit Retest
-  // Failed, that zeroing discarded the loaded run's prior spend — and because
-  // the retest now persists results back to the SAME run (see persistActiveRun
-  // in server.js), the wiped value would overwrite the stored spend, losing
-  // data. CONSERVATIVE FIX: preserve the prior spend as the baseline so the
-  // retest's per-node payments accumulate on top of it instead of replacing it.
-  // If the intended semantics are "show only THIS pass's spend", this should be
-  // reverted to `= 0` — but that must be a deliberate product call, not a
-  // silent default. Whichever way it goes, do not lose the loaded run's spend.
-  state.spentUdvpn = Number(state.spentUdvpn) || 0;
+  // retest displays only this pass's spend; the run's stored total is accumulated on persist (see persistActiveRun).
+  state.spentUdvpn = 0;
+  state.refundedUdvpn = 0;
   broadcast('state', { state });
 
   const v2rayAvailable = await checkV2Ray();

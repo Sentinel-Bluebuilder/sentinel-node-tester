@@ -330,8 +330,32 @@ export async function submitBatchPayment(client, account, denom, gigabytes, batc
           result.set(addr, sid);
           addToSessionMap(addr, sid);
         } else if (broadcast) {
-          broadcast('log', { msg: `  ⚠ No session found for ${addr.slice(0, 20)}… — will pay individually` });
+          broadcast('log', { msg: `  ⚠ No session found for ${addr.slice(0, 20)}… — paid but unmapped; deposit will be cancelled via orphan recovery` });
         }
+      }
+      // Deposit lock-up guard (Task C.2): every node in toPayBatch was markPaid'd
+      // above, and the batch TX DID create a session on-chain for each. When the
+      // post-pay chain query misses a node, that session is paid-but-unmapped:
+      // it never enters `result`, so the pipeline can't cancel it (deposit locks
+      // until natural settlement) AND the node hits testNode's duplicate-payment
+      // guard (charged, untested). We can't safely map the orphan session id to a
+      // specific node (index guessing causes handshake address mismatch), but we
+      // CAN still recover the deposit: surface the unmapped orphan session ids so
+      // the pipeline folds them into the batch cancel set. The node still fails
+      // untested this batch, but its 1 GB deposit is no longer locked.
+      //
+      // FLAG: this recovers the deposit but does NOT fix the charged-yet-untested
+      // outcome. The proper long-term rework is to fall through to an individual
+      // pay+test (or a node-targeted session re-query) for the missed node rather
+      // than abandoning it after a successful charge — that needs deeper plumbing
+      // through testNode's payment path and is out of scope for this surgical fix.
+      const mappedIds = new Set([...result.values()].map(String));
+      const orphanCancelIds = (sessionMap._orphanIds || [])
+        .map(String)
+        .filter(id => !mappedIds.has(id));
+      if (orphanCancelIds.length > 0) {
+        result._orphanSessionIds = orphanCancelIds;
+        if (broadcast) broadcast('log', { msg: `  ↩ ${orphanCancelIds.length} paid-but-unmapped session(s) flagged for cancel to recover deposit(s).` });
       }
     } else {
       // Events had node_address (future chain upgrade) — use direct mapping
