@@ -625,6 +625,11 @@
     .results-table td:last-child { padding-right: 8px; }
     /* Center the SDK badge inside its narrow column */
     .results-table tbody td:first-child { text-align: center; }
+    /* Sticky-header fix: sentinel.css `thead th { background: var(--bg-input) }`
+       (a ~4% alpha, near-transparent fill) outweighs the generic `th` rule, so
+       rows bled through the sticky header. This higher-specificity rule makes
+       the results-table header opaque so rows scroll cleanly underneath. */
+    .results-table thead th { background: var(--bg-card-solid); }
 
     /* Pagination controls */
     .pager { font-family: var(--font-mono); }
