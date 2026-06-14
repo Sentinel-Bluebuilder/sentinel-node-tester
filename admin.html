@@ -1566,24 +1566,27 @@
       // that's running OR paused is still in progress and /api/start is refused,
       // so the button hides. Run status is conveyed by the header dot + badge.
       btnStart.style.display = active ? 'none' : '';
-      // STOP: visible ONLY while actively running. A paused run is parked /
-      // auto-resuming — there's nothing live to interrupt from here.
-      btnStop.style.display = running ? '' : 'none';
-      btnStop.disabled = !running;
+      // STOP: visible while a run is in progress — running OR paused — so a
+      // pause that never resolves (wallet/internet) can still be aborted from
+      // the UI. /api/stop interrupts a parked run.
+      btnStop.style.display = active ? '' : 'none';
+      btnStop.disabled = !active;
 
       // SAVE / DELETE visibility (run toolbar):
       //   hasRun  — a run with data is currently loaded/displayed.
       //   saved   — that run is already in the saved index (server-authoritative).
-      // SAVE shows only for an UNSAVED loaded run while NOT actively running
-      // (paused is fine). DELETE shows for ANY loaded run while not running
-      // (it discards an unsaved run, removes a saved one). Both hide when there's
-      // no loaded run ("no saved work") and during an active (running) audit.
+      // SAVE shows for an UNSAVED loaded run while not actively running — it
+      // still works during a pause (snapshots current progress), so gate on
+      // !running. DELETE shows for any loaded run only when NO run is in progress
+      // (running OR paused): the server refuses deleting a live/parked run, so
+      // gating on !active avoids a visible-but-refused dead-end. Both hide when
+      // there's no loaded run ("no saved work").
       const btnSaveRun = document.getElementById('btnSaveRun');
       const btnDeleteRun = document.getElementById('btnDeleteRun');
       const hasRun = Array.isArray(resultsArr) && resultsArr.length > 0;
       const savedRun = !!state.activeRunSaved;
       if (btnSaveRun) btnSaveRun.style.display = (hasRun && !savedRun && !running) ? '' : 'none';
-      if (btnDeleteRun) btnDeleteRun.style.display = (hasRun && !running) ? '' : 'none';
+      if (btnDeleteRun) btnDeleteRun.style.display = (hasRun && !active) ? '' : 'none';
 
       // Resume: visible only for an incomplete, not-running run.
       if (btnResume) {
