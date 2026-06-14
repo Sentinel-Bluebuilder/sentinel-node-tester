@@ -1562,9 +1562,10 @@
       const _failCount = (resultsArr || []).filter(r => r && r.actualMbps == null && !r.skipped && r.errorCode !== 'TEST_RUN_SKIP').length;
 
       btnStart.disabled = active;
-      // STOP: visible ONLY while a run is active (running or paused).
-      btnStop.style.display = active ? '' : 'none';
-      btnStop.disabled = !active;
+      // STOP: visible ONLY while actively running. A paused run is parked /
+      // auto-resuming — there's nothing live to interrupt from here.
+      btnStop.style.display = running ? '' : 'none';
+      btnStop.disabled = !running;
 
       // SAVE / DELETE visibility (run toolbar):
       //   hasRun  — a run with data is currently loaded/displayed.
