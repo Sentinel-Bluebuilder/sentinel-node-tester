@@ -1562,6 +1562,29 @@
       cbRender();
     }
 
+    // Halt the live-progress UI when the run ends (stop / done / error / idle).
+    // Called from the `state` event handler for direct /api/start runs, which
+    // never emit `loop:stopped`. Freezing `_cb.startedAt` stops the per-second
+    // ETA ticker from climbing; clearing the gap timer stops any countdown;
+    // the dot drops its "running" pulse and the log-header label updates.
+    function cbFreeze(status) {
+      // Stop the ETA ticker — without clearing startedAt the 1s timer keeps
+      // recomputing elapsed/tested and the ETA marches upward forever.
+      _cb.startedAt = null;
+      if (_cb.gapTimer) { clearInterval(_cb.gapTimer); _cb.gapTimer = null; }
+      _cb.gapEndsAt = null;
+      const dot = _cbEl('cbDot');
+      if (dot) dot.className = 'pulse-dot';
+      const hdrDot = document.getElementById('headerDot');
+      if (hdrDot) hdrDot.className = 'pulse-dot';
+      // Log-panel header label: 'stopped' / 'complete' / 'error' / 'idle'.
+      setStatus(status === 'done' ? 'complete' : status);
+      // cbRender recomputes the ETA: with startedAt now null it resolves to
+      // "ETA 00:00:00" (all tested) or "ETA —" (stopped mid-run), never a
+      // climbing number.
+      cbRender();
+    }
+
     function cbApplyGap(data) {
       data = data || {};
       const gapMs = data.next_in_ms || data.gapMs || 30000;
@@ -1752,10 +1775,26 @@
       applyHeaderStatsFromState();
     }, 5000);
 
+    // True only while a run is genuinely in flight. A stopped/done/error/idle
+    // status from the server means the run ended — the ETA must freeze and the
+    // status label must drop out of "running". Without this gate the ETA timer
+    // keeps ticking off `_cb.startedAt` (which is never cleared on stop) so the
+    // countdown climbs forever and /live looks like the test is still running.
+    function isRunLive() {
+      // The ETA ticks ONLY while the run is actively testing. Paused states
+      // (the pipeline emits paused_balance / paused_internet — never bare
+      // 'paused') freeze the ETA so a long balance/internet pause doesn't inflate
+      // the projection; terminal states (stopped/done/error/idle) freeze it too.
+      // Resume re-emits status='running' + a fresh batch:start, re-arming the ETA.
+      return ((_liveState && _liveState.status) || '') === 'running';
+    }
+
     // Tick ETA every second so the countdown reads smoothly between
     // node:result events (which can be 10–60s apart on slow nodes).
     setInterval(() => {
       if (!_cb.startedAt) return;
+      // Freeze the ETA the moment the run is no longer live (stopped/done/etc).
+      if (!isRunLive()) return;
       const etaEl = document.getElementById('cbEta');
       if (!etaEl) return;
       const snap = _cb.snapshotSize;
@@ -2257,6 +2296,22 @@
             _prevActiveRunNumber = newRunNum;
             _prevStatus = newStatus;
             mergeLiveState(d.state);
+            // Direct /api/start runs (p2p / sub-plan / test-run) signal stop and
+            // natural finish via this `state` event — they do NOT emit the
+            // `loop:stopped` event the continuous runner uses. So the terminal
+            // transition must be handled here too, or /live stays stuck on
+            // "running" with a climbing ETA after the admin presses Stop.
+            if (newStatus === 'stopped' || newStatus === 'done' ||
+                newStatus === 'error'   || newStatus === 'idle') {
+              cbFreeze(newStatus);
+            } else if (newStatus === 'running') {
+              setStatus(newStatus);
+            } else if (newStatus && newStatus.indexOf('paused') === 0) {
+              // paused_balance / paused_internet — show a friendly 'paused' label.
+              // Not terminal: don't cbFreeze (keep startedAt so the resumed run's
+              // ETA continues); the ETA is frozen meanwhile via isRunLive().
+              setStatus('paused');
+            }
             renderLiveStats();
             if (_cb.batchId) cbRender();
           }
