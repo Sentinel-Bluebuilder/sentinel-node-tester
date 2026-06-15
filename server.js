@@ -1892,7 +1892,8 @@ function _redactPublicError(v, max = 200) {
 // Keep only the state fields /live actually reads. Strips wallet, balance*,
 // spent*, MNEMONIC-derived data, errorMessage internals, and any counter or
 // progress field the public surfaces never consume.
-// Each key below is verified read by live.html:
+// Each key below is verified read by live.html (and a subset — testRun /
+// runMode / runPlanId / pricingMode — also by public.html):
 //   - status / totalNodes / testRun / runMode / runPlanId / pricingMode /
 //     activeRunNumber are read directly off _liveState.
 //   - baselineMbps / baselineHistory feed computeBaselineAvg(_liveState) for

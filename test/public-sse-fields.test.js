@@ -61,6 +61,25 @@ function extractArrayLiteral(s, name) {
   return s.slice(start, j); // "[ ... ]"
 }
 
+// The extractors above are naive char counters: a brace/bracket inside a
+// string or regex literal in the target would silently truncate the slice and
+// turn into a confusing "field missing" assertion downstream. Guard against
+// that by asserting the extracted block ends with its expected closing token
+// AND still contains a known last field — so a mis-extraction throws loudly.
+function mustExtract(extracted, what, endToken, sentinel) {
+  const trimmed = extracted.trimEnd();
+  if (!trimmed.endsWith(endToken)) {
+    throw new Error(`mis-extracted ${what}: expected it to end with "${endToken}" ` +
+      `but got "...${trimmed.slice(-40)}" (a brace/bracket inside a string or ` +
+      `regex likely truncated the balanced-token scan)`);
+  }
+  if (!extracted.includes(sentinel)) {
+    throw new Error(`mis-extracted ${what}: expected it to contain "${sentinel}" ` +
+      `(extraction stopped early before the last field)`);
+  }
+  return extracted;
+}
+
 // sanitizePublicResult closes over _redactPublicError; provide a stub so the
 // extracted fn runs in isolation.
 const sandbox = {
@@ -68,13 +87,19 @@ const sandbox = {
   console,
 };
 vm.createContext(sandbox);
-vm.runInContext(extractFn(src, 'sanitizePublicResult'), sandbox);
-vm.runInContext('var PUBLIC_STATE_KEYS = ' + extractArrayLiteral(src, 'PUBLIC_STATE_KEYS') + ';', sandbox);
+vm.runInContext(
+  mustExtract(extractFn(src, 'sanitizePublicResult'), 'sanitizePublicResult', '}', 'baselineAtTest'),
+  sandbox);
+vm.runInContext('var PUBLIC_STATE_KEYS = ' +
+  mustExtract(extractArrayLiteral(src, 'PUBLIC_STATE_KEYS'), 'PUBLIC_STATE_KEYS', ']', 'activeRunNumber') +
+  ';', sandbox);
 // sanitizeForPublic depends on sanitizePublicResult / sanitizePublicState /
 // _redactPublicError. We only exercise its top-level field forwarding here, so
 // provide a passthrough sanitizePublicState; sanitizePublicResult is real.
 vm.runInContext('var sanitizePublicState = (s) => s;', sandbox);
-vm.runInContext(extractFn(src, 'sanitizeForPublic'), sandbox);
+vm.runInContext(
+  mustExtract(extractFn(src, 'sanitizeForPublic'), 'sanitizeForPublic', '}', 'next_in_ms'),
+  sandbox);
 
 const KEPT_RESULT_FIELDS = [
   'address', 'moniker', 'serviceType', 'countryCode', 'city', 'actualMbps',
@@ -125,6 +150,23 @@ console.log('[1] sanitizePublicResult keeps consumed fields, drops 6 unused');
     ok(!Object.prototype.hasOwnProperty.call(safe, f),
        `result DROPS "${f}" (regression guard)`);
   }
+}
+
+// serviceType mapping is `r.type ?? r.serviceType` — exercise the fallback
+// branch (no type) and the `?? not ||` distinction (type: 0 is a real value).
+console.log('[1b] serviceType uses r.type ?? r.serviceType (fallback + nullish)');
+{
+  // (a) no `type` at all → falls back to r.serviceType.
+  sandbox._row = { address: 'sent1a', serviceType: 2 };
+  const safe = vm.runInContext('sanitizePublicResult(_row)', sandbox);
+  ok(safe.serviceType === 2, 'no type → falls back to r.serviceType (got ' + safe.serviceType + ')');
+}
+{
+  // (b) type: 0 is a valid service type — `??` keeps it; `||` would wrongly
+  // fall through to serviceType. Lock in `??` semantics.
+  sandbox._row = { address: 'sent1b', type: 0, serviceType: 2 };
+  const safe = vm.runInContext('sanitizePublicResult(_row)', sandbox);
+  ok(safe.serviceType === 0, 'type:0 is kept (?? not ||) (got ' + safe.serviceType + ')');
 }
 
 // ─── 2. PUBLIC_STATE_KEYS ─────────────────────────────────────────────────────
