@@ -281,13 +281,18 @@ async function _runOnePass(loopState, batchId, frozenNodes = null) {
     _emitScoped('result', { result: raw, batchId });
     const payload = _sanitizeBatchNodeResult(raw, batchId);
     _emitScoped('batch:node:result', payload);
-    // Persist to batch_results (non-blocking, non-fatal)
-    _getDb().then(db => {
-      if (db) {
-        try { db.insertBatchResult(batchId, payload); }
-        catch (err) { console.error(`[continuous] insertBatchResult failed (batch ${batchId}, ${payload?.address}): ${err.message}`); }
-      }
-    }).catch(err => console.error(`[continuous] _getDb failed (batch ${batchId}): ${err?.message || err}`));
+    // Persist to batch_results (non-blocking, non-fatal). Guard on batchId > 0:
+    // if insertBatch failed upstream (logged, non-fatal) currentBatchId stays 0,
+    // and writing insertBatchResult(0, …) would violate the FK to a non-existent
+    // batch row (foreign_keys=ON) and spam errors for every node in the pass.
+    if (batchId > 0) {
+      _getDb().then(db => {
+        if (db) {
+          try { db.insertBatchResult(batchId, payload); }
+          catch (err) { console.error(`[continuous] insertBatchResult failed (batch ${batchId}, ${payload?.address}): ${err.message}`); }
+        }
+      }).catch(err => console.error(`[continuous] _getDb failed (batch ${batchId}): ${err?.message || err}`));
+    }
   }
 
   // Use injected mock runner if provided (test path), otherwise resolve real pipeline.

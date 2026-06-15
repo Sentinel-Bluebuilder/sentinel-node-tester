@@ -1724,16 +1724,23 @@ export async function runPlanTest(planId, state, broadcast) {
     const _ptSnippet = _ptRaw.length > 4096 ? _ptRaw.slice(-4096) : (_ptRaw || null);
 
     if (result) {
-      state.testedNodes++;
       result.inPlan = true;
       result.planIds = [planId];
       result.diag = result.diag || {};
       result.diag.planId = planId;
       result.diag.subscriptionId = subscriptionId;
       result.diag.viaSubscription = true;
-      if (result.slaApplicable && result.pass15mbps) state.passed15++;
-      if (result.pass10mbps) state.passed10++;
-      if (result.passBaseline) state.passedBaseline++;
+      // Classify exactly as runAudit / recomputeCounters do: only an
+      // actualMbps != null result counts as tested (passed); a null-mbps
+      // result is a soft failure — otherwise testedNodes over-counts.
+      if (result.actualMbps != null) {
+        state.testedNodes++;
+        if (result.slaApplicable && result.pass15mbps) state.passed15++;
+        if (result.pass10mbps) state.passed10++;
+        if (result.passBaseline) state.passedBaseline++;
+      } else {
+        state.failedNodes++;
+      }
       upsertResult(state, result);
       saveResults(state);
       broadcast('result', { result, state });
@@ -1767,6 +1774,9 @@ export async function runPlanTest(planId, state, broadcast) {
 
   emergencyCleanupSync();
   await _finalizeOnchainReporter();
+  // Reconcile live-incremented counters against results[] — mirrors runAudit
+  // so the final persisted summary matches the authoritative classifier.
+  recomputeCounters(state);
   state.status = 'done';
   state.completedAt = new Date().toISOString();
   state.currentNode = null;
@@ -2198,7 +2208,6 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
     const _spSnippet = _spRaw.length > 4096 ? _spRaw.slice(-4096) : (_spRaw || null);
 
     if (result) {
-      state.testedNodes++;
       result.inPlan = true;
       result.planIds = [planId];
       result.diag = result.diag || {};
@@ -2208,9 +2217,18 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
       result.diag.feeGranted = !_selfGranter;
       result.diag.selfGranter = _selfGranter;
       result.diag.granter = granterAddr;
-      if (result.slaApplicable && result.pass15mbps) state.passed15++;
-      if (result.pass10mbps) state.passed10++;
-      if (result.passBaseline) state.passedBaseline++;
+      // Classify exactly as runAudit / recomputeCounters do: only an
+      // actualMbps != null result counts as tested (passed); a null-mbps
+      // result is a soft failure. Without this, testedNodes over-counts and
+      // the live header (passed = testedNodes) is wrong until a recompute.
+      if (result.actualMbps != null) {
+        state.testedNodes++;
+        if (result.slaApplicable && result.pass15mbps) state.passed15++;
+        if (result.pass10mbps) state.passed10++;
+        if (result.passBaseline) state.passedBaseline++;
+      } else {
+        state.failedNodes++;
+      }
       upsertResult(state, result);
       state.resumeHeadAddr = null;
       saveResults(state);
@@ -2251,6 +2269,9 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
 
   emergencyCleanupSync();
   await _finalizeOnchainReporter();
+  // Reconcile live-incremented counters against results[] — mirrors runAudit
+  // so the final persisted summary matches the authoritative classifier.
+  recomputeCounters(state);
   state.status = 'done';
   state.completedAt = new Date().toISOString();
   state.currentNode = null;

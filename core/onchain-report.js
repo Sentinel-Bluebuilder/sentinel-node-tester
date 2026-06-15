@@ -170,7 +170,9 @@ export function decodeMemo(memo, hrp = DEFAULT_HRP) {
     return _decodeCsv(memo);
   }
   if (memo.startsWith(`${MAGIC}${SEP}v`)) {
-    // Future versions / unknown — try CSV-style anyway, return null on failure
+    // Unknown / future SNTR1 version (e.g. v3+). The v2 CSV parser would
+    // best-effort-decode it into confidently-wrong records, so refuse it and
+    // return null (undecodable) instead. _decodeCsv enforces ver === 'v2'.
     return _decodeCsv(memo);
   }
 
@@ -189,6 +191,10 @@ function _decodeCsv(memo) {
   const headerParts = lines[0].split(SEP);
   if (headerParts[0] !== MAGIC) return null;
   const ver = headerParts[1] || '';
+  // Only the supported wire version is parseable. A future layout (v3+) must
+  // NOT be coerced through the v2 parser into wrong records — treat as
+  // undecodable and return null so callers can skip/ignore it.
+  if (ver !== `v${VERSION}`) return null;
   const region = (headerParts[2] || '').replace(/-/g, '').trim() || null;
   let baselineMbps = 0;
   let startedAt = 0;
