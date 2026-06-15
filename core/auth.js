@@ -74,8 +74,13 @@ export function adminOnly(req, res, next) {
 // render admin controls without enforcing authentication.
 export function attachAdminFlag(req, res, next) {
   const token = process.env.ADMIN_TOKEN;
+  // No ADMIN_TOKEN configured → local/single-user mode. There are no anonymous
+  // visitors here: the operator IS the admin (PUBLIC_MODE forces ADMIN_TOKEN to
+  // be set before any public deployment). Mirror adminOnly's local-mode bypass
+  // so req.admin is consistent across both middlewares — otherwise the operator's
+  // own browser is flagged non-admin and loses raw_json in the failure drawer.
   if (!token) {
-    req.admin = false;
+    req.admin = true;
     return next();
   }
 

@@ -2108,7 +2108,11 @@
       div.className = 'log-entry ' + cls;
       div.dataset.cat = cat || logCategory(msg);
       const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-      const escaped = String(msg).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      // Escape all five HTML-significant chars (incl. " and ') BEFORE linkifying.
+      // Without quote-escaping, an attacker-controlled URL containing a double
+      // quote (e.g. from an untrusted node operator's remote_addrs) would break
+      // out of href="..." into an inline event handler in the admin origin.
+      const escaped = escHtml(String(msg));
       const linkified = escaped.replace(/(https?:\/\/[^\s<]+)/g, (u) => `<a href="${u}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">${u}</a>`);
       div.innerHTML = `<span class="log-time">${ts}</span>` + linkified;
       if (!_logEntryMatches(div, _logFilter)) div.style.display = 'none';

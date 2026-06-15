@@ -1339,6 +1339,27 @@ app.get('/api/public/node/:addr', attachAdminFlag, rlPublicRead, (req, res) => {
     if (!detail.node) {
       return res.status(404).json({ error: 'Node not found' });
     }
+    // Strip raw_json from the PUBLIC response. raw_json is a JSON.stringify of
+    // the full per-node result (diag.wgServerEndpoint, diag.remoteUrl,
+    // sessionId, handshake internals) and must never reach anonymous visitors.
+    // log_snippet (already address-sanitized) is preserved for the Failure-Log UX.
+    // Authenticated admins (req.admin via signed session cookie or bearer token)
+    // KEEP raw_json — the admin failure-diagnostic drawer parses raw.diag/raw.type
+    // from this exact endpoint. Stripping it for everyone blanks the operator's
+    // failure report; the strip must be gated on identity, not applied blindly.
+    if (!req.admin) {
+      const stripRaw = (row) => { if (row && typeof row === 'object') delete row.raw_json; return row; };
+      const stripErr = (row) => {
+        if (row && typeof row === 'object') {
+          delete row.raw_json;
+          if (row.error_message != null) row.error_message = _redactPublicError(row.error_message, 2048);
+        }
+        return row;
+      };
+      if (detail.node) stripRaw(detail.node);
+      if (Array.isArray(detail.history)) detail.history.forEach(stripRaw);
+      if (Array.isArray(detail.errors))  detail.errors.forEach(stripErr);
+    }
     res.json(detail);
   } catch (err) {
     console.error('[api/public/node]', err);
@@ -1356,6 +1377,20 @@ app.get('/api/public/node/:addr/errors', attachAdminFlag, rlPublicRead, (req, re
     const limit  = Math.min(parseInt(req.query.limit || '50', 10) || 50, 500);
     const stage  = req.query.stage || null;
     const errors = getNodeErrors(addr, { limit, stage });
+    // For anonymous visitors: strip raw_json (operator-internal diag payload)
+    // and redact bech32 addresses from error_message (stored verbatim at write
+    // time, so it can carry wallet/granter addresses from RPC rawLogs).
+    // log_snippet stays — it is already address-sanitized and required by the
+    // Failure-Log UX. Authenticated admins (req.admin) see the unredacted rows;
+    // the admin failure drawer parses raw_json from this endpoint.
+    if (!req.admin && Array.isArray(errors)) {
+      for (const row of errors) {
+        if (row && typeof row === 'object') {
+          delete row.raw_json;
+          if (row.error_message != null) row.error_message = _redactPublicError(row.error_message, 2048);
+        }
+      }
+    }
     res.json({ node_addr: addr, total: errors.length, errors });
   } catch (err) {
     console.error('[api/public/node/errors]', err);
@@ -1811,6 +1846,17 @@ const PUBLIC_EVENT_WHITELIST = new Set([
   'progress',
 ]);
 
+// Redact bech32 wallet/granter addresses (sent1…/sentnode1…/sentpub1…/
+// sentvaloper1…) from any error/log string before it reaches a public surface.
+// Mirrors audit/pipeline.js _sanitizeSnippet's address scrub, which is not in
+// scope here. Raw thrown-error / RPC rawLog text can otherwise carry the
+// tester's wallet or a plan owner's granter address.
+const _PUBLIC_ADDR_RE = /\b(sent|sentnode|sentpub|sentvaloper)1[a-z0-9]{6,}\b/gi;
+function _redactPublicError(v, max = 200) {
+  if (v == null) return null;
+  return String(v).replace(_PUBLIC_ADDR_RE, '[addr]').slice(0, max);
+}
+
 // Keep only the counters / progress fields a public viewer needs.
 // Strips wallet, balance*, spent*, MNEMONIC-derived data, errorMessage internals.
 const PUBLIC_STATE_KEYS = [
@@ -1864,7 +1910,7 @@ function sanitizePublicResult(r) {
     peers: r.peers,
     maxPeers: r.maxPeers,
     errorCode: r.errorCode,
-    error: r.error ? String(r.error).slice(0, 200) : null,
+    error: r.error ? _redactPublicError(r.error) : null,
     skipped: r.skipped === true ? true : undefined,
     inPlan: r.inPlan === true ? true : undefined,
     testedAt: r.testedAt,
@@ -1889,7 +1935,7 @@ function sanitizeForPublic(evt) {
   if (evt.passed != null)      safe.passed      = evt.passed;
   if (evt.failed != null)      safe.failed      = evt.failed;
   if (evt.durationMs != null)  safe.durationMs  = evt.durationMs;
-  if (evt.error != null)       safe.error       = String(evt.error).slice(0, 200);
+  if (evt.error != null)       safe.error       = _redactPublicError(evt.error);
   // batch:* event fields — only public-safe node-level data
   if (evt.batchId != null)      safe.batchId      = evt.batchId;
   if (evt.snapshotSize != null) safe.snapshotSize = evt.snapshotSize;
