@@ -1527,6 +1527,7 @@
               <th style="width:110px">Recent uptime</th>
               <th style="width:70px">Speed over time</th>
               <th style="width:40px;text-align:center">Log</th>
+              <th style="width:24px" aria-hidden="true"></th>
             </tr>
           </thead>
           <tbody id="nodesBody">
@@ -1649,6 +1650,17 @@
       if (v >= 20) return 'speed-fast';
       if (v >= 5)  return 'speed-medium';
       return 'speed-slow';
+    }
+
+    // Single source of truth for transport classification. An unresolved
+    // transport (null/undefined) is { isV2:false, isWg:false, known:false } and
+    // MUST render a neutral placeholder — never default-label as WireGuard.
+    // Used by the table renderer, the type filter, and the detail drawer.
+    function classifyTransport(st) {
+      const s = String(st).toUpperCase();
+      const isV2 = st === 2 || s === 'V2RAY' || s.includes('V2');
+      const isWg = !isV2 && (st === 1 || s === 'WIREGUARD' || s.includes('WIRE'));
+      return { isV2, isWg, known: isV2 || isWg };
     }
 
     function fmtRelative(ts) {
@@ -1826,7 +1838,10 @@
         moniker:            n.moniker || '',
         country:            n.country || '',
         city:               n.city || '',
-        service_type:       n.service_type ?? n.serviceType ?? n.type ?? 1,
+        // Pass transport through as-is (null/undefined when unresolved) — do
+        // NOT default to 1/WireGuard. An unknown transport must render neutral,
+        // not be mislabeled as WireGuard. Mirrors live.html's null handling.
+        service_type:       n.service_type ?? n.serviceType ?? n.type ?? null,
         latest_mbps:        n.latest_mbps ?? n.latestMbps ?? n.actualMbps ?? null,
         handshake_ok:       n.handshake_ok ?? n.handshakeOk ?? null,
         last_tested_at:     n.latest_tested_at || n.last_tested_at || n.lastTested || n.lastTestedAt || null,
@@ -2062,9 +2077,10 @@
         }
         if (countryFilter && n.country !== countryFilter) return false;
         if (tf) {
-          const isWg = n.service_type !== 2 && String(n.service_type).toUpperCase() !== 'V2RAY';
+          // Unknown transport matches neither filter — it has no badge to match.
+          const { isV2, isWg } = classifyTransport(n.service_type);
           if (tf === 'wg' && !isWg) return false;
-          if (tf === 'v2' &&  isWg) return false;
+          if (tf === 'v2' && !isV2) return false;
         }
         return true;
       });
@@ -2117,8 +2133,13 @@
 
       page.forEach((n, i) => {
         const idx    = currentOffset + i + 1;
-        const isWg   = n.service_type !== 2 && String(n.service_type).toUpperCase() !== 'V2RAY';
-        const proto  = `<span class="badge badge-svc">${isWg ? 'WG' : 'V2'}</span>`;
+        // Classify transport explicitly. An unresolved transport (null/undefined)
+        // must render a neutral placeholder — never default-label as WireGuard.
+        // Mirrors live.html's hasKnownType handling.
+        const { isV2, isWg, known } = classifyTransport(n.service_type);
+        const proto  = known
+          ? `<span class="badge badge-svc">${isWg ? 'WG' : 'V2'}</span>`
+          : '<span style="color:var(--text-muted);font-size:11px">—</span>';
         const fl     = flag(n.country);
         const ctry   = `${fl}${escHtml(n.country || '—')}`;
         const moniker = escHtml(n.moniker || (n.address ? n.address.slice(0, 10) + '…' : '—'));
@@ -2268,18 +2289,38 @@
       const overlay = document.createElement('div');
       overlay.id = 'errorPopupOverlay';
       overlay.style.cssText = 'position:fixed;inset:0;background:var(--glass-bg);backdrop-filter:blur(8px);z-index:9999;display:flex;align-items:center;justify-content:center;';
-      overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+      // Scoped Escape handler — this popup sits OVER the detail drawer
+      // (z-index 9999 vs 8000). Escape must close the TOP-most layer only, so
+      // this handler stopImmediatePropagation()s (preventing the document-level
+      // drawer Escape from also firing) and removes ONLY the popup. The handler
+      // removes itself on every close path. The drawer's Escape handler also
+      // bails early while #errorPopupOverlay exists, for defense-in-depth.
+      const closeErrorPopup = () => {
+        document.removeEventListener('keydown', onPopupKeydown, true);
+        overlay.remove();
+      };
+      function onPopupKeydown(e) {
+        if (e.key === 'Escape' || e.key === 'Esc') {
+          e.stopImmediatePropagation();
+          e.preventDefault();
+          closeErrorPopup();
+        }
+      }
+      document.addEventListener('keydown', onPopupKeydown, true);
+      overlay.onclick = (e) => { if (e.target === overlay) closeErrorPopup(); };
       const popup = document.createElement('div');
       popup.style.cssText = 'background:var(--bg-card-solid);border:1px solid var(--border);border-radius:16px;padding:24px 28px;max-width:780px;width:92%;max-height:85vh;overflow-y:auto;color:var(--text);font-family:var(--font-display);line-height:1.55';
       popup.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
           <h2 style="font-size:18px;font-weight:700;letter-spacing:1px;margin:0">Node Error Details</h2>
-          <span onclick="document.getElementById('errorPopupOverlay').remove()" style="cursor:pointer;color:var(--text-dim);font-size:22px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:50%">&times;</span>
+          <span id="errorPopupCloseX" style="cursor:pointer;color:var(--text-dim);font-size:22px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:50%">&times;</span>
         </div>
         <div id="errorPopupBody" style="font-size:13px;color:var(--text-dim)">Loading…</div>
       `;
       overlay.appendChild(popup);
       document.body.appendChild(overlay);
+      const xBtn = document.getElementById('errorPopupCloseX');
+      if (xBtn) xBtn.onclick = closeErrorPopup;
 
       try {
         const res = await fetch('/api/public/node/' + encodeURIComponent(addr) + '/errors?limit=1');
@@ -2313,9 +2354,11 @@
               <pre style="background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:10px 12px;color:var(--text);font-family:var(--font-mono);font-size:11.5px;line-height:1.5;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0">${eh(er.log_snippet)}</pre>
             </div>` : ''}
           <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
-            <button onclick="document.getElementById('errorPopupOverlay').remove()" class="row-copy-btn" style="padding:6px 14px">Close</button>
+            <button id="errorPopupCloseBtn" class="row-copy-btn" style="padding:6px 14px">Close</button>
           </div>
         `;
+        const closeBtn = document.getElementById('errorPopupCloseBtn');
+        if (closeBtn) closeBtn.onclick = closeErrorPopup;
       } catch (err) {
         const body = document.getElementById('errorPopupBody');
         if (body) body.innerHTML = '<div style="color:var(--red)">Failed to load: ' + eh(err.message || 'unknown') + '</div>';
@@ -2330,7 +2373,7 @@
         tr.classList.toggle('selected', tr.dataset.addr === node.address);
       });
 
-      const isWg  = node.service_type !== 2 && String(node.service_type).toUpperCase() !== 'V2RAY';
+      const svc = classifyTransport(node.service_type);
       document.getElementById('dTitle').textContent    = node.moniker || node.address;
       document.getElementById('dSubtitle').textContent = [node.country, node.city].filter(Boolean).join(' · ') || node.address;
       document.getElementById('dAddr').textContent     = node.address;
@@ -2350,7 +2393,7 @@
         </div>
         <div class="meta-cell">
           <div class="meta-label">Service</div>
-          <div class="meta-value">${isWg ? 'WireGuard' : 'V2Ray'}</div>
+          <div class="meta-value">${svc.known ? (svc.isWg ? 'WireGuard' : 'V2Ray') : '—'}</div>
         </div>
         <div class="meta-cell">
           <div class="meta-label">Adv. Speed</div>
@@ -2627,7 +2670,15 @@
     // ─── Drawer close ───
     document.getElementById('drawerClose').addEventListener('click', closeDrawer);
     document.getElementById('overlay').addEventListener('click', closeDrawer);
-    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDrawer(); });
+    document.addEventListener('keydown', e => {
+      if (e.key !== 'Escape') return;
+      // If the failure popup is open OVER the drawer, its own scoped handler
+      // (capture phase, stopImmediatePropagation) closes it and this never
+      // fires. This guard is a belt-and-suspenders fallback so Escape never
+      // closes the drawer underneath an open popup and orphans it.
+      if (document.getElementById('errorPopupOverlay')) return;
+      closeDrawer();
+    });
 
     // ─── Search (debounced) ───
     document.getElementById('searchInput').addEventListener('input', () => {
@@ -2921,7 +2972,7 @@
           moniker:        n.moniker || '',
           country:        n.country || '',
           city:           n.city || '',
-          service_type:   n.type ?? n.service_type ?? 1,
+          service_type:   n.type ?? n.service_type ?? null,
           latest_mbps:    n.actual_mbps ?? null,
           handshake_ok:   n.actual_mbps > 0 ? true : (n.error ? false : null),
           last_tested_at: n.tested_at || null,
@@ -3042,7 +3093,7 @@
               moniker,
               country:        d.country || '',
               city:           d.city    || '',
-              service_type:   d.serviceType ?? d.service_type ?? 1,
+              service_type:   d.serviceType ?? d.service_type ?? null,
               latest_mbps:    mbps,
               handshake_ok:   (d.skipped || err === 'TEST_RUN_SKIP') ? null
                               : (mbps > 0 ? true : (err ? false : null)),

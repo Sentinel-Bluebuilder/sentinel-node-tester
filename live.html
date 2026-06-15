@@ -1844,7 +1844,10 @@
       if (!isRunLive()) return;
       const etaEl = document.getElementById('cbEta');
       if (!etaEl) return;
-      const snap = _cb.snapshotSize;
+      // Use the same run-total source cbRender() uses (prefers
+      // _liveState.totalNodes, falls back to _cb.snapshotSize) so the ticker
+      // and the rendered progress don't diverge on resume → no per-second flicker.
+      const snap = runTotalNodes();
       const tested = (Array.isArray(resultsArr) && resultsArr.length > 0) ? resultsArr.length : _cb.tested;
       const remaining = snap > 0 ? snap - tested : 0;
       const startedAt = _cb.startedAt ? new Date(_cb.startedAt).getTime() : 0;
@@ -2087,7 +2090,9 @@
         _cb.batchId = null;
         _cb.tested = 0;
         _cb.passed = 0;
+        _cb.slow = 0;
         _cb.failed = 0;
+        _cb.skipped = 0;
         _cb.snapshotSize = 0;
         // Drop the prior run's sweep total too: runTotalNodes() now prefers
         // _liveState.totalNodes, so leaving it set would carry the old "Y" into
@@ -2395,7 +2400,11 @@
         case 'progress': {
           // Numeric checkpoints from the pipeline (testedNodes, etc.).
           // Treat as a partial state update so counters/header refresh.
-          mergeLiveState(d);
+          // Server forwards { type:'progress', state:{…} } — merge d.state
+          // (not d) so type/state don't pollute _liveState and totalNodes/
+          // testedNodes/activeRunNumber actually lift. Fall back to d for any
+          // legacy flat-payload emitter.
+          mergeLiveState(d.state || d);
           break;
         }
         default: break;
@@ -2601,19 +2610,36 @@
 
       const overlay = document.createElement('div');
       overlay.id = 'errorPopupOverlay';
-      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.35);z-index:9999;display:flex;align-items:center;justify-content:center;';
-      overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+      overlay.style.cssText = 'position:fixed;inset:0;background:var(--glass-bg);backdrop-filter:blur(8px);z-index:9999;display:flex;align-items:center;justify-content:center;';
+      // Scoped Escape handler — closes ONLY this popup (top-most layer) and
+      // removes itself on close. stopImmediatePropagation so it can't bubble
+      // to any lower-layer Escape handler and double-close.
+      const closeErrorPopup = () => {
+        document.removeEventListener('keydown', onPopupKeydown, true);
+        overlay.remove();
+      };
+      function onPopupKeydown(e) {
+        if (e.key === 'Escape' || e.key === 'Esc') {
+          e.stopImmediatePropagation();
+          e.preventDefault();
+          closeErrorPopup();
+        }
+      }
+      document.addEventListener('keydown', onPopupKeydown, true);
+      overlay.onclick = (e) => { if (e.target === overlay) closeErrorPopup(); };
       const popup = document.createElement('div');
       popup.style.cssText = 'background:var(--bg-card-solid);border:1px solid var(--border);border-radius:16px;padding:24px 28px;max-width:780px;width:92%;max-height:85vh;overflow-y:auto;color:var(--text);font-family:var(--font-display);line-height:1.55';
       popup.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
           <h2 style="font-size:18px;font-weight:700;letter-spacing:1px;margin:0">Node Error Details</h2>
-          <span onclick="document.getElementById('errorPopupOverlay').remove()" style="cursor:pointer;color:var(--text-dim);font-size:22px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:50%">&times;</span>
+          <span id="errorPopupCloseX" style="cursor:pointer;color:var(--text-dim);font-size:22px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:50%">&times;</span>
         </div>
         <div id="errorPopupBody" style="font-size:13px;color:var(--text-dim)">Loading…</div>
       `;
       overlay.appendChild(popup);
       document.body.appendChild(overlay);
+      const xBtn = document.getElementById('errorPopupCloseX');
+      if (xBtn) xBtn.onclick = closeErrorPopup;
 
       try {
         const res = await fetch('/api/public/node/' + encodeURIComponent(addr) + '/errors?limit=1', { credentials: 'same-origin' });
@@ -2733,9 +2759,11 @@
 
           <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">
             <button id="errorPopupCopyBtn" class="row-copy-btn" style="padding:6px 14px">⎘ Copy Full Report</button>
-            <button onclick="document.getElementById('errorPopupOverlay').remove()" class="row-copy-btn" style="padding:6px 14px">Close</button>
+            <button id="errorPopupCloseBtn" class="row-copy-btn" style="padding:6px 14px">Close</button>
           </div>
         `;
+        const closeBtn = document.getElementById('errorPopupCloseBtn');
+        if (closeBtn) closeBtn.onclick = closeErrorPopup;
         const copyBtn = document.getElementById('errorPopupCopyBtn');
         if (copyBtn) {
           copyBtn.onclick = async () => {
