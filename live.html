@@ -1740,11 +1740,13 @@
           const s = Math.floor((rem % 60000) / 1000);
           etaEl.textContent = `ETA ${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
         } else if (_liveState && _liveState.status === 'running'
-                   && (!Number.isFinite(Number(_liveState.totalNodes)) || Number(_liveState.totalNodes) <= 0)) {
-          // Running but no testable population yet → still in the Phase-2 online
-          // scan (totalNodes is only set post-scan, pipeline.js ~line 802). ETA is
-          // genuinely incomputable (no completions to measure), so show "Scanning…"
-          // rather than a frozen-looking "ETA —". Parity with admin.html updateETA.
+                   && (_liveState.scanning || !Number.isFinite(Number(_liveState.totalNodes)) || Number(_liveState.totalNodes) <= 0)) {
+          // Still in the Phase-2 online scan → ETA genuinely incomputable (no
+          // completions to measure yet). _liveState.scanning is the reliable
+          // signal: on a RESUME totalNodes is a restored positive value, so the
+          // totalNodes<=0 check alone misses it (it still catches the fresh-run
+          // pre-scan window where totalNodes is 0). Show "Scanning…" rather than a
+          // frozen-looking "ETA —". Parity with admin.html updateETA.
           etaEl.textContent = 'ETA Scanning…';
         } else {
           etaEl.textContent = 'ETA —';

@@ -1515,11 +1515,13 @@
         const rem = Math.max(0, _etaAnchor.remainingMs - (Date.now() - _etaAnchor.at));
         const h = Math.floor(rem / 3600000), m = Math.floor((rem % 3600000) / 60000), s = Math.floor((rem % 60000) / 1000);
         el.textContent = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
-      } else if (!Number.isFinite(state.totalNodes) || state.totalNodes <= 0) {
-        // No testable population established yet → we're still in the Phase-2
-        // online scan (totalNodes is only set post-scan, pipeline.js ~line 802).
-        // ETA is genuinely incomputable here (no completions to measure), so say
-        // "Scanning…" rather than "Calculating…" so it doesn't read as frozen.
+      } else if (state.scanning || !Number.isFinite(state.totalNodes) || state.totalNodes <= 0) {
+        // Still in the Phase-2 online scan → ETA is genuinely incomputable (no
+        // node-test completions to measure yet). state.scanning is the reliable
+        // signal: on a RESUME, totalNodes is a restored positive value, so the
+        // totalNodes<=0 check alone misses it (that check still catches the
+        // fresh-run pre-scan window where totalNodes is 0). Show "Scanning…"
+        // rather than a frozen-looking "Calculating…".
         el.textContent = 'Scanning…';
       } else {
         // Population known but <2 fresh completions in the ETA window → a real

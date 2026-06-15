@@ -572,6 +572,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   resetPipelineStop();
   refreshAuditSettings();
   state.status = 'running';
+  state.scanning = false; // set true only across the Phase-2 online scan (below)
   // Preserve the original startedAt across Stop/Resume so the dashboard's
   // "started at" / ETA / elapsed-time mirror the original run exactly.
   // Only stamp a fresh time on a brand-new run.
@@ -759,11 +760,25 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   }
   const nodesToTest = MAX_NODES > 0 ? allNodes.slice(0, MAX_NODES) : allNodes;
   broadcast('log', { msg: `Fetched ${nodesToTest.length} nodes total.` });
+  // Phase-2 scan flag: the ETA is genuinely incomputable during the parallel
+  // online scan (no node-test completions to measure yet), and on RESUME
+  // totalNodes is a restored positive value — so the client can't infer "we're
+  // scanning" from totalNodes<=0 alone. This explicit flag rides the pre-scan
+  // frame below; the dashboards show "Scanning…" while it's true instead of a
+  // frozen-looking "Calculating…". Cleared the instant the scan returns.
+  state.scanning = true;
   broadcast('state', { state });
 
   // ── Phase 2: Parallel online scan ──
   broadcast('log', { msg: `🔍 Phase 2: Scanning ${nodesToTest.length} nodes in parallel (30 concurrent)...` });
-  const onlineNodes = await scanNodesParallel(nodesToTest, 30, broadcast, state);
+  // try/finally so a scan throw can't leave state.scanning stuck true (which
+  // would freeze the dashboards on "Scanning…" for the rest of the process).
+  let onlineNodes;
+  try {
+    onlineNodes = await scanNodesParallel(nodesToTest, 30, broadcast, state);
+  } finally {
+    state.scanning = false;
+  }
   broadcast('log', { msg: `Scan complete: ${onlineNodes.length}/${nodesToTest.length} online.` });
 
   const _isHours = state.pricingMode === 'hours';

@@ -12,7 +12,7 @@
  *   - sanitizePublicResult keeps every consumed field and drops the 6 removed
  *     ones (advertisedMbps, dynamicThreshold, pass10mbps, latencyMs,
  *     handshakeMs, sessionMs).
- *   - PUBLIC_STATE_KEYS is exactly the 11 kept keys, none of the 14 removed.
+ *   - PUBLIC_STATE_KEYS is exactly the 12 kept keys, none of the 14 removed.
  *   - sanitizeForPublic drops top-level mode + durationMs, keeps the rest.
  * Each removed field is asserted absent as a regression guard so a future
  * re-add fails the suite.
@@ -111,7 +111,7 @@ const REMOVED_RESULT_FIELDS = [
   'latencyMs', 'handshakeMs', 'sessionMs',
 ];
 const KEPT_STATE_KEYS = [
-  'status', 'totalNodes', 'etaRemainingMs', 'baselineMbps', 'baselineHistory',
+  'status', 'scanning', 'totalNodes', 'etaRemainingMs', 'baselineMbps', 'baselineHistory',
   'testRun', 'runMode', 'runPlanId', 'pricingMode', 'activeSDK',
   'activeRunNumber',
 ];
@@ -171,7 +171,7 @@ console.log('[1b] serviceType uses r.type ?? r.serviceType (fallback + nullish)'
 }
 
 // ─── 2. PUBLIC_STATE_KEYS ─────────────────────────────────────────────────────
-console.log('[2] PUBLIC_STATE_KEYS is exactly the 11 consumed keys');
+console.log('[2] PUBLIC_STATE_KEYS is exactly the 12 consumed keys');
 {
   const keys = vm.runInContext('PUBLIC_STATE_KEYS', sandbox);
   ok(Array.isArray(keys), 'PUBLIC_STATE_KEYS is an array');

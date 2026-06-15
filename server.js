@@ -2018,6 +2018,7 @@ function _redactPublicError(v, max = 200) {
 //     matches admin.html without being distorted by client clock skew.
 const PUBLIC_STATE_KEYS = [
   'status',
+  'scanning',
   'totalNodes',
   'etaRemainingMs',
   'baselineMbps',
