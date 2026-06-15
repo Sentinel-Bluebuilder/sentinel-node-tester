@@ -123,7 +123,7 @@ async function waitForInternet(broadcast, state) {
   state.status = 'paused_internet';
   state.pauseReason = 'Internet down — checking with backoff';
   broadcast('state', { state });
-  broadcast('log', { msg: `\n🌐 Internet appears down. Pausing audit...` });
+  broadcast('log', { msg: `🌐 Internet appears down. Pausing audit...` });
 
   const BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 600_000, INTERNET_POLL_MS];
   let attempt = 0;
@@ -754,7 +754,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   broadcast('state', { state });
 
   // ── Phase 2: Parallel online scan ──
-  broadcast('log', { msg: `\n🔍 Phase 2: Scanning ${nodesToTest.length} nodes in parallel (30 concurrent)...` });
+  broadcast('log', { msg: `🔍 Phase 2: Scanning ${nodesToTest.length} nodes in parallel (30 concurrent)...` });
   const onlineNodes = await scanNodesParallel(nodesToTest, 30, broadcast, state);
   broadcast('log', { msg: `Scan complete: ${onlineNodes.length}/${nodesToTest.length} online.` });
 
@@ -809,7 +809,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   for (let i = 0; i < viableNodes.length; i += BATCH_SIZE) {
     batches.push(viableNodes.slice(i, i + BATCH_SIZE));
   }
-  broadcast('log', { msg: `\n💳 Phase 3: ${batches.length} payment batches × ${BATCH_SIZE} nodes.` });
+  broadcast('log', { msg: `💳 Phase 3: ${batches.length} payment batches × ${BATCH_SIZE} nodes.` });
 
   let _lastBalanceRefresh = Date.now();
   const BALANCE_REFRESH_INTERVAL = 5 * 60_000; // Refresh real balance every 5 minutes
@@ -839,7 +839,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
       batchSessionMap = new Map();
     } else {
       try {
-        broadcast('log', { msg: `\n💳 Batch ${b + 1}/${batches.length} (${batch.length} nodes) — paying...` });
+        broadcast('log', { msg: `💳 Batch ${b + 1}/${batches.length} (${batch.length} nodes) — paying...` });
         batchSessionMap = await submitBatchPayment(client, account, DENOM, GIGS, batch, state, broadcast);
       } catch (payErr) {
         // Insufficient funds from chain — pause instead of failing
@@ -1121,7 +1121,7 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
   // ─── Auto-retest internet-failure nodes ─────────────────────────────────
   const internetFailAddrs = state._internetFailAddrs;
   if (internetFailAddrs && internetFailAddrs.size > 0 && !state.stopRequested) {
-    broadcast('log', { msg: `\n🌐 Retesting ${internetFailAddrs.size} nodes that failed during internet outage...` });
+    broadcast('log', { msg: `🌐 Retesting ${internetFailAddrs.size} nodes that failed during internet outage...` });
     state.retestMode = true;
     clearPoisonedSessions();
     // Do NOT clearPaidNodes() here — these nodes were paid in the main pass and
