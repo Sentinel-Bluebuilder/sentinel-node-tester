@@ -440,6 +440,26 @@ function runMigrations(db) {
     db.prepare('UPDATE schema_version SET version = 10').run();
     })();
   }
+
+  if (current < 11) {
+    db.transaction(() => {
+    // ── Migration v11: cap error_logs.log_snippet at 16 KB ──────────────────
+    // The inline log_snippet column historically stored up to 512 KB per
+    // failure, bloating audit.db. The full log already lives on disk in the
+    // per-run audit-*.log file, so the DB only needs a readable snippet for
+    // the copy-failure UX. Going forward insertErrorLog() caps at 16384 chars
+    // from the tail; this migration truncates any legacy oversized rows to
+    // match. substr(s, length(s) - 16384 + 1) keeps the LAST 16384 chars,
+    // mirroring the `.slice(-16384)` tail semantics. Bounded fast UPDATE —
+    // safe on the boot path (no file I/O here).
+    db.prepare(`
+      UPDATE error_logs
+         SET log_snippet = substr(log_snippet, length(log_snippet) - 16384 + 1)
+       WHERE log_snippet IS NOT NULL AND length(log_snippet) > 16384
+    `).run();
+    db.prepare('UPDATE schema_version SET version = 11').run();
+    })();
+  }
 }
 
 // ─── Run Mutations ───────────────────────────────────────────────────────────
@@ -906,7 +926,7 @@ export function getRunStats(runId, which) {
  * @param {string}  opts.stage       - 'handshake'|'session'|'speedtest'|'wallet'|'rpc'|'other'
  * @param {string}  [opts.error_code]
  * @param {string}  [opts.error_message]
- * @param {string}  [opts.log_snippet] - up to 512 KB of log context
+ * @param {string}  [opts.log_snippet] - a readable snippet of log context (capped at 16 KB)
  * @returns {number} inserted id
  */
 export function insertErrorLog({
@@ -917,10 +937,14 @@ export function insertErrorLog({
   log_snippet = null,
 }, which) {
   const db = getDb(which);
-  // Persist the full per-node tester log (capped at 512 KB to bound row
-  // size). Pipeline already trims to ~512 KB from the tail; this is the
-  // floor cap so a misbehaving caller can't blow the row.
-  const snippet = log_snippet ? log_snippet.slice(-524288) : null;
+  // Store only a readable snippet of the per-node tester log (capped at 16 KB
+  // = 16384 chars from the tail). The FULL log is persisted to disk in the
+  // per-run audit-*.log file; the DB column exists purely to power the
+  // copy-failure UX, so a bounded tail is all we need. Production callers
+  // already pre-truncate to ~4 KB via pipeline.js (_sanitizeSnippet /
+  // _MAX_SNIPPET); this slice is the backstop so a misbehaving caller can't
+  // blow up the row and bloat audit.db.
+  const snippet = log_snippet ? log_snippet.slice(-16384) : null;
   const info = db.prepare(`
     INSERT INTO error_logs (result_id, stage, error_code, error_message, log_snippet, captured_at)
     VALUES (@result_id, @stage, @error_code, @error_message, @log_snippet, @captured_at)

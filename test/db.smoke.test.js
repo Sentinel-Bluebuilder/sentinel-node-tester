@@ -8,7 +8,7 @@
 
 import { getDb, useDb, insertRun, updateRunOnFinish, insertResult, insertResultsBatch,
   getRun, findRunByKey, listRuns, getLatestResultPerNode,
-  getNodeHistory, getNetworkStats, closeDb } from '../core/db.js';
+  getNodeHistory, getNetworkStats, insertErrorLog, getNodeErrors, closeDb } from '../core/db.js';
 
 // ─── Use a fresh in-memory DB for this test run ───────────────────────────────
 // `useDb` sets the module singleton so all exported helpers target this handle.
@@ -181,6 +181,31 @@ assert(history2.length >= 1, 'node has history');
 const parsed = JSON.parse(history2[0].raw_json);
 eq(parsed.address, 'sentnode1aaa111', 'raw_json.address preserved');
 eq(parsed.moniker, 'TestNode Alpha', 'raw_json.moniker preserved');
+
+// 12. schema_version is up to date (latest forward migration applied)
+console.log('12. schema_version...');
+const schemaRow = db.prepare('SELECT MAX(version) AS version FROM schema_version').get();
+eq(schemaRow.version, 11, 'freshly-opened DB reports schema_version 11');
+
+// 13. error_logs.log_snippet is capped at 16 KB (16384 chars)
+console.log('13. error_logs log_snippet cap...');
+// Insert a fresh failed result so we have a result_id, then attach an
+// oversized log snippet. insertErrorLog must clamp it to the 16 KB backstop.
+const capRunId = insertRun({ started_at: NOW - 5_000, mode: 'p2p' });
+const capResultId = Number(insertResult(Number(capRunId), { ...SAMPLE_FAIL, address: 'sentnode1cap999' }));
+insertErrorLog({
+  result_id: capResultId,
+  stage: 'handshake',
+  error_code: 'HANDSHAKE_TIMEOUT',
+  error_message: 'oversized snippet stress',
+  log_snippet: 'x'.repeat(50000),
+});
+const capErrors = getNodeErrors('sentnode1cap999', { limit: 1 });
+assert(capErrors.length >= 1, 'getNodeErrors returns the inserted error log');
+assert(
+  capErrors[0].log_snippet != null && capErrors[0].log_snippet.length <= 16384,
+  `log_snippet capped at <= 16384 chars (got ${capErrors[0].log_snippet?.length})`,
+);
 
 // ─── Results ──────────────────────────────────────────────────────────────────
 
