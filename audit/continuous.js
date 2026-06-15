@@ -632,6 +632,20 @@ async function _runLoop() {
             passed,
             failed,
           }, 'real');
+
+          // Bound batch_results growth: every iteration re-tests every node and
+          // writes a full row set, so the table grows unbounded without pruning.
+          // This is the safe spot — the just-finished batch is now the
+          // last-finished (kept), and the next iteration's batch hasn't started,
+          // so nothing in-flight is at risk. Pruning is housekeeping: a failure
+          // must NOT abort the audit, so it gets its own try/catch.
+          try {
+            const { pruneBatchResults } = await import('../core/db.js');
+            const { DEFAULT_BATCH_RETENTION } = await import('../core/constants.js');
+            pruneBatchResults({ keepBatches: DEFAULT_BATCH_RETENTION }, 'real');
+          } catch (e) {
+            console.error('[continuous] batch_results prune failed:', e.message);
+          }
         } catch (dbErr) {
           console.error(`[continuous] updateBatchOnFinish failed: ${dbErr.message}`);
         }

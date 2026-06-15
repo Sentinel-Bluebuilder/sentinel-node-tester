@@ -12,7 +12,7 @@ import path from 'path';
 import { mkdirSync, existsSync, writeFileSync, readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { countryToContinent } from './countries.js';
-import { RAW_DIR } from './constants.js';
+import { RAW_DIR, DEFAULT_BATCH_RETENTION } from './constants.js';
 
 // ─── Raw-JSON file offload ───────────────────────────────────────────────────
 // The full JSON.stringify(result) blob is no longer stored inline in the
@@ -1636,6 +1636,89 @@ export function getLastBatch(which) {
     ORDER BY tested_at ASC
   `).all({ batch_id: batch.id });
   return { batch, nodes };
+}
+
+/**
+ * Prune old batch_results (and their now-empty parent `batches` rows) so the
+ * table stays bounded under continuous-loop mode, where every iteration
+ * re-tests every node and writes a full set of rows.
+ *
+ * KEEP-SET RATIONALE — three readers must never lose their data:
+ *   (a) the ACTIVE batch (finished_at IS NULL): the continuous-loop resume path
+ *       re-seeds already-tested addresses from its batch_results (getActiveBatch
+ *       + raw SELECTs in audit/continuous.js). Pruning it mid-flight would lose
+ *       the resume seed.
+ *   (b) the single most-recent FINISHED batch (getLastBatch): drives the /live
+ *       last-completed snapshot. Pruning it would blank /live between runs.
+ *   (c) the last K batches overall (by recency): preserves recent history for
+ *       the failure-log batch-fallback in getNodeErrors and operator review.
+ * The union of these three is the keep-set. Everything else is deleted.
+ *
+ * Children (batch_results) are deleted explicitly BEFORE parents (batches) to
+ * keep `PRAGMA foreign_key_check` clean, mirroring scripts/cleanup.mjs. An
+ * active/unfinished batch row is NEVER deleted from `batches` even if it somehow
+ * fell outside the recency window (the keep-set already includes it, but the
+ * `finished_at IS NOT NULL` guard on the parent delete is a second backstop).
+ *
+ * Pruning is housekeeping — it is NOT called on the insert hot path (that would
+ * risk the active batch). audit/continuous.js calls it once per iteration,
+ * immediately after the just-finished batch becomes the last-finished one.
+ *
+ * @param {{ keepBatches?: number }} [opts] - how many recent batches to retain
+ * @param {string} [which] - DB scope (back-compat); pass ':memory:' in tests
+ * @returns {{ deletedBatchResults: number, deletedBatches: number, keptBatches: number }}
+ */
+export function pruneBatchResults({ keepBatches = DEFAULT_BATCH_RETENTION } = {}, which) {
+  const db = getDb(which);
+  const keep = Math.max(1, Number(keepBatches) || DEFAULT_BATCH_RETENTION);
+
+  return db.transaction(() => {
+    // Build the keep-set of batch ids.
+    const keepIds = new Set();
+
+    // (c) last K batches overall, by recency. `batches` is ordered by
+    // started_at everywhere else (getActiveBatch / idx_batches_started_at).
+    for (const row of db.prepare(
+      'SELECT id FROM batches ORDER BY started_at DESC LIMIT @keep',
+    ).all({ keep })) {
+      keepIds.add(row.id);
+    }
+
+    // (a) the active batch (finished_at IS NULL).
+    const active = getActiveBatch(which);
+    if (active?.batch?.id != null) keepIds.add(active.batch.id);
+
+    // (b) the most-recent finished batch.
+    const last = getLastBatch(which);
+    if (last?.batch?.id != null) keepIds.add(last.batch.id);
+
+    const ids = [...keepIds];
+    // Guard: an empty keep-set would delete everything. `keep >= 1` plus the
+    // active/last lookups mean this is only empty when there are no batches at
+    // all — in which case both deletes below are no-ops anyway, but bail early.
+    if (ids.length === 0) {
+      return { deletedBatchResults: 0, deletedBatches: 0, keptBatches: 0 };
+    }
+
+    const placeholders = ids.map((_, i) => `@k${i}`).join(',');
+    const params = {};
+    ids.forEach((id, i) => { params[`k${i}`] = id; });
+
+    // Child delete first (batch_results), then parent (batches) — never delete
+    // an unfinished/active batch row.
+    const delResults = db.prepare(
+      `DELETE FROM batch_results WHERE batch_id NOT IN (${placeholders})`,
+    ).run(params);
+    const delBatches = db.prepare(
+      `DELETE FROM batches WHERE id NOT IN (${placeholders}) AND finished_at IS NOT NULL`,
+    ).run(params);
+
+    return {
+      deletedBatchResults: delResults.changes,
+      deletedBatches: delBatches.changes,
+      keptBatches: ids.length,
+    };
+  })();
 }
 
 // ─── Close ────────────────────────────────────────────────────────────────────

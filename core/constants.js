@@ -88,6 +88,14 @@ export const LCD_ENDPOINTS = [
 // ─── Batch Payment ───────────────────────────────────────────────────────────
 export const BATCH_SIZE = 5;
 
+// ─── batch_results Retention ──────────────────────────────────────────────────
+// In continuous-loop mode every iteration re-tests every node and writes a full
+// set of batch_results rows, so the table grows unbounded. pruneBatchResults()
+// (core/db.js) keeps only the last N finished+active batches. 200 batches of a
+// full-network sweep is ample history for the failure-log batch-fallback while
+// keeping the table bounded.
+export const DEFAULT_BATCH_RETENTION = 200;
+
 // ─── Cache TTLs ──────────────────────────────────────────────────────────────
 export const NODE_CACHE_TTL = 5 * 60_000;       // 5 min
 export const SESSION_MAP_TTL = 120_000;          // 2 min

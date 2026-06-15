@@ -8,7 +8,9 @@
 
 import { getDb, useDb, insertRun, updateRunOnFinish, insertResult, insertResultsBatch,
   getRun, findRunByKey, listRuns, getLatestResultPerNode,
-  getNodeHistory, getNetworkStats, insertErrorLog, getNodeErrors, closeDb } from '../core/db.js';
+  getNodeHistory, getNetworkStats, insertErrorLog, getNodeErrors, closeDb,
+  insertBatch, insertBatchResult, updateBatchOnFinish, getBatchResults,
+  getActiveBatch, getLastBatch, pruneBatchResults } from '../core/db.js';
 
 // ─── Use a fresh in-memory DB for this test run ───────────────────────────────
 // `useDb` sets the module singleton so all exported helpers target this handle.
@@ -206,6 +208,65 @@ assert(
   capErrors[0].log_snippet != null && capErrors[0].log_snippet.length <= 16384,
   `log_snippet capped at <= 16384 chars (got ${capErrors[0].log_snippet?.length})`,
 );
+
+// 14. pruneBatchResults — keep active + last-finished + last K batches
+console.log('14. pruneBatchResults retention...');
+// Build 6 batches with staggered started_at so recency is unambiguous.
+// b1..b5 are finished (oldest→newest); b6 is left ACTIVE (finished_at NULL)
+// but with the OLDEST started_at so it would fall outside a recency window —
+// proving the active-batch keep is independent of the last-K window.
+const KEEP = 3;
+const batchIds = [];
+for (let i = 0; i < 6; i++) {
+  const bid = Number(insertBatch({
+    started_at:    NOW + i * 1000, // b1 oldest .. b6 newest
+    snapshot_size: 1,
+    mode:          'p2p',
+  }));
+  batchIds.push(bid);
+  // One node result per batch, distinct address so we can verify survival.
+  insertBatchResult(bid, {
+    address:    `sentnode1batch${i}`,
+    actualMbps: 10 + i,
+    testedAt:   NOW + i * 1000,
+  });
+}
+const [b1, b2, b3, b4, b5, b6] = batchIds;
+// Finish b1..b5 (oldest→newest by finished_at). Leave b6 ACTIVE.
+[b1, b2, b3, b4, b5].forEach((bid, idx) => {
+  updateBatchOnFinish(bid, { finished_at: NOW + 10_000 + idx * 1000, passed: 1, failed: 0 });
+});
+// Make b6 ACTIVE but the OLDEST by started_at so it's outside the last-K window.
+db.prepare('UPDATE batches SET started_at = @ts, finished_at = NULL WHERE id = @id')
+  .run({ ts: NOW - 100_000, id: b6 });
+
+// Sanity: active = b6, last-finished = b5 (latest finished_at).
+eq(getActiveBatch().batch.id, b6, 'active batch is b6 (finished_at NULL)');
+eq(getLastBatch().batch.id, b5, 'last-finished batch is b5');
+
+const summary = pruneBatchResults({ keepBatches: KEEP });
+// keep-set: last-K by started_at (b5,b4,b3) ∪ active(b6) ∪ last-finished(b5) = {b3,b4,b5,b6}
+eq(summary.keptBatches, 4, 'keep-set size = last-K(3) ∪ active ∪ last-finished = 4');
+
+// (a) active batch rows survive
+eq(getBatchResults(b6).results.length, 1, 'active batch (b6) rows survive');
+// (b) most-recent finished batch rows survive
+eq(getBatchResults(b5).results.length, 1, 'last-finished batch (b5) rows survive');
+// (c) batches inside the last-K window survive
+eq(getBatchResults(b4).results.length, 1, 'recent batch (b4) rows survive');
+eq(getBatchResults(b3).results.length, 1, 'recent batch (b3) rows survive');
+// (d) old batches outside the keep-set are gone (rows AND parent batch row)
+eq(getBatchResults(b2).results.length, 0, 'old batch (b2) rows pruned');
+eq(getBatchResults(b1).results.length, 0, 'old batch (b1) rows pruned');
+assert(getBatchResults(b1).batch == null, 'old batch (b1) parent row deleted');
+assert(getBatchResults(b2).batch == null, 'old batch (b2) parent row deleted');
+// Two batches deleted (b1, b2), each with one batch_results row.
+eq(summary.deletedBatches, 2, 'deletedBatches = 2 (b1, b2)');
+eq(summary.deletedBatchResults, 2, 'deletedBatchResults = 2');
+// FK integrity intact after prune.
+assert(db.prepare('PRAGMA foreign_key_check').all().length === 0, 'foreign_key_check clean after prune');
+// Active batch never deleted as a parent even if outside window — already
+// asserted via b6 survival above.
 
 // ─── Results ──────────────────────────────────────────────────────────────────
 
