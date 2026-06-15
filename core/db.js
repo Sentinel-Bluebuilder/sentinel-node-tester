@@ -32,6 +32,12 @@ function rawJsonPath(run_id, result_id) {
  * (mirrors pipeline.js raw-write philosophy). Works for :memory: DBs too since
  * the path is independent of the DB backend.
  *
+ * NOTE: if this write fails, the row's raw_json column is already NULL and no
+ * file exists, so the full-diag blob for that result is unrecoverable — the
+ * admin drawer degrades to an empty diag block (it never errors). The audit
+ * log + results/runs/* JSON still capture the run, so this is an accepted
+ * tradeoff, but a logged write failure here means lost diag for that one row.
+ *
  * @param {number} run_id
  * @param {number|bigint} result_id
  * @param {string} json - the JSON.stringify(result) string
@@ -57,8 +63,14 @@ export function readRawJson(run_id, result_id) {
   if (run_id == null || result_id == null) return null;
   try {
     return readFileSync(rawJsonPath(run_id, result_id), 'utf8');
-  } catch {
-    // ENOENT or any read error → no blob available.
+  } catch (e) {
+    // A missing file is the expected forward-safe case (column was NULL and the
+    // file was never written, or an old inline-blob row): stay silent — logging
+    // per row would be noisy. Any OTHER fault (permissions, EISDIR, corrupt
+    // read) is a real problem on a file that should exist — surface it.
+    if (e && e.code !== 'ENOENT') {
+      console.error('[db] raw_json file read failed:', e.message);
+    }
     return null;
   }
 }
