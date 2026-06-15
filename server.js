@@ -313,6 +313,20 @@ function publicLogBuffer() {
   return logBuffer.filter(e => classifyLogCategory(e.msg) === 'node');
 }
 
+// Is there an ACTIVE run worth showing to /live right now? Public live surfaces
+// (SSE init, /logs, /live-state) must return EMPTY work payloads when no run is
+// in flight — otherwise a paused/idle page (e.g. right after boot, when
+// logBuffer is hydrated from results/audit-*.log) ships the last run's log
+// backlog + results behind the "Testing Has Been Paused" overlay. The overlay
+// is opaque so it's not visible, but the page still LOADS that data — which is
+// exactly what we don't want. Gate the payload at the source instead.
+function publicRunActive() {
+  try { if (continuous.status()?.running) return true; } catch (e) { console.error('[publicRunActive] continuous.status failed:', e.message); }
+  try { if (getActiveBatch()) return true; } catch (e) { console.error('[publicRunActive] getActiveBatch failed:', e.message); }
+  const st = state && state.status;
+  return st === 'running' || (typeof st === 'string' && st.indexOf('paused') === 0);
+}
+
 // EVENTS persist to a file (separate from per-run runs/test-NNN/audit.log), with
 // a simple 1-file rotation at ~2MB so it can't grow unbounded.
 const EVENTS_LOG_FILE = path.join(__dirname, 'results', 'events.log');
@@ -2015,17 +2029,23 @@ app.get('/api/public/events', attachAdminFlag, rlPublicSse, (req, res) => {
   // operator-internal fields). Empty when broadcastLive is off (unless admin).
   const isAdminViewer = req.admin === true;
   const liveOn = !!state.broadcastLive || isAdminViewer;
+  // Only ship the live work payload (log backlog + per-node results) when a run
+  // is actually in flight. With broadcast on but idle (e.g. just-booted server
+  // with a hydrated logBuffer, or a finished run), /live must paint NOTHING
+  // behind the paused overlay — it should show the overlay only, not load data.
+  const workOn = liveOn && publicRunActive();
   const initState = liveOn ? sanitizePublicState(state) : {};
-  const initResults = liveOn ? getResults().map(sanitizePublicResult).filter(Boolean) : [];
+  const initResults = workOn ? getResults().map(sanitizePublicResult).filter(Boolean) : [];
   send({
     type: 'init',
     status: { running: s.running, iteration: s.iteration, mode: s.mode, startedAt: s.startedAt, uptime: s.uptime },
     batchId: activeBatchId,
     snapshotSize: activeSnapshotSize,
     batchMode: activeBatchMode,
-    // Persisted log backlog so /live shows full history on refresh, not a blank panel.
-    // logBuffer is populated from results/audit-*.log on server boot and updated live.
-    logs: liveOn ? publicLogBuffer() : [],
+    // Persisted log backlog so /live shows full history on refresh, not a blank
+    // panel — but ONLY during an active run. logBuffer is hydrated from
+    // results/audit-*.log on boot, so an idle page would otherwise leak it.
+    logs: workOn ? publicLogBuffer() : [],
     state: initState,
     results: initResults,
     // Report effective-live so the admin's own /live page flips into live mode
@@ -2063,6 +2083,9 @@ app.get('/api/public/logs', attachAdminFlag, rlPublicRead, (req, res) => {
   // toggling broadcast. Public visitors still gated by broadcastLive.
   const showLive = state.broadcastLive || req.admin === true;
   if (!showLive) return res.json({ logs: [], broadcastLive: false });
+  // No active run → no backlog. A paused/idle /live must stay blank behind the
+  // overlay, not replay the last run's log buffer.
+  if (!publicRunActive()) return res.json({ logs: [], broadcastLive: true });
   // Report effective-live so admin viewers get the live-mode UI on /live.
   res.json({ logs: publicLogBuffer(), broadcastLive: true });
 });
@@ -2095,11 +2118,14 @@ app.get('/api/public/live-state', attachAdminFlag, rlPublicRead, (req, res) => {
       activeSnapshotSize = ab.batch.snapshot_size;
     }
   } catch (_) {}
+  // Results only when a run is in flight — an idle page must seed an empty
+  // table behind the paused overlay, not the last run's rows.
+  const workOn = publicRunActive();
   res.json({
     // Report effective-live so admin viewers get the live-mode UI on /live.
     broadcastLive: true,
     state: sanitizePublicState(state),
-    results: getResults().map(sanitizePublicResult).filter(Boolean),
+    results: workOn ? getResults().map(sanitizePublicResult).filter(Boolean) : [],
     activeBatchId,
     snapshotSize: activeSnapshotSize,
   });

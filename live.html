@@ -436,7 +436,7 @@
     }
     .logs {
       flex: 1 1 auto; min-height: 0;
-      overflow-y: auto; padding: 12px;
+      overflow-y: auto; overflow-x: auto; padding: 12px;
       display: flex; flex-direction: column; gap: 4px;
       font-family: var(--font-mono); font-size: 11px;
     }
@@ -444,10 +444,11 @@
       padding: 5px 10px; background: var(--bg-input);
       border-radius: 4px; border-left: 2px solid var(--text-dim);
       color: var(--text); animation: slideIn 0.2s ease;
-      white-space: normal; overflow-wrap: anywhere;
-      display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px;
+      white-space: nowrap;
+      display: flex; align-items: baseline; gap: 8px;
       font-variant-numeric: tabular-nums;
       flex: 0 0 auto;
+      width: max-content; min-width: 100%;
     }
     .log-entry.log-ok  { border-left-color: var(--green); }
     .log-entry.log-err { border-left-color: var(--red); }
@@ -498,7 +499,7 @@
       color: var(--red); font-weight: 600;
       flex-shrink: 0;
     }
-    .log-entry .log-msg { color: var(--text); flex: 1 1 auto; min-width: 0; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+    .log-entry .log-msg { color: var(--text); flex: 0 0 auto; white-space: nowrap; }
     .log-entry .log-copy {
       margin-left: auto; flex-shrink: 0;
       background: transparent; border: 1px solid var(--border);
@@ -637,7 +638,7 @@
 
 <body class="boot-pending">
   <!-- Testing Paused overlay -->
-  <div class="paused-overlay" id="pausedOverlay" aria-hidden="true" role="status" aria-live="polite">
+  <div class="paused-overlay show" id="pausedOverlay" aria-hidden="false" role="status" aria-live="polite">
     <div class="paused-stack">
       <div class="paused-logo-wrap">
         <img src="/logo.jpg" alt="Sentinel" class="paused-logo">
@@ -932,19 +933,34 @@
       if (_liveResultsNext) _liveResultsNext.addEventListener('click', () => liveGoPage(1));
       const _liveSearchInput = document.getElementById('liveSearchInput');
       if (_liveSearchInput) _liveSearchInput.addEventListener('input', (e) => setLiveSearch(e.target.value));
-      // Resolve broadcast/run state BEFORE painting ANY data. When stopped
-      // (broadcast off) checkBroadcastState raises the opaque paused overlay
-      // immediately and we deliberately skip every paint path below — the page
-      // shows ONLY the overlay, never a flash of the last dataset behind it.
-      // When live we paint the cached snapshot, seed the real data, and show the
-      // work; the overlay never appears for an active run because
-      // applyPauseFromState stays gated until the authoritative status lands.
-      await checkBroadcastState();
-      if (_broadcastLive) {
-        // Cached snapshot first for an instant refresh, then authoritative REST.
+      // Decide the overlay SYNCHRONOUSLY from the last-known snapshot — BEFORE the
+      // async broadcast check — so the page never flashes the live shell while
+      // that fetch is in flight. The overlay ships SHOWN in the markup, so a
+      // stopped page stays fully covered from the very first paint. Only when the
+      // cached snapshot was an active run (operator refreshing mid-run) do we
+      // paint it and reveal the work up-front; the authoritative check below
+      // confirms or corrects.
+      let _paintedFromCache = false;
+      if (_cachedRunActive()) {
         rehydrateFromCache();
         renderTable();
         renderLiveStats();
+        showPaused(false);
+        _paintedFromCache = true;
+      }
+      // Resolve broadcast/run state. When stopped (broadcast off) the overlay
+      // stays up and we skip every paint path below — the page shows ONLY the
+      // overlay, never a flash of the last dataset behind it. When live we paint
+      // the cached snapshot, seed the real data, and show the work; the overlay
+      // is dropped once the authoritative running status lands.
+      await checkBroadcastState();
+      if (_broadcastLive) {
+        if (!_paintedFromCache) {
+          // Cached snapshot first for an instant refresh, then authoritative REST.
+          rehydrateFromCache();
+          renderTable();
+          renderLiveStats();
+        }
         // Seeds full live state + results so refresh paints the same dashboard
         // the operator sees, even before the SSE init message lands.
         await seedLiveStateFromRest();
@@ -1940,6 +1956,21 @@
           localStorage.setItem(LIVE_CACHE_KEY, JSON.stringify(snap));
         } catch {}
       }, 250);
+    }
+    // Synchronous (no network) read of the persisted snapshot: did the last
+    // session leave an ACTIVE, broadcasting run? Used at load to decide the
+    // overlay before the async broadcast check, so a stopped page never flashes
+    // the live shell and an operator's mid-run refresh reveals the work instantly.
+    function _cachedRunActive() {
+      try {
+        const raw = localStorage.getItem(LIVE_CACHE_KEY);
+        if (!raw) return false;
+        const snap = JSON.parse(raw);
+        if (!snap || !snap.ts || (Date.now() - snap.ts) > LIVE_CACHE_TTL_MS) return false;
+        if (!snap.broadcastLive) return false;
+        const s = snap.state && snap.state.status;
+        return s === 'running' || s === 'paused' || !!(snap.cb && snap.cb.batchId);
+      } catch { return false; }
     }
     function rehydrateFromCache() {
       try {

@@ -48,7 +48,7 @@ function extractFn(src, name) {
   return src.slice(m.index, j);
 }
 
-const extracted = ['rehydrateFromCache', 'seedLiveStateFromRest']
+const extracted = ['_cachedRunActive', 'rehydrateFromCache', 'seedLiveStateFromRest']
   .map(n => extractFn(html, n)).join('\n\n');
 
 // ─── Fake environment ────────────────────────────────────────────────────────
@@ -110,6 +110,27 @@ const idleSnap = {
 };
 
 console.log('\n/live load-sequence gating — stopped-flash regression\n');
+
+// ─── 0. _cachedRunActive: synchronous overlay decision (no network) ──────────
+console.log('[0] _cachedRunActive drives the synchronous overlay decision');
+function cachedActive(snap) {
+  const sb = makeSandbox();
+  sb.localStorage = fakeLocalStorage(snap);
+  return vm.runInContext('_cachedRunActive()', sb);
+}
+ok(cachedActive(activeSnap('running')) === true,
+   'broadcasting + running cache → active (reveal work synchronously)');
+ok(cachedActive({ ts: NOW, broadcastLive: true, state: {}, cb: { batchId: 9 }, results: [] }) === true,
+   'broadcasting + live batchId → active');
+ok(cachedActive(idleSnap) === false,
+   'broadcasting + done status → NOT active (overlay stays up)');
+ok(cachedActive({ ...activeSnap('running'), broadcastLive: false }) === false,
+   'last session not broadcasting → NOT active even if status running');
+ok(cachedActive(null) === false, 'no cache → not active (default to overlay)');
+{
+  const stale = activeSnap('running'); stale.ts = NOW - (2 * 60 * 60 * 1000);
+  ok(cachedActive(stale) === false, 'expired cache → not active');
+}
 
 // ─── 1. rehydrateFromCache: active cache repaints, idle cache does NOT ────────
 console.log('[1] rehydrateFromCache gates row paint on a cached ACTIVE run');

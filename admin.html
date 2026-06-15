@@ -711,6 +711,7 @@
       flex: 1 1 auto;
       min-height: 0;
       overflow-y: auto;
+      overflow-x: auto;
       padding: 12px;
       display: flex;
       flex-direction: column;
@@ -726,10 +727,11 @@
       border-left: 2px solid var(--text-dim);
       color: var(--text);
       animation: slideIn 0.2s ease;
-      /* Wrap long lines to the next line instead of overflowing — long
-         unbroken tokens (addresses, base64 memos, URLs) break too. */
-      overflow-wrap: anywhere;
-      word-break: break-word;
+      /* Keep each line on ONE row; the log panel scrolls horizontally for long
+         lines (addresses, base64 memos, URLs) rather than wrapping them. */
+      white-space: nowrap;
+      width: max-content;
+      min-width: 100%;
     }
 
     .log-warn { border-left-color: var(--text-muted); color: var(--text-dim); }
