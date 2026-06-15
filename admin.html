@@ -1440,9 +1440,11 @@
         if (msg.type === 'init' || msg.type === 'state') {
           state = Object.assign(state, msg.state);
           if (msg.results) { resultsArr = msg.results; renderTable(); }
-          // Restore logs from server buffer on init
+          // Restore logs from server buffer on init — batch-render in a single
+          // DocumentFragment so a full 5000-line buffer doesn't trigger one
+          // forced reflow per line (that froze the admin tab on open).
           if (msg.type === 'init' && msg.logs && msg.logs.length > 0) {
-            for (const logMsg of msg.logs) appendLog(logMsg);
+            appendLogBatch(msg.logs);
           }
           // Reset retest button when done
           if (state.status === 'done' || state.status === 'idle') {
@@ -2096,10 +2098,18 @@
       return (row.dataset.cat || 'node') === f;
     }
 
+    // Max log rows kept in the DOM. The server buffer (LOG_BUFFER_MAX) is far
+    // larger; replaying all of it would build thousands of rows we immediately
+    // trim away — see appendLogBatch for why that mattered.
+    const LOG_DOM_MAX = 500;
+
+    // Build ONE log-entry div — no DOM insertion, no scroll, no reflow. Shared
+    // by the live single-line appendLog and the batched init replay so
+    // categorization / escaping / linkification stay byte-identical between the
+    // two paths.
     // `cat` is the server-sent category for live SSE lines; replayed init buffer
     // lines arrive as plain strings (no cat), so re-derive via logCategory().
-    function appendLog(msg, cat) {
-      const body = document.getElementById('logBody');
+    function _buildLogEntry(msg, cat) {
       const div = document.createElement('div');
       let cls = '';
       if (/⚠|warn|pause|insufficient/i.test(msg)) cls = 'log-warn';
@@ -2116,9 +2126,34 @@
       const linkified = escaped.replace(/(https?:\/\/[^\s<]+)/g, (u) => `<a href="${u}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">${u}</a>`);
       div.innerHTML = `<span class="log-time">${ts}</span>` + linkified;
       if (!_logEntryMatches(div, _logFilter)) div.style.display = 'none';
-      body.appendChild(div);
+      return div;
+    }
+
+    // Live single-line append: one row, one reflow — fine at live cadence.
+    function appendLog(msg, cat) {
+      const body = document.getElementById('logBody');
+      body.appendChild(_buildLogEntry(msg, cat));
       body.scrollTop = body.scrollHeight;
-      if (body.children.length > 500) body.removeChild(body.firstChild);
+      if (body.children.length > LOG_DOM_MAX) body.removeChild(body.firstChild);
+    }
+
+    // Batch-replay the server's init log buffer (up to LOG_BUFFER_MAX=5000 lines)
+    // WITHOUT freezing the main thread. The old init path called appendLog() per
+    // line, and each call set `scrollTop = scrollHeight` — a forced synchronous
+    // reflow — so a full buffer meant thousands of reflows on page load and the
+    // tab locked up. Here we (a) keep only the last LOG_DOM_MAX lines (the cap
+    // appendLog enforces anyway, so the visible result is identical), (b) build
+    // them into a single DocumentFragment, and (c) insert + scroll exactly once.
+    // One reflow instead of thousands.
+    function appendLogBatch(msgs) {
+      if (!Array.isArray(msgs) || msgs.length === 0) return;
+      const body = document.getElementById('logBody');
+      const tail = msgs.length > LOG_DOM_MAX ? msgs.slice(-LOG_DOM_MAX) : msgs;
+      const frag = document.createDocumentFragment();
+      for (const m of tail) frag.appendChild(_buildLogEntry(m));
+      body.appendChild(frag);
+      body.scrollTop = body.scrollHeight;
+      while (body.children.length > LOG_DOM_MAX) body.removeChild(body.firstChild);
     }
 
     // ─── Test Run Management ────────────────────────────────────────────────
