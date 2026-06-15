@@ -279,6 +279,7 @@
     }
     .cb-snap-item { color: var(--text-dim); }
     .cb-snap-pass { color: var(--green); font-weight: 700; }
+    .cb-snap-slow { color: var(--yellow); font-weight: 700; }
     .cb-snap-fail { color: var(--red); font-weight: 700; }
     .cb-complete-msg {
       font-family: var(--font-display);
@@ -768,7 +769,8 @@
       </div>
       <div class="cb-snapshot-row">
         <span class="cb-snap-item">Batch size: <strong id="cbSnapshot">—</strong></span>
-        <span class="cb-snap-item">Passed: <strong class="cb-snap-pass" id="cbPassed">0</strong></span>
+        <span class="cb-snap-item">Passed SLA: <strong class="cb-snap-pass" id="cbPassed">0</strong></span>
+        <span class="cb-snap-item">Slow: <strong class="cb-snap-slow" id="cbSlow">0</strong></span>
         <span class="cb-snap-item">Failed: <strong class="cb-snap-fail" id="cbFailed">0</strong></span>
       </div>
       <div class="cb-complete-msg" id="cbCompleteMsg"></div>
@@ -1040,11 +1042,11 @@
               testedAt:   r2.testedAt || null,
             });
           }
-          // Sync the current-batch counter to the seeded rows so the
-          // Tested tile shows real progress on a cold refresh.
-          _cb.tested  = resultsArr.length;
-          _cb.passed  = resultsArr.filter(x => Number(x.actualMbps) >= 10).length;
-          _cb.failed  = _cb.tested - _cb.passed;
+          // Sync the current-batch counter to the seeded rows so the Tested
+          // tile shows real progress on a cold refresh, then let cbRender derive
+          // the Passed SLA / Slow / Failed partition from the rows.
+          _cb.tested = resultsArr.length;
+          cbRender();
         }
         applyHeaderStatsFromState();
         renderLiveStats();
@@ -1504,6 +1506,7 @@
       iteration: null,
       tested: 0,
       passed: 0,
+      slow: 0,
       failed: 0,
       gapEndsAt: null,
       gapTimer: null,
@@ -1518,7 +1521,7 @@
       const startRaw   = data.startedAt || data.started_at;
       _cb.startedAt    = startRaw ? new Date(startRaw).getTime() : Date.now();
       _cb.iteration    = data.iteration ?? null;
-      _cb.tested = 0; _cb.passed = 0; _cb.failed = 0;
+      _cb.tested = 0; _cb.passed = 0; _cb.slow = 0; _cb.failed = 0;
       _cb.gapEndsAt = null;
       if (_cb.gapTimer) { clearInterval(_cb.gapTimer); _cb.gapTimer = null; }
       const dot = _cbEl('cbDot');
@@ -1528,21 +1531,19 @@
       cbRender();
     }
 
-    function cbApplyNodeResult(data) {
-      _cb.tested++;
-      const passed = data.passed != null
-        ? !!data.passed
-        : (data.actual_mbps != null && Number(data.actual_mbps) >= 10) || (data.actualMbps != null && Number(data.actualMbps) >= 10);
-      if (passed) _cb.passed++;
-      else _cb.failed++;
+    function cbApplyNodeResult() {
+      // The row is already upserted into resultsArr by the caller; cbRender is the
+      // single source of truth — it recomputes Tested + the Passed SLA / Slow /
+      // Failed partition from resultsArr. Don't accumulate counts here (that path
+      // used a 2-bucket SLA-only definition that disagreed with cbRender).
       cbRender();
     }
 
-    function cbApplyBatchEnd(data) {
-      data = data || {};
-      if (data.passed != null) _cb.passed = data.passed;
-      if (data.failed != null) _cb.failed = data.failed;
-      _cb.tested = _cb.passed + _cb.failed;
+    function cbApplyBatchEnd() {
+      // Don't trust the server's batch:end passed/failed — they use a different
+      // definition (passed = total testedNodes, failed = hard errors only) that
+      // conflicts with cbRender's resultsArr-derived partition. Just stop the
+      // pulse and let cbRender recompute from the authoritative rows.
       const dot = _cbEl('cbDot');
       if (dot) dot.className = 'pulse-dot';
       cbRender();
@@ -1627,11 +1628,27 @@
         }
       }
 
-      // Pass/Fail derived from resultsArr (matches admin's recompute logic).
-      const passed = arr.filter(r => Number(r.actualMbps) >= 10).length;
-      const failed = arr.filter(r => !r.skipped && r.errorCode !== 'TEST_RUN_SKIP' && (r.error || r.errorCode || r.actualMbps == null)).length;
+      // Outcome buckets — mutually exclusive, derived from resultsArr (the single
+      // source of truth). They PARTITION the tested (non-skipped) nodes so that
+      // Passed SLA + Slow + Failed always reconciles. Priority: a hard error or no
+      // speed reading is Failed; otherwise ≥10 Mbps is Passed SLA; a connected
+      // sub-10 reading is Slow. Skipped / TEST RUN rows aren't outcomes — they're
+      // surfaced in the stat tiles, not here. (This replaced a 2-bucket scheme
+      // where slow-but-connected nodes fell through both filters, e.g. 7 tested
+      // showing 5 passed / 0 failed with the 2 slow nodes uncounted.)
+      let passed = 0, slow = 0, failed = 0;
+      for (const r of arr) {
+        if (r.skipped || r.errorCode === 'TEST_RUN_SKIP') continue;
+        const m = r.actualMbps != null ? Number(r.actualMbps) : null;
+        if (m == null || r.error || r.errorCode) failed++;
+        else if (m >= 10) passed++;
+        else slow++;
+      }
+      _cb.passed = passed; _cb.slow = slow; _cb.failed = failed;
       const passEl = _cbEl('cbPassed');
       if (passEl) passEl.textContent = passed;
+      const slowEl = _cbEl('cbSlow');
+      if (slowEl) slowEl.textContent = slow;
       const failEl = _cbEl('cbFailed');
       if (failEl) failEl.textContent = failed;
 
@@ -2158,11 +2175,11 @@
             testRun:    err === 'TEST_RUN_SKIP',
             testedAt:   tested,
           });
-          cbApplyNodeResult({ passed: resultMbps != null && resultMbps >= 10 });
+          cbApplyNodeResult();
           break;
         }
         case 'batch:end': {
-          cbApplyBatchEnd(d);
+          cbApplyBatchEnd();
           const next   = d.next_in_ms ? Math.round(d.next_in_ms / 1000) : null;
           const passed = d.passed != null ? d.passed : _cb.passed;
           const failed = d.failed != null ? d.failed : _cb.failed;
@@ -2230,7 +2247,7 @@
               resultsArr.length = 0;
               const tbody = document.getElementById('resultsBody');
               if (tbody) tbody.innerHTML = '';
-              _cb.tested = 0; _cb.passed = 0; _cb.failed = 0;
+              _cb.tested = 0; _cb.passed = 0; _cb.slow = 0; _cb.failed = 0;
             }
           }
           if (Array.isArray(d.results) && d.results.length) {
@@ -2254,11 +2271,10 @@
                 testedAt:   r.testedAt || null,
               });
             }
-            // Sync the current-batch counter to the replayed rows so the
-            // Tested tile + cb panel reflect actual progress on first paint.
-            _cb.tested  = resultsArr.length;
-            _cb.passed  = resultsArr.filter(x => Number(x.actualMbps) >= 10).length;
-            _cb.failed  = _cb.tested - _cb.passed;
+            // Sync the current-batch counter to the replayed rows so the Tested
+            // tile + cb panel reflect actual progress on first paint; cbRender
+            // (below) derives the Passed SLA / Slow / Failed partition.
+            _cb.tested = resultsArr.length;
           }
           applyHeaderStatsFromState();
           renderLiveStats();
