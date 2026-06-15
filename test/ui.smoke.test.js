@@ -160,9 +160,11 @@ async function run() {
   }
 
   if (adminRes) {
+    // PUBLIC TEST was removed in the dual-mode collapse (2026-04-25).
+    // The admin page now has a BROADCAST LIVE toggle instead.
     assert(
-      adminRes.body.includes('PUBLIC TEST') || adminRes.body.includes('publicTestPill') || adminRes.body.includes('publicTest'),
-      'Admin page contains PUBLIC TEST element'
+      adminRes.body.includes('BROADCAST') || adminRes.body.includes('broadcastLive') || adminRes.body.includes('broadcast'),
+      'Admin page contains BROADCAST LIVE toggle (replaced dual-mode PUBLIC TEST)'
     );
     assert(
       adminRes.body.includes('SENTINEL') || adminRes.body.includes('Sentinel'),
@@ -234,25 +236,28 @@ async function run() {
     assert(false, `GET /api/public/runs reachable (${err.message})`);
   }
 
-  // ─── 6. Admin-protected endpoints should NOT be public ───
-  console.log('\n6. Admin route protection...');
-  const protectedPaths = [
+  // ─── 6. Removed /api/admin/public-test/* endpoints (post-2026-04-25 collapse) ───
+  // The dual-mode public-test routes (/api/admin/public-test/status and
+  // /api/admin/public-test/start) were removed when the dual-mode system was
+  // collapsed into a single mode with a broadcast-live toggle. These endpoints
+  // MUST NOT exist in the current server — they should return 404 (or 401/403
+  // if an auth gate fires first), never 200 with data.
+  console.log('\n6. Removed /api/admin/public-test/* endpoints must not return 200...');
+  const removedPaths = [
     '/api/admin/public-test/status',
     '/api/admin/public-test/start',
   ];
 
-  for (const path of protectedPaths) {
+  for (const p of removedPaths) {
     try {
-      const r = await httpGet(`${BASE}${path}`);
-      // Should return 401/403 (auth), 404 (not yet impl), or 405 (method not allowed)
-      // Should NOT return a 200 with sensitive data if auth is enabled
+      const r = await httpGet(`${BASE}${p}`);
       assert(
-        r.status !== 200 || (r.headers['content-type'] || '').includes('json'),
-        `${path} responds with structured data (status ${r.status})`
+        r.status !== 200,
+        `${p} is removed — must NOT return 200 (got ${r.status})`
       );
     } catch (err) {
-      // Connection refused for this path is acceptable
-      assert(true, `${path} not accessible without token (connection refused or timeout)`);
+      // Connection refused / timeout means the endpoint definitely doesn't exist.
+      assert(true, `${p} not reachable (connection refused or timeout) — confirmed removed`);
     }
   }
 
