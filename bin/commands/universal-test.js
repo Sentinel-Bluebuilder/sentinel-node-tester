@@ -556,9 +556,11 @@ export async function run({ flags: f = {} } = {}) {
       throw new Error(`getBatchResults short (results=${batchRows?.results?.length})`);
     }
 
-    // Verify raw_json round-trip
-    const rawRow = mem.prepare('SELECT raw_json FROM results WHERE node_addr = @addr').get({ addr: fakeResults[0].address });
-    const parsed = JSON.parse(rawRow.raw_json);
+    // Verify raw_json round-trip. raw_json is offloaded to a per-run file
+    // (results/raw/run-<id>/<rid>.json) and the column is NULL; getNodeHistory
+    // rehydrates it from disk, so this exercises the full offload+rehydrate path.
+    const rawHist = getNodeHistory(fakeResults[0].address, { limit: 1 });
+    const parsed = JSON.parse(rawHist[0].raw_json);
     if (parsed.address !== fakeResults[0].address) throw new Error('raw_json round-trip failed');
 
     closeDb();

@@ -94,6 +94,7 @@ export const SESSION_MAP_TTL = 120_000;          // 2 min
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
 export const RESULTS_DIR = path.join(PROJECT_ROOT, 'results');
+export const RAW_DIR = path.join(RESULTS_DIR, 'raw');
 export const RESULTS_FILE = path.join(RESULTS_DIR, 'results.json');
 export const CREDS_FILE = path.join(RESULTS_DIR, 'session-credentials.json');
 export const FAILURE_LOG = path.join(RESULTS_DIR, 'failures.jsonl');

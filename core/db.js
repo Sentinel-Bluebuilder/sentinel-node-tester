@@ -9,9 +9,81 @@
 
 import Database from 'better-sqlite3';
 import path from 'path';
-import { mkdirSync, existsSync } from 'fs';
+import { mkdirSync, existsSync, writeFileSync, readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { countryToContinent } from './countries.js';
+import { RAW_DIR } from './constants.js';
+
+// ─── Raw-JSON file offload ───────────────────────────────────────────────────
+// The full JSON.stringify(result) blob is no longer stored inline in the
+// results.raw_json column. Instead each result's blob is written to a per-run
+// file: results/raw/run-<run_id>/<result_id>.json. The column is bound NULL
+// going forward; readers transparently rehydrate from the file so the REST
+// contract (er.raw_json as a JSON string) stays byte-identical.
+
+/** Deterministic path to a result's raw-json file. */
+function rawJsonPath(run_id, result_id) {
+  return path.join(RAW_DIR, `run-${run_id}`, `${result_id}.json`);
+}
+
+/**
+ * Write the raw-json blob for a single result to its per-run file.
+ * Logs but never throws — the file is a backup, not load-bearing for the insert
+ * (mirrors pipeline.js raw-write philosophy). Works for :memory: DBs too since
+ * the path is independent of the DB backend.
+ *
+ * @param {number} run_id
+ * @param {number|bigint} result_id
+ * @param {string} json - the JSON.stringify(result) string
+ */
+function writeRawJson(run_id, result_id, json) {
+  try {
+    const dir = path.join(RAW_DIR, `run-${run_id}`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, `${result_id}.json`), json);
+  } catch (e) {
+    console.error('[db] raw_json file write failed:', e.message);
+  }
+}
+
+/**
+ * Read the raw-json blob for a result from its per-run file.
+ *
+ * @param {number} run_id
+ * @param {number|bigint} result_id
+ * @returns {string|null} the JSON string, or null if missing/unreadable
+ */
+export function readRawJson(run_id, result_id) {
+  if (run_id == null || result_id == null) return null;
+  try {
+    return readFileSync(rawJsonPath(run_id, result_id), 'utf8');
+  } catch {
+    // ENOENT or any read error → no blob available.
+    return null;
+  }
+}
+
+/**
+ * Mutate result rows in place: when raw_json is NULL/empty but run_id and id
+ * are present, rehydrate raw_json from the per-run file. Keeps er.raw_json a
+ * JSON string exactly as before the offload.
+ *
+ * @param {object[]} rows
+ * @returns {object[]} the same array (mutated)
+ */
+function rehydrateRawJson(rows) {
+  for (const row of rows) {
+    if (!row || (row.raw_json != null && row.raw_json !== '')) continue;
+    // Prefer result_id: getNodeErrors joins error_logs (el.*), so row.id is the
+    // error_log id while result_id is the FK to results.id (the file key).
+    // Plain results-table rows have only `id`, so fall back to it.
+    const id = row.result_id ?? row.id;
+    if (row.run_id != null && id != null) {
+      row.raw_json = readRawJson(row.run_id, id);
+    }
+  }
+  return rows;
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', 'data');
@@ -502,7 +574,11 @@ function mapResultToRow(run_id, r) {
     error_code:      r.errorCode || null,
     error_message:   r.error || null,
     tested_at,
-    raw_json:        JSON.stringify(r),
+    // raw_json is offloaded to a per-run file after insert; the column is
+    // bound NULL going forward. _rawJson carries the blob to the writer but is
+    // NOT a column param (SQLite ignores extra named props it doesn't bind).
+    raw_json:        null,
+    _rawJson:        JSON.stringify(r),
     pass,
     stage,
     sdk:             r.sdk || null,
@@ -533,7 +609,9 @@ const _insertResultSql = `
 export function insertResult(run_id, result, which) {
   const db = getDb(which);
   const row = mapResultToRow(run_id, result);
-  const info = db.prepare(_insertResultSql).run(row);
+  const { _rawJson, ...bind } = row;
+  const info = db.prepare(_insertResultSql).run(bind);
+  writeRawJson(run_id, info.lastInsertRowid, _rawJson);
   return info.lastInsertRowid;
 }
 
@@ -548,7 +626,11 @@ export function insertResultsBatch(run_id, results, which) {
   const db = getDb(which);
   const stmt = db.prepare(_insertResultSql);
   const insert = db.transaction((rows) => {
-    for (const r of rows) stmt.run(r);
+    for (const row of rows) {
+      const { _rawJson, ...bind } = row;
+      const info = stmt.run(bind);
+      writeRawJson(run_id, info.lastInsertRowid, _rawJson);
+    }
   });
   insert(results.map(r => mapResultToRow(run_id, r)));
 }
@@ -703,9 +785,10 @@ export function getLatestResultPerNode({ q = null, country = null, limit = 200, 
  * @returns {object[]}
  */
 export function getNodeHistory(nodeAddr, { limit = 50 } = {}, which) {
-  return getDb(which).prepare(
+  const rows = getDb(which).prepare(
     'SELECT * FROM results WHERE node_addr = @node_addr ORDER BY tested_at DESC LIMIT @limit',
   ).all({ node_addr: nodeAddr, limit });
+  return rehydrateRawJson(rows);
 }
 
 // ─── Aggregate Stats ──────────────────────────────────────────────────────────
@@ -1059,12 +1142,14 @@ export function getNodeDetail(addr, { historyLimit = 100 } = {}, which) {
     LIMIT 1
   `).get({ addr });
 
-  const history = db.prepare(`
+  if (node) rehydrateRawJson([node]);
+
+  const history = rehydrateRawJson(db.prepare(`
     SELECT * FROM results
     WHERE node_addr = @addr
     ORDER BY tested_at DESC
     LIMIT @limit
-  `).all({ addr, limit: historyLimit });
+  `).all({ addr, limit: historyLimit }));
 
   const errors = db.prepare(`
     SELECT el.*, r.tested_at, r.actual_mbps, r.node_addr, r.moniker
@@ -1115,7 +1200,7 @@ export function getNodeErrors(addr, { limit = 50, stage = null } = {}, which) {
     ORDER BY el.captured_at DESC
     LIMIT @limit
   `).all(params);
-  if (rows.length > 0) return rows;
+  if (rows.length > 0) return rehydrateRawJson(rows);
 
   // Fallback: no error_logs row exists for this node yet (race between
   // upsertResult writing the result and insertErrorLog completing, or an old
@@ -1154,7 +1239,7 @@ export function getNodeErrors(addr, { limit = 50, stage = null } = {}, which) {
     ORDER BY r.tested_at DESC
     LIMIT @limit
   `).all(params);
-  if (fallback.length > 0) return fallback;
+  if (fallback.length > 0) return rehydrateRawJson(fallback);
 
   // Second fallback: continuous-loop (public) runs persist per node ONLY to
   // batch_results — never to results/error_logs — so a node that failed only
