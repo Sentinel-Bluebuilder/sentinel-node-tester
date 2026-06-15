@@ -866,6 +866,11 @@
     // /api/broadcast itself — we don't connect SSE or hit any work endpoint.
     let _activeRun = false;
     let _liveWorkConnected = false;
+    // When the last /api/broadcast poll fired. Lets the visibilitychange
+    // handler skip a redundant poll on a quick tab flick — it only catches up
+    // when the 10s interval may have been throttled during a long hidden spell.
+    let _lastBroadcastPollAt = 0;
+    const BROADCAST_POLL_MS = 10000;
 
     // Fan out to the live-work endpoints — runs EXACTLY ONCE per paused→active
     // transition. This is the "if active, then make the necessary calls" half of
@@ -888,6 +893,7 @@
     // activeRun }; activeRun gates ALL of /live's other traffic so a paused page
     // makes just this one call (plus its 10s repeat) until a run actually starts.
     async function checkBroadcastState() {
+      _lastBroadcastPollAt = Date.now();
       try {
         const r = await fetch('/api/broadcast', { cache: 'no-store' });
         if (!r.ok) return;
@@ -976,9 +982,14 @@
       await checkBroadcastState();
       // Re-poll the single endpoint so a run that STARTS while we're paused flips
       // the page to live within ~10s — without any traffic in the meantime.
-      setInterval(checkBroadcastState, 10000);
+      setInterval(checkBroadcastState, BROADCAST_POLL_MS);
+      // Re-checking on tab focus catches a run that started while the interval
+      // was throttled in the background — but DON'T fire on every tab switch.
+      // Skip when the interval already polled within the last cycle so a quick
+      // flick back to the tab makes no extra /api/broadcast call.
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') checkBroadcastState();
+        if (document.visibilityState !== 'visible') return;
+        if (Date.now() - _lastBroadcastPollAt >= BROADCAST_POLL_MS) checkBroadcastState();
       });
     });
 
@@ -2101,17 +2112,29 @@
     // we don't want to hammer it on every SSE state tick.
     let _sdkInfo = null;        // { active, name, version }
     let _sdkInfoFetchedFor = null;
+    let _sdkInfoInflight = null; // shared promise — dedupes concurrent fetches
     async function refreshSdkInfoIfNeeded() {
       const want = (_liveState && _liveState.activeSDK) || null;
       if (want && want === _sdkInfoFetchedFor && _sdkInfo) return;
-      try {
-        const r = await fetch('/api/public/sdk-info');
-        if (!r.ok) return;
-        const d = await r.json();
-        _sdkInfo = d;
-        _sdkInfoFetchedFor = d.active || want;
-        applyLiveModeBadge();
-      } catch {}
+      // Dedupe concurrent calls. On RESUME a burst of state updates (REST seed,
+      // SSE state ticks, loadCurrentBatch) each call applyLiveModeBadge →
+      // refreshSdkInfoIfNeeded before the first fetch resolves and sets
+      // _sdkInfoFetchedFor — so all of them used to fire their own /sdk-info
+      // request (seen as 5 calls on resume vs 1 on a fresh load). Share one
+      // in-flight request instead; the key is set when it resolves.
+      if (_sdkInfoInflight) return _sdkInfoInflight;
+      _sdkInfoInflight = (async () => {
+        try {
+          const r = await fetch('/api/public/sdk-info');
+          if (!r.ok) return;
+          const d = await r.json();
+          _sdkInfo = d;
+          _sdkInfoFetchedFor = d.active || want;
+          applyLiveModeBadge();
+        } catch {}
+        finally { _sdkInfoInflight = null; }
+      })();
+      return _sdkInfoInflight;
     }
     function sdkSuffix() {
       if (!_sdkInfo || !_sdkInfo.name) return '';
