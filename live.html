@@ -281,6 +281,7 @@
     .cb-snap-pass { color: var(--green); font-weight: 700; }
     .cb-snap-slow { color: var(--yellow); font-weight: 700; }
     .cb-snap-fail { color: var(--red); font-weight: 700; }
+    .cb-snap-skip { color: var(--text-muted); font-weight: 700; }
     .cb-complete-msg {
       font-family: var(--font-display);
       font-size: 12px;
@@ -772,6 +773,7 @@
         <span class="cb-snap-item">Passed SLA: <strong class="cb-snap-pass" id="cbPassed">0</strong></span>
         <span class="cb-snap-item">Slow: <strong class="cb-snap-slow" id="cbSlow">0</strong></span>
         <span class="cb-snap-item">Failed: <strong class="cb-snap-fail" id="cbFailed">0</strong></span>
+        <span class="cb-snap-item" id="cbSkippedWrap" style="display:none">Skipped: <strong class="cb-snap-skip" id="cbSkipped">0</strong></span>
       </div>
       <div class="cb-complete-msg" id="cbCompleteMsg"></div>
     </div>
@@ -1518,6 +1520,7 @@
       passed: 0,
       slow: 0,
       failed: 0,
+      skipped: 0,
       gapEndsAt: null,
       gapTimer: null,
     };
@@ -1531,7 +1534,7 @@
       const startRaw   = data.startedAt || data.started_at;
       _cb.startedAt    = startRaw ? new Date(startRaw).getTime() : Date.now();
       _cb.iteration    = data.iteration ?? null;
-      _cb.tested = 0; _cb.passed = 0; _cb.slow = 0; _cb.failed = 0;
+      _cb.tested = 0; _cb.passed = 0; _cb.slow = 0; _cb.failed = 0; _cb.skipped = 0;
       _cb.gapEndsAt = null;
       if (_cb.gapTimer) { clearInterval(_cb.gapTimer); _cb.gapTimer = null; }
       const dot = _cbEl('cbDot');
@@ -1646,21 +1649,28 @@
       // surfaced in the stat tiles, not here. (This replaced a 2-bucket scheme
       // where slow-but-connected nodes fell through both filters, e.g. 7 tested
       // showing 5 passed / 0 failed with the 2 slow nodes uncounted.)
-      let passed = 0, slow = 0, failed = 0;
+      let passed = 0, slow = 0, failed = 0, skipped = 0;
       for (const r of arr) {
-        if (r.skipped || r.errorCode === 'TEST_RUN_SKIP') continue;
+        if (r.skipped || r.errorCode === 'TEST_RUN_SKIP') { skipped++; continue; }
         const m = r.actualMbps != null ? Number(r.actualMbps) : null;
         if (m == null || r.error || r.errorCode) failed++;
         else if (m >= 10) passed++;
         else slow++;
       }
-      _cb.passed = passed; _cb.slow = slow; _cb.failed = failed;
+      // passed + slow + failed + skipped === arr.length (=== Tested), always.
+      _cb.passed = passed; _cb.slow = slow; _cb.failed = failed; _cb.skipped = skipped;
       const passEl = _cbEl('cbPassed');
       if (passEl) passEl.textContent = passed;
       const slowEl = _cbEl('cbSlow');
       if (slowEl) slowEl.textContent = slow;
       const failEl = _cbEl('cbFailed');
       if (failEl) failEl.textContent = failed;
+      // Skipped (price-cap / offline / TEST RUN) only shows when present, so the
+      // buckets visibly reconcile with Tested without cluttering normal runs.
+      const skipEl = _cbEl('cbSkipped');
+      if (skipEl) skipEl.textContent = skipped;
+      const skipWrap = _cbEl('cbSkippedWrap');
+      if (skipWrap) skipWrap.style.display = skipped > 0 ? '' : 'none';
 
       const snapEl = _cbEl('cbSnapshot');
       if (snapEl) snapEl.textContent = snap || '—';
@@ -2257,7 +2267,7 @@
               resultsArr.length = 0;
               const tbody = document.getElementById('resultsBody');
               if (tbody) tbody.innerHTML = '';
-              _cb.tested = 0; _cb.passed = 0; _cb.slow = 0; _cb.failed = 0;
+              _cb.tested = 0; _cb.passed = 0; _cb.slow = 0; _cb.failed = 0; _cb.skipped = 0;
             }
           }
           if (Array.isArray(d.results) && d.results.length) {
