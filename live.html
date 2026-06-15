@@ -1413,15 +1413,18 @@
         o = opts || {};
       }
 
-      // Public /live is NODE-ONLY: drop the operator/system + lifecycle entries
-      // the client generates itself (Testing started/stopped, Round N starting/
-      // done). Node activity (cat 'node') and node failures (cat 'fail') stay —
-      // the failure-log UX requires failures to remain visible. Only gate
-      // explicit-cat objects: raw strings here are already node-filtered
-      // server-side (publicLogBuffer + the /api/public/events sys/events drop),
-      // so re-judging them with the weaker string heuristic would risk hiding a
-      // legitimate node line the server already approved.
-      if (typeof opts !== 'string' && (o.cat === 'sys' || o.cat === 'events')) return;
+      // Public /live is NODE-ONLY: keep per-node activity (cat 'node') and node
+      // failures (cat 'fail', required by the failure-log UX); drop everything
+      // that resolves to 'sys'/'events'. This covers BOTH the client-generated
+      // lifecycle objects (Testing started/stopped, Round N…) AND server-
+      // forwarded diagnostic strings. The server's log classifier is a denylist
+      // that defaults any unmatched line to 'node', so operational noise (RPC:
+      // N nodes fetched, ⏱ hard timeout, 🔄 VPN interference, [Blue C#], retries/
+      // reconnects) DOES reach the public stream — but the per-line heuristic
+      // above (address / PASS / SLOW / FAIL) re-derives 'sys' for those, which is
+      // the stronger signal for "is this a genuine node line." Failure strings
+      // carrying an address/"failed" still resolve to 'fail' and stay visible.
+      if (o.cat === 'sys' || o.cat === 'events') return;
 
       const div = document.createElement('div');
       const cls =
