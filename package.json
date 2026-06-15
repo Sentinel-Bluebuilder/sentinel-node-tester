@@ -38,7 +38,7 @@
     "postinstall": "node scripts/postinstall.js",
     "start": "node server.js",
     "audit": "node server.js",
-    "test": "node test/smoke.test.js && node test/db.smoke.test.js && node test/continuous.smoke.test.js && node test/security.test.js && node test/failure-log-ux.test.js && node test/public-no-action-buttons.test.js && node test/onchain-decode.test.js && node test/admin-log-batch.test.js && node test/live-pause-overlay.test.js && node test/live-load-gating.test.js && node test/public-run-active.test.js",
+    "test": "node test/smoke.test.js && node test/db.smoke.test.js && node test/continuous.smoke.test.js && node test/security.test.js && node test/failure-log-ux.test.js && node test/public-no-action-buttons.test.js && node test/onchain-decode.test.js && node test/admin-log-batch.test.js && node test/live-pause-overlay.test.js && node test/live-load-gating.test.js && node test/public-run-active.test.js && node test/live-single-poll-gate.test.js",
     "test:ui": "node test/ui.smoke.test.js",
     "test:integration": "node test/continuous.audit-integration.test.js && node test/continuous.live-db-write.test.js && node test/node-detail.smoke.test.js && node test/resume-results-seed.test.js",
     "verify:prod-db": "node scripts/verify-prod-db.mjs",

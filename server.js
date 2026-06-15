@@ -2229,7 +2229,13 @@ app.post('/api/broadcast', adminOnly, (req, res) => {
 });
 
 app.get('/api/broadcast', (req, res) => {
-  res.json({ broadcastLive: state.broadcastLive });
+  // `activeRun` lets /live gate ALL of its work calls behind this single poll:
+  // while paused it hits only this endpoint, and fans out (SSE, live-state,
+  // logs, runs, stats) only once there's a run to actually show.
+  res.json({
+    broadcastLive: state.broadcastLive,
+    activeRun: state.broadcastLive && publicRunActive(),
+  });
 });
 
 // ─── Audit settings (P2P payment tunables) ───────────────────────────────────

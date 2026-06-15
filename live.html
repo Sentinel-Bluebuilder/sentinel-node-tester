@@ -857,31 +857,52 @@
 
     // ─── Boot / theme ───
     let _broadcastLive = false;
+    // True once /api/broadcast reports a live, broadcasting run. While this is
+    // false the page is PAUSED and the ONLY network traffic is the poll of
+    // /api/broadcast itself — we don't connect SSE or hit any work endpoint.
+    let _activeRun = false;
+    let _liveWorkConnected = false;
 
+    // Fan out to the live-work endpoints — runs EXACTLY ONCE per paused→active
+    // transition. This is the "if active, then make the necessary calls" half of
+    // the single-poll gate: SSE stream, log backlog, full live-state, current
+    // batch, and header stats. While paused none of these fire.
+    async function connectLiveWork() {
+      if (_liveWorkConnected) return;
+      _liveWorkConnected = true;
+      rehydrateFromCache();   // instant cache paint (active-gated internally)
+      renderTable();
+      renderLiveStats();
+      connectSSE();
+      seedLogsFromRest();
+      await seedLiveStateFromRest();
+      loadCurrentBatch();
+      loadHeaderStats();
+    }
+
+    // Single authoritative poll. /api/broadcast returns { broadcastLive,
+    // activeRun }; activeRun gates ALL of /live's other traffic so a paused page
+    // makes just this one call (plus its 10s repeat) until a run actually starts.
     async function checkBroadcastState() {
       try {
         const r = await fetch('/api/broadcast', { cache: 'no-store' });
         if (!r.ok) return;
         const d = await r.json();
-        const wasLive = _broadcastLive;
+        const wasActive = _activeRun;
         _broadcastLive = !!d.broadcastLive;
+        _activeRun = !!d.activeRun;
         const notice = document.getElementById('broadcastOffNotice');
-        if (_broadcastLive) {
-          if (notice) notice.style.display = 'none';
-          // Reconcile the overlay against admin status. On the cold-load pass
-          // this no-ops until _liveStateResolved (set by the REST seed / SSE)
-          // so we don't flash "paused" before the real run status is known.
+        if (notice) notice.style.display = 'none';
+        if (_activeRun) {
+          // A run is live → connect the work endpoints once, then let the
+          // authoritative status drop the overlay and reveal the live page.
+          if (!wasActive) await connectLiveWork();
           applyPauseFromState();
-          if (!wasLive) {
-            connectSSE();
-            seedLogsFromRest();
-          }
         } else {
-          // Broadcast off: show the full pause overlay, not just the inline notice.
-          // Public visitors must see "Testing Has Been Paused" — last-completed
-          // run snapshot still loads behind the overlay for context.
-          if (notice) notice.style.display = 'none';
+          // Paused / no active run: overlay up, tear down the stream, and make
+          // NO further calls. Re-arm so the next active poll reconnects.
           showPaused(true);
+          _liveWorkConnected = false;
           if (_sse) { try { _sse.close(); } catch (_) {} _sse = null; }
         }
       } catch {}
@@ -938,41 +959,20 @@
       // that fetch is in flight. The overlay ships SHOWN in the markup, so a
       // stopped page stays fully covered from the very first paint. Only when the
       // cached snapshot was an active run (operator refreshing mid-run) do we
-      // paint it and reveal the work up-front; the authoritative check below
-      // confirms or corrects.
-      let _paintedFromCache = false;
+      // paint it and reveal the work up-front; the single poll below confirms or
+      // corrects, and fans out to the work endpoints only if a run is live.
       if (_cachedRunActive()) {
         rehydrateFromCache();
         renderTable();
         renderLiveStats();
         showPaused(false);
-        _paintedFromCache = true;
       }
-      // Resolve broadcast/run state. When stopped (broadcast off) the overlay
-      // stays up and we skip every paint path below — the page shows ONLY the
-      // overlay, never a flash of the last dataset behind it. When live we paint
-      // the cached snapshot, seed the real data, and show the work; the overlay
-      // is dropped once the authoritative running status lands.
+      // One call. If a run is live it fans out (SSE + live-state + logs + runs +
+      // stats); if paused it does nothing else and the page stays on the overlay.
       await checkBroadcastState();
-      if (_broadcastLive) {
-        if (!_paintedFromCache) {
-          // Cached snapshot first for an instant refresh, then authoritative REST.
-          rehydrateFromCache();
-          renderTable();
-          renderLiveStats();
-        }
-        // Seeds full live state + results so refresh paints the same dashboard
-        // the operator sees, even before the SSE init message lands.
-        await seedLiveStateFromRest();
-        loadCurrentBatch();
-        loadHeaderStats();
-      }
-      // The authoritative round-trip is done (or broadcast is off). Even if it
-      // carried no state (genuinely no active run), let the final reconcile
-      // below decide the overlay rather than leaving it pending forever.
-      _liveStateResolved = true;
-      applyPauseFromState();
-      setInterval(checkBroadcastState, 30000);
+      // Re-poll the single endpoint so a run that STARTS while we're paused flips
+      // the page to live within ~10s — without any traffic in the meantime.
+      setInterval(checkBroadcastState, 10000);
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') checkBroadcastState();
       });
@@ -2513,7 +2513,10 @@
 
     let _sseEverConnected = false;
     function connectSSE() {
-      if (!_broadcastLive) return;
+      // Only ever hold a stream open for a live, active run. Gating on _activeRun
+      // (not just _broadcastLive) keeps a paused page on its single /api/broadcast
+      // poll — no idle SSE connection, even on a server-initiated reconnect.
+      if (!_broadcastLive || !_activeRun) return;
       if (_sse) { try { _sse.close(); } catch (_) {} }
       try {
         _sse = new EventSource('/api/public/events');
@@ -2535,7 +2538,7 @@
         _sse.onerror = () => {
           try { _sse.close(); } catch (_) {}
           _sse = null;
-          if (_broadcastLive) {
+          if (_broadcastLive && _activeRun) {
             setTimeout(connectSSE, _sseRetry);
             _sseRetry = Math.min(_sseRetry * 2, SSE_MAX_RETRY);
           }
