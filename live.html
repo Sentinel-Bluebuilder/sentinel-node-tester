@@ -1411,6 +1411,16 @@
         o = opts || {};
       }
 
+      // Public /live is NODE-ONLY: drop the operator/system + lifecycle entries
+      // the client generates itself (Testing started/stopped, Round N starting/
+      // done). Node activity (cat 'node') and node failures (cat 'fail') stay —
+      // the failure-log UX requires failures to remain visible. Only gate
+      // explicit-cat objects: raw strings here are already node-filtered
+      // server-side (publicLogBuffer + the /api/public/events sys/events drop),
+      // so re-judging them with the weaker string heuristic would risk hiding a
+      // legitimate node line the server already approved.
+      if (typeof opts !== 'string' && (o.cat === 'sys' || o.cat === 'events')) return;
+
       const div = document.createElement('div');
       const cls =
         o.status === 'fail' ? 'log-err'  :
