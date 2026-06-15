@@ -924,30 +924,37 @@
       const urlEl = document.getElementById('mobileGateUrl');
       if (urlEl) urlEl.textContent = location.host + '/live';
       applyThemeIcons();
-      // Paint cached snapshot first so a refresh shows data instantly,
-      // then resolve broadcast state and reconcile with server.
-      rehydrateFromCache();
+      // Wire the table controls up-front — cheap, and needed whenever data later
+      // appears (including after a resume flips broadcast on).
       const _liveResultsPrev = document.getElementById('liveResultsPrev');
       const _liveResultsNext = document.getElementById('liveResultsNext');
       if (_liveResultsPrev) _liveResultsPrev.addEventListener('click', () => liveGoPage(-1));
       if (_liveResultsNext) _liveResultsNext.addEventListener('click', () => liveGoPage(1));
       const _liveSearchInput = document.getElementById('liveSearchInput');
       if (_liveSearchInput) _liveSearchInput.addEventListener('input', (e) => setLiveSearch(e.target.value));
-      renderTable();
-      renderLiveStats();
-      // Resolve broadcast state BEFORE loading the current batch — otherwise
-      // loadCurrentBatch races and may un-pause the overlay using the default
-      // (broadcastLive=false) before we know the real state.
+      // Resolve broadcast/run state BEFORE painting ANY data. When stopped
+      // (broadcast off) checkBroadcastState raises the opaque paused overlay
+      // immediately and we deliberately skip every paint path below — the page
+      // shows ONLY the overlay, never a flash of the last dataset behind it.
+      // When live we paint the cached snapshot, seed the real data, and show the
+      // work; the overlay never appears for an active run because
+      // applyPauseFromState stays gated until the authoritative status lands.
       await checkBroadcastState();
-      // Seed full live state + results via REST so refresh paints the same
-      // dashboard the operator sees, even before the SSE init message lands.
-      if (_broadcastLive) await seedLiveStateFromRest();
-      // The authoritative REST round-trip is done (or broadcast is off). Even if
-      // it carried no state (genuinely no active run), let the final reconcile
+      if (_broadcastLive) {
+        // Cached snapshot first for an instant refresh, then authoritative REST.
+        rehydrateFromCache();
+        renderTable();
+        renderLiveStats();
+        // Seeds full live state + results so refresh paints the same dashboard
+        // the operator sees, even before the SSE init message lands.
+        await seedLiveStateFromRest();
+        loadCurrentBatch();
+        loadHeaderStats();
+      }
+      // The authoritative round-trip is done (or broadcast is off). Even if it
+      // carried no state (genuinely no active run), let the final reconcile
       // below decide the overlay rather than leaving it pending forever.
       _liveStateResolved = true;
-      loadCurrentBatch();
-      loadHeaderStats();
       applyPauseFromState();
       setInterval(checkBroadcastState, 30000);
       document.addEventListener('visibilitychange', () => {
@@ -1021,6 +1028,14 @@
         const j = await r.json();
         if (!j || !j.broadcastLive) return;
         if (j.state) mergeLiveState(j.state);
+        // Only paint a dataset when the run is actually ACTIVE. With broadcast
+        // left on after a run completes, live-state still returns the LAST run's
+        // results — painting them here flashes a stale snapshot behind the
+        // "paused" overlay. For idle/done, applyPauseFromState shows the overlay
+        // and SSE repaints if a new run starts.
+        const _st = j.state && j.state.status;
+        const _active = _st === 'running' || _st === 'paused' || j.activeBatchId != null;
+        if (!_active) return;
         // Pin the active batch id BEFORE upserting rows so subsequent SSE
         // events (batch:start in particular) don't see `_cb.batchId == null`
         // alongside painted rows and treat the seeded data as stale.
@@ -1939,13 +1954,20 @@
         // state and discard rows below when they're from a previous run.
         if (snap.activeRunNumber != null) _prevActiveRunNumber = snap.activeRunNumber;
         if (snap.state && typeof snap.state === 'object') _liveState = snap.state;
-        if (Array.isArray(snap.results) && snap.results.length && resultsArr.length === 0) {
+        // Only repaint cached rows when the snapshot captured an ACTIVE run.
+        // A stopped/idle cache must not flash last-run rows: applyPauseFromState
+        // wins for idle/done, and SSE/seed repaints when a run is (re)started.
+        // Without this guard, a refresh of a just-finished run flashes the old
+        // table for a beat before the paused overlay covers it.
+        const _cs = snap.state && snap.state.status;
+        const _cachedActive = _cs === 'running' || _cs === 'paused' || !!(snap.cb && snap.cb.batchId);
+        if (_cachedActive && Array.isArray(snap.results) && snap.results.length && resultsArr.length === 0) {
           for (const r of snap.results) {
             resultsArr.push(r);
             addSingleRow(r);
           }
         }
-        if (snap.cb && typeof snap.cb === 'object') {
+        if (_cachedActive && snap.cb && typeof snap.cb === 'object') {
           // Restore counters so the bar paints immediately
           Object.assign(_cb, snap.cb);
           cbRender();
