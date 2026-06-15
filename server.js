@@ -1075,6 +1075,17 @@ function deleteRun(num) {
   if (i !== -1) index.runs.splice(i, 1);
   if (index.activeRun === num) index.activeRun = null;
   saveRunsIndex(index);
+  // NOTE: we deliberately do NOT delete this run's raw_json dir
+  // (results/raw/run-<id>) here. That dir is keyed by the SQLite runs-table id,
+  // whereas deleteRun operates on the file-index run NUMBER — a DIFFERENT
+  // namespace. The entry MAY carry a `dbRunId`, but it is null for legacy runs
+  // (pre-dbRunId field) and entirely absent for the interrupted/brand-new run
+  // case (i === -1, entry === null), where the only id available is
+  // state.activeDbRunId — i.e. the LIVE run's raw data. There is no mapping that
+  // holds for every code path, and a wrong-id `rm -rf` would destroy a live
+  // run's raw blobs. Correctness over completeness: the raw dir is reclaimed
+  // (namespace-correctly) by scripts/cleanup.mjs's orphan-raw-dir sweep, which
+  // matches run-<id> dirs against the runs table directly.
   // Remove the snapshot dir (results.json, summary.txt, failures.jsonl, audit.log).
   const runDir = path.join(RUNS_DIR, `test-${String(num).padStart(3, '0')}`);
   if (_ex(runDir)) {

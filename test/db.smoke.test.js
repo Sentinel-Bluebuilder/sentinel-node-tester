@@ -294,6 +294,60 @@ console.log('15. in-memory raw_json stays inline (no file)...');
   assert(!existsSync(RAW_DIR), `RAW_DIR not created by :memory: tests (${RAW_DIR})`);
 }
 
+// 16. pruneBatchResults — keeps ALL unfinished batches, not just the newest.
+//     Regression guard for FIX 3: if two+ batches have finished_at IS NULL, the
+//     child DELETE must not strip the older unfinished batch's batch_results
+//     (which would orphan its parent row, since the parent DELETE guards
+//     finished_at IS NOT NULL). Build TWO unfinished batches + older finished
+//     ones and assert BOTH unfinished survive while old finished are pruned.
+console.log('16. pruneBatchResults keeps ALL unfinished batches...');
+{
+  // Fresh isolated in-memory DB so prior batches above don't perturb the keep-set.
+  const pdb = getDb(':memory:');
+  useDb(pdb);
+  const T = Date.now();
+  const mk = (startedAt, addr) => {
+    const bid = Number(insertBatch({ started_at: startedAt, snapshot_size: 1, mode: 'p2p' }));
+    insertBatchResult(bid, { address: addr, actualMbps: 12, testedAt: startedAt });
+    return bid;
+  };
+  // Two UNFINISHED batches (finished_at NULL), both OLD by started_at so they
+  // fall outside the last-K recency window — proving they survive purely on the
+  // "all unfinished" rule, not recency.
+  const u1 = mk(T - 100_000, 'sentnode1unfin1'); // older unfinished
+  const u2 = mk(T - 90_000, 'sentnode1unfin2');  // newer unfinished
+  // Older FINISHED batches that should be pruned out under a tight keepBatches.
+  const f1 = mk(T - 80_000, 'sentnode1fin1');
+  const f2 = mk(T - 70_000, 'sentnode1fin2');
+  const f3 = mk(T - 60_000, 'sentnode1fin3');
+  [f1, f2, f3].forEach((bid, idx) => updateBatchOnFinish(bid, { finished_at: T - 50_000 + idx * 1000, passed: 1, failed: 0 }));
+
+  // keepBatches=1: last-K window holds only the newest-by-started_at (f3). The
+  // "all unfinished" rule must still rescue BOTH u1 and u2.
+  const psum = pruneBatchResults({ keepBatches: 1 });
+
+  // BOTH unfinished batches' results + parent rows survive.
+  eq(getBatchResults(u1).results.length, 1, 'older unfinished batch (u1) rows survive prune');
+  assert(getBatchResults(u1).batch != null, 'older unfinished batch (u1) parent row survives');
+  eq(getBatchResults(u2).results.length, 1, 'newer unfinished batch (u2) rows survive prune');
+  assert(getBatchResults(u2).batch != null, 'newer unfinished batch (u2) parent row survives');
+  // Old finished batches outside the keep-set are pruned (rows + parent).
+  eq(getBatchResults(f1).results.length, 0, 'old finished batch (f1) rows pruned');
+  assert(getBatchResults(f1).batch == null, 'old finished batch (f1) parent row deleted');
+  eq(getBatchResults(f2).results.length, 0, 'old finished batch (f2) rows pruned');
+  // No orphaned batch_results: every surviving child has a surviving parent.
+  assert(pdb.prepare('PRAGMA foreign_key_check').all().length === 0, 'foreign_key_check clean after multi-unfinished prune');
+  const orphans = pdb.prepare(
+    'SELECT COUNT(*) AS c FROM batch_results br WHERE NOT EXISTS (SELECT 1 FROM batches b WHERE b.id = br.batch_id)',
+  ).get().c;
+  eq(orphans, 0, 'no orphaned batch_results rows after prune');
+  assert(psum.keptBatches >= 3, `keep-set includes both unfinished + last-K (got ${psum.keptBatches})`);
+
+  pdb.close();
+  // Restore the original module singleton for any later code/cleanup.
+  useDb(db);
+}
+
 // ─── Results ──────────────────────────────────────────────────────────────────
 
 console.log(`\n${'='.repeat(50)}`);

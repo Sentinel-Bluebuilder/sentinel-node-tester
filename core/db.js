@@ -477,13 +477,14 @@ function runMigrations(db) {
 
   if (current < 11) {
     db.transaction(() => {
-    // ── Migration v11: cap error_logs.log_snippet at 16 KB ──────────────────
-    // The inline log_snippet column historically stored up to 512 KB per
-    // failure, bloating audit.db. The full log already lives on disk in the
-    // per-run audit-*.log file, so the DB only needs a readable snippet for
-    // the copy-failure UX. Going forward insertErrorLog() caps at 16384 chars
-    // from the tail; this migration truncates any legacy oversized rows to
-    // match. substr(s, length(s) - 16384 + 1) keeps the LAST 16384 chars,
+    // ── Migration v11: cap error_logs.log_snippet at 16384 chars ────────────
+    // (16384 chars; UTF-8 byte size varies). The inline log_snippet column
+    // historically stored up to ~512K chars per failure, bloating audit.db. The
+    // full log already lives on disk in the per-run audit-*.log file, so the DB
+    // only needs a readable snippet for the copy-failure UX. Going forward
+    // insertErrorLog() caps at 16384 chars from the tail; this migration
+    // truncates any legacy oversized rows to match.
+    // substr(s, length(s) - 16384 + 1) keeps the LAST 16384 chars,
     // mirroring the `.slice(-16384)` tail semantics. Bounded fast UPDATE —
     // safe on the boot path (no file I/O here).
     db.prepare(`
@@ -976,7 +977,7 @@ export function getRunStats(runId, which) {
  * @param {string}  opts.stage       - 'handshake'|'session'|'speedtest'|'wallet'|'rpc'|'other'
  * @param {string}  [opts.error_code]
  * @param {string}  [opts.error_message]
- * @param {string}  [opts.log_snippet] - a readable snippet of log context (capped at 16 KB)
+ * @param {string}  [opts.log_snippet] - a readable snippet of log context (capped at 16384 chars; UTF-8 byte size varies)
  * @returns {number} inserted id
  */
 export function insertErrorLog({
@@ -987,8 +988,8 @@ export function insertErrorLog({
   log_snippet = null,
 }, which) {
   const db = getDb(which);
-  // Store only a readable snippet of the per-node tester log (capped at 16 KB
-  // = 16384 chars from the tail). The FULL log is persisted to disk in the
+  // Store only a readable snippet of the per-node tester log (capped at 16384
+  // chars from the tail; UTF-8 byte size varies). The FULL log is persisted to disk in the
   // per-run audit-*.log file; the DB column exists purely to power the
   // copy-failure UX, so a bounded tail is all we need. Production callers
   // already pre-truncate to ~4 KB via pipeline.js (_sanitizeSnippet /
@@ -1694,10 +1695,14 @@ export function getLastBatch(which) {
  * re-tests every node and writes a full set of rows.
  *
  * KEEP-SET RATIONALE — three readers must never lose their data:
- *   (a) the ACTIVE batch (finished_at IS NULL): the continuous-loop resume path
- *       re-seeds already-tested addresses from its batch_results (getActiveBatch
- *       + raw SELECTs in audit/continuous.js). Pruning it mid-flight would lose
- *       the resume seed.
+ *   (a) ALL active/unfinished batches (finished_at IS NULL): the continuous-loop
+ *       resume path re-seeds already-tested addresses from its batch_results
+ *       (getActiveBatch + raw SELECTs in audit/continuous.js). Pruning one
+ *       mid-flight would lose the resume seed. We keep EVERY unfinished batch,
+ *       not just getActiveBatch's single newest one — if two+ batches have
+ *       finished_at IS NULL, dropping the older one's batch_results would orphan
+ *       its parent row (the parent DELETE guards finished_at IS NOT NULL, so the
+ *       childless row would survive).
  *   (b) the single most-recent FINISHED batch (getLastBatch): drives the /live
  *       last-completed snapshot. Pruning it would blank /live between runs.
  *   (c) the last K batches overall (by recency): preserves recent history for
@@ -1734,9 +1739,14 @@ export function pruneBatchResults({ keepBatches = DEFAULT_BATCH_RETENTION } = {}
       keepIds.add(row.id);
     }
 
-    // (a) the active batch (finished_at IS NULL).
-    const active = getActiveBatch(which);
-    if (active?.batch?.id != null) keepIds.add(active.batch.id);
+    // (a) ALL active/unfinished batches (finished_at IS NULL). Keeping only
+    // getActiveBatch's single newest unfinished batch would let the child DELETE
+    // strip a second unfinished batch's batch_results, orphaning its parent row.
+    for (const row of db.prepare(
+      'SELECT id FROM batches WHERE finished_at IS NULL',
+    ).all()) {
+      keepIds.add(row.id);
+    }
 
     // (b) the most-recent finished batch.
     const last = getLastBatch(which);

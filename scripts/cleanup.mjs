@@ -23,8 +23,9 @@
  *                                   – offload inline results.raw_json blobs to
  *                                     results/raw/run-<run_id>/<id>.json, then NULL
  *                                     the column (write+verify BEFORE null = no loss)
- *                                   – cap legacy error_logs.log_snippet at 16 KB tail
- *                                     (idempotent backstop to migration v11)
+ *                                   – cap legacy error_logs.log_snippet at the
+ *                                     16384-char tail (UTF-8 byte size varies;
+ *                                     idempotent backstop to migration v11)
  *                                   – prune batch_results to DEFAULT_BATCH_RETENTION
  *   --purge-orphan-logs       (with --fix) quarantine orphan audit logs into
  *                             results/.cleanup-trash/<ts>/ (move, not delete;
@@ -44,7 +45,7 @@
  * boot-reconcile, continuous-loop and retest paths and could fabricate values.
  */
 import Database from 'better-sqlite3';
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, renameSync, mkdirSync, copyFileSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, renameSync, mkdirSync, copyFileSync, rmSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { RAW_DIR, DEFAULT_BATCH_RETENTION } from '../core/constants.js';
@@ -64,7 +65,7 @@ const MATCH_TOLERANCE_MS = 15_000;
 const BACKFILL_TOLERANCE_MS = 60_000; // wider dedup window for backfill (save-time skew)
 const RECENT_LOG_MS = 24 * 60 * 60 * 1000;       // never purge a log written in the last day
 const RUNAWAY_NOTES = 'continuous-loop iteration%';
-const LOG_SNIPPET_CAP = 16384;                    // bytes — mirrors core/db.js insertErrorLog + migration v11
+const LOG_SNIPPET_CAP = 16384;                    // 16384 chars (UTF-8 byte size varies) — mirrors core/db.js insertErrorLog + migration v11
 
 // Human-readable byte size for the slim-down report.
 const humanBytes = n => {
@@ -228,13 +229,14 @@ if (existsSync(RESULTS_DIR)) {
 
 // ─── 6. DB slim-down (one-time backfill for legacy data) ──────────────────────
 // These mirror the forward-going behaviour that core/db.js now applies on every
-// insert: raw_json blobs offloaded to per-run files, log_snippet capped at 16 KB,
-// batch_results bounded. Existing rows from before those commits still carry the
+// insert: raw_json blobs offloaded to per-run files, log_snippet capped at 16384
+// chars (UTF-8 byte size varies), batch_results bounded. Existing rows from
+// before those commits still carry the
 // inline blob / oversized snippet / unbounded batch history; this section reports
 // (and, under --fix, performs) the one-time migration of that legacy data.
 section('6. DB slim-down (legacy backfill)');
 let rawJsonRows = 0;          // results rows still holding an inline raw_json blob
-let logSnippetRows = 0;       // error_logs rows whose snippet exceeds the 16 KB cap
+let logSnippetRows = 0;       // error_logs rows whose snippet exceeds the 16384-char cap (UTF-8 byte size varies)
 let batchCount = 0;           // total batches
 let batchResultRows = 0;      // total batch_results rows
 if (rdb) {
@@ -249,7 +251,7 @@ if (rdb) {
   try {
     logSnippetRows = rdb.prepare(`SELECT COUNT(*) AS c FROM error_logs WHERE log_snippet IS NOT NULL AND length(log_snippet) > ${LOG_SNIPPET_CAP}`).get().c;
     logSnippetRows > 0
-      ? repairable(`${logSnippetRows.toLocaleString()} error_logs row(s) exceed the 16 KB log_snippet cap (would truncate to tail)`)
+      ? repairable(`${logSnippetRows.toLocaleString()} error_logs row(s) exceed the 16384-char log_snippet cap (UTF-8 byte size varies; would truncate to tail)`)
       : ok('no oversized log_snippet rows (migration v11 already applied)');
   } catch (e) { hard(`log_snippet scan failed: ${e.message}`); }
 
@@ -261,6 +263,59 @@ if (rdb) {
       ? repairable(`${batchCount.toLocaleString()} batch(es) / ${batchResultRows.toLocaleString()} batch_results row(s); ~${overRetention.toLocaleString()} batch(es) over the ${DEFAULT_BATCH_RETENTION} retention cap (would prune)`)
       : ok(`${batchCount.toLocaleString()} batch(es) / ${batchResultRows.toLocaleString()} batch_results row(s) — within the ${DEFAULT_BATCH_RETENTION} retention cap`);
   } catch (e) { hard(`batch_results scan failed: ${e.message}`); }
+}
+
+// ─── 7. Orphan raw_json dirs (results/raw/run-<id>) ───────────────────────────
+// Each result's raw_json blob is offloaded to results/raw/run-<id>/<id>.json,
+// keyed by the SQLite runs-table id. When a run row is deleted (runaway prune,
+// backfill churn, manual cleanup) its raw dir is left behind — server.js
+// deleteRun() operates on the file-index run NUMBER, a DIFFERENT namespace from
+// the runs-table id that keys these dirs, so it can't safely reclaim them (a
+// wrong-id rm would destroy a LIVE run's raw data). This sweep is the
+// namespace-correct reclaimer: a run-<id> dir whose <id> has no row in `runs`
+// is an orphan. Stray entries that aren't run-<int> dirs are reported but never
+// deleted.
+section('7. Orphan raw dirs (results/raw)');
+const orphanRawDirs = [];   // { name, dir, bytes }
+let orphanRawBytes = 0;
+if (!existsSync(RAW_DIR)) {
+  ok(`no raw dir at ${path.relative(ROOT, RAW_DIR)} (ok — nothing offloaded yet)`);
+} else if (!rdb) {
+  info('raw dir present but audit.db unreadable — cannot determine orphans (skipped)');
+} else {
+  // Recursively sum a directory's byte size for the reclaimable-bytes report.
+  const dirBytes = (d) => {
+    let total = 0;
+    let entries;
+    try { entries = readdirSync(d, { withFileTypes: true }); }
+    catch (e) { console.error('[cleanup] raw dir size scan failed:', e.message); return 0; }
+    for (const ent of entries) {
+      const p = path.join(d, ent.name);
+      if (ent.isDirectory()) total += dirBytes(p);
+      else { try { total += statSync(p).size; } catch (e) { console.error('[cleanup] raw file stat failed:', e.message); } }
+    }
+    return total;
+  };
+  const runExists = rdb.prepare('SELECT 1 FROM runs WHERE id = ? LIMIT 1');
+  let names;
+  try { names = readdirSync(RAW_DIR, { withFileTypes: true }); }
+  catch (e) { hard(`raw dir listing failed: ${e.message}`); names = []; }
+  for (const ent of names) {
+    const m = /^run-(\d+)$/.exec(ent.name);
+    if (!ent.isDirectory() || !m) { info(`unexpected entry in raw dir (left untouched): ${ent.name}`); continue; }
+    const id = parseInt(m[1], 10);
+    let present;
+    try { present = !!runExists.get(id); }
+    catch (e) { hard(`runs lookup for raw dir ${ent.name} failed: ${e.message}`); continue; }
+    if (present) continue; // live/known run — keep
+    const dir = path.join(RAW_DIR, ent.name);
+    const bytes = dirBytes(dir);
+    orphanRawBytes += bytes;
+    orphanRawDirs.push({ name: ent.name, dir, bytes });
+    repairable(`orphan raw dir ${ent.name} (no runs row for id=${id}, ${humanBytes(bytes)} reclaimable)`);
+  }
+  if (!orphanRawDirs.length) ok('no orphan raw dirs (every run-<id> maps to a runs row)');
+  else { repairable(`${orphanRawDirs.length} orphan raw dir(s), ${humanBytes(orphanRawBytes)} total reclaimable`); if (!FIX) console.log(C.dim('    (pass --fix to rm -rf these orphan dirs)')); }
 }
 
 // Close our OWN read-only handle before mutating: if it stays open, the WAL
@@ -379,11 +434,14 @@ if (FIX) {
           try {
             mkdirSync(dir, { recursive: true });
             writeFileSync(file, row.raw_json);
-            // VERIFY before we agree to null: file exists and is non-empty.
-            const st = statSync(file);
-            if (st.size > 0) ready.push(row.id);
-            else { skippedWrite++; hard(`raw_json offload: ${file} wrote 0 bytes — left column intact for result ${row.id}`); }
-          } catch (e) { skippedWrite++; hard(`raw_json offload: write failed for result ${row.id} — left column intact: ${e.message}`); }
+            // VERIFY before we agree to null: read the file back and JSON.parse
+            // it. A non-empty file can still be truncated/corrupt — size>0 is not
+            // enough. Only NULL the column when the round-trip parse SUCCEEDS;
+            // any read/parse failure leaves the column intact (no data loss).
+            const back = readFileSync(file, 'utf8');
+            JSON.parse(back); // throws on truncated/corrupt JSON
+            ready.push(row.id);
+          } catch (e) { skippedWrite++; hard(`raw_json offload: round-trip verify failed for run-${row.run_id}/result ${row.id} (${file}) — left column intact: ${e.message}`); }
         }
         if (ready.length) {
           sdb.transaction(() => { for (const id of ready) { nullStmt.run(id); offloaded++; } })();
@@ -402,7 +460,7 @@ if (FIX) {
         `UPDATE error_logs SET log_snippet = substr(log_snippet, length(log_snippet) - ${LOG_SNIPPET_CAP} + 1) WHERE log_snippet IS NOT NULL AND length(log_snippet) > ${LOG_SNIPPET_CAP}`,
       ).run();
       capRes.changes > 0
-        ? fixd(`capped ${capRes.changes.toLocaleString()} oversized log_snippet row(s) to 16 KB tail`)
+        ? fixd(`capped ${capRes.changes.toLocaleString()} oversized log_snippet row(s) to the 16384-char tail (UTF-8 byte size varies)`)
         : console.log(`  ${C.dim('↳ log_snippet cap: nothing to truncate (v11 already applied)')}`);
 
       // Action 3: prune batch_results to retention (reuse core/db.js keep-set).
@@ -416,6 +474,40 @@ if (FIX) {
       catch (e) { hard(`slim-down checkpoint failed: ${e.message}`); }
     } catch (e) { hard(`DB slim-down failed (restore audit.db from the backup): ${e.message}`); }
   } else console.log(`  ${C.dim('↳ slim-down skipped (DB writes disabled)')}`);
+
+  // ── Orphan raw-dir reclaim ────────────────────────────────────────────────
+  // Gated on the SAME backup+checkpoint guard as the DB actions (dbWriteOk).
+  // Re-scan against the CURRENT runs table (the runaway prune above may have
+  // just orphaned more dirs) so one --fix pass reclaims them all. Namespace
+  // note: these dirs are keyed by the runs-table id, NOT the file-index run
+  // number — see the section-7 comment for why deleteRun() can't reclaim them.
+  if (dbWriteOk && existsSync(RAW_DIR)) {
+    try {
+      const { getDb } = await import('../core/db.js');
+      const odb = getDb();
+      const runExists = odb.prepare('SELECT 1 FROM runs WHERE id = ? LIMIT 1');
+      let removed = 0, reclaimed = 0;
+      let names;
+      try { names = readdirSync(RAW_DIR, { withFileTypes: true }); }
+      catch (e) { hard(`raw dir listing failed: ${e.message}`); names = []; }
+      for (const ent of names) {
+        const m = /^run-(\d+)$/.exec(ent.name);
+        if (!ent.isDirectory() || !m) continue; // never delete non-run-<int> entries
+        const id = parseInt(m[1], 10);
+        let present;
+        try { present = !!runExists.get(id); }
+        catch (e) { hard(`runs lookup for raw dir ${ent.name} failed: ${e.message}`); continue; }
+        if (present) continue;
+        const dir = path.join(RAW_DIR, ent.name);
+        const known = orphanRawDirs.find(o => o.name === ent.name);
+        const bytes = known ? known.bytes : 0;
+        try { rmSync(dir, { recursive: true, force: true }); removed++; reclaimed += bytes; fixd(`removed orphan raw dir ${ent.name} (${humanBytes(bytes)})`); }
+        catch (e) { hard(`could not remove orphan raw dir ${ent.name}: ${e.message}`); }
+      }
+      if (!removed) console.log(`  ${C.dim('↳ orphan raw dirs: none to reclaim')}`);
+      else fixd(`reclaimed ${removed} orphan raw dir(s), ${humanBytes(reclaimed)} freed`);
+    } catch (e) { hard(`orphan raw-dir reclaim failed: ${e.message}`); }
+  } else if (!dbWriteOk) console.log(`  ${C.dim('↳ orphan raw-dir reclaim skipped (DB writes disabled)')}`);
 
   if (PURGE_LOGS && orphanLogs.length && !abortAll) {
     const trash = path.join(RESULTS_DIR, '.cleanup-trash', String(ts));
