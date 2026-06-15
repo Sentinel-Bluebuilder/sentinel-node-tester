@@ -1940,6 +1940,9 @@ function sanitizeForPublic(evt) {
   if (evt.batchId != null)      safe.batchId      = evt.batchId;
   if (evt.snapshotSize != null) safe.snapshotSize = evt.snapshotSize;
   if (evt.startedAt != null)    safe.startedAt    = evt.startedAt;
+  // batch:start carries resumed:true on the resume-intent pass. /live uses it to
+  // re-hydrate the full batch (already-tested nodes aren't re-emitted on resume).
+  if (evt.resumed === true)     safe.resumed      = true;
   if (evt.gapMs != null)        safe.gapMs        = evt.gapMs;
   if (evt.nextBatchAt != null)  safe.nextBatchAt  = evt.nextBatchAt;
   // batch:node:result public-safe fields.

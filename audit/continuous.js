@@ -232,6 +232,28 @@ function _sanitizeBatchNodeResult(result, batchId) {
   };
 }
 
+// Map a persisted batch_results row (snake_case) back into the camelCase result
+// shape the in-memory results array and /live snapshot expect. Used only by the
+// cross-process resume seed (see the resume-intent branch in _runLoop).
+function _batchRowToResult(row) {
+  return {
+    address:        row.node_address,
+    moniker:        row.moniker || '',
+    country:        row.country || '',
+    countryCode:    row.country_code || '',
+    city:           row.city || '',
+    type:           row.type || null,
+    actualMbps:     row.actual_mbps,
+    baselineAtTest: row.baseline_mbps,
+    peers:          row.peers,
+    maxPeers:       row.max_peers,
+    error:          row.error || null,
+    errorCode:      row.error_code || null,
+    skipped:        row.error_code === 'TEST_RUN_SKIP',
+    testedAt:       row.tested_at,
+  };
+}
+
 // ─── Core Loop ────────────────────────────────────────────────────────────────
 
 /**
@@ -244,7 +266,7 @@ function _sanitizeBatchNodeResult(result, batchId) {
  * @param {Array|null} frozenNodes - Pre-resolved node snapshot; p2p runAudit uses it instead of re-querying
  * @returns {Promise<{ passed: number, failed: number }>}
  */
-async function _runOnePass(loopState, batchId, frozenNodes = null) {
+async function _runOnePass(loopState, batchId, frozenNodes = null, resume = false) {
   // Build a broadcast intercept that captures 'result' events for batch tracking.
   // All other broadcast types (log, state) are silently dropped (noop) —
   // the continuous loop emits its own high-level events instead.
@@ -307,6 +329,10 @@ async function _runOnePass(loopState, batchId, frozenNodes = null) {
           _ctrl.subscriptionGranter,
           st,
           batchBroadcast,
+          // On resume, opts.resume=true keeps the sub-plan run from resetting
+          // counters/startedAt and makes its totalNodes math include the already-
+          // tested nodes instead of just the remainder.
+          { resume },
         )
       : (st) => {
           // The continuous loop persists per-node to batch_results separately;
@@ -316,7 +342,11 @@ async function _runOnePass(loopState, batchId, frozenNodes = null) {
           // no restore needed (nothing else reads these fields off loopState).
           st.activeDbRunId = null;
           st.activeRunDir = null;
-          return pipeline.runAudit(false, st, batchBroadcast, frozenNodes, {
+          // resume=true on the resume-intent pass: pipeline preserves the
+          // in-memory results array (no wipe) and sets totalNodes =
+          // results.length + remaining, so getResults() — which /live's snapshot
+          // mirrors — reflects the FULL batch, not just the post-resume tail.
+          return pipeline.runAudit(resume, st, batchBroadcast, frozenNodes, {
             testRun:     !!_ctrl.testRun,
             pricingMode: _ctrl.pricingMode || null,
           });
@@ -414,9 +444,34 @@ async function _runLoop() {
         const viableNodes = allNodes.filter(n => n?.address && !testedSet.has(n.address));
         frozenNodes = viableNodes;
 
+        // Cross-process resume: after a server restart the in-memory results
+        // array is empty, but the reused batch already has its tested nodes in
+        // batch_results. Re-seed them so getResults() — the sole source for
+        // /live's snapshot — and the pipeline's resume totalNodes math reflect
+        // the FULL batch, not just the remainder we're about to test. No-op in
+        // the same-process case (the array still holds them) and under an
+        // injected runner (test path persists nothing).
+        if (!_runnerFn) {
+          try {
+            const pipeline = await import('./pipeline.js');
+            if (pipeline.getResults().length === 0 && currentBatchId > 0) {
+              const { getBatchResults } = await import('../core/db.js');
+              const { results: priorRows } = getBatchResults(currentBatchId, { limit: 100000 }, 'real');
+              const restored = pipeline.seedResults((priorRows || []).map(_batchRowToResult));
+              if (restored > 0) {
+                _emitScoped('log', { msg: `↩ Resume: restored ${restored} already-tested node(s) from batch ${currentBatchId}` });
+              }
+            }
+          } catch (err) {
+            console.error(`[continuous] resume seed failed (batch ${currentBatchId}): ${err.message}`);
+          }
+        }
+
         _emitScoped('batch:start', {
           batchId:      currentBatchId,
-          snapshotSize: viableNodes.length,
+          // Full batch size (tested + remaining), not just the remainder — so
+          // /live's "X / Y" denominator shows the whole batch on resume.
+          snapshotSize: allNodes.length || viableNodes.length,
           mode:         _ctrl.mode,
           startedAt:    iterStart,
           iteration:    _ctrl.iteration,
@@ -424,7 +479,9 @@ async function _runLoop() {
         });
 
         try {
-          ({ passed, failed } = await _runOnePass(loopState, currentBatchId, frozenNodes));
+          // resume=true: preserve the in-memory results (seeded above) and make
+          // the pipeline's totalNodes include the already-tested nodes.
+          ({ passed, failed } = await _runOnePass(loopState, currentBatchId, frozenNodes, true));
         } catch (err) {
           iterErr = err;
           _ctrl.lastError = err.message || String(err);

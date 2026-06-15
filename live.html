@@ -2158,6 +2158,13 @@
           setStatus('running');
           showPaused(false);
           cbApplyBatchStart(d);
+          // RESUME: the bulk of this batch's nodes were tested before this SSE
+          // connection's event window and are NOT re-emitted — only the
+          // remaining nodes stream. An already-open /live tab would otherwise
+          // show just the post-resume tail. Pull the full current batch once so
+          // the table repaints completely (getResults() is the complete batch
+          // server-side after the resume seed/preserve fix).
+          if (d.resumed) { loadCurrentBatch(); }
           appendLog({
             tag: 'ROUND', cat: 'sys', status: 'ok',
             msg: `Round ${d.iteration != null ? d.iteration : (d.batchId || '?')} — testing ${d.snapshotSize || d.snapshot_size || d.total || '?'} nodes`,

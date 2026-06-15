@@ -163,6 +163,27 @@ if (existsSync(RESULTS_FILE)) {
 
 export function getResults() { return results; }
 
+/**
+ * Seed the in-memory results array with already-tested rows (deduped by address,
+ * same as upsertResult). Used by the continuous resume path after a server
+ * restart, when the reused batch already has tested nodes persisted in the DB
+ * but the in-memory `results` array is empty — without this, getResults() (the
+ * sole source for /live's snapshot and the resume `totalNodes` math) would only
+ * ever reflect the post-resume remainder. No-op for addresses already present,
+ * so it is safe to call on a partially-populated array. Returns count appended.
+ */
+export function seedResults(rows) {
+  if (!Array.isArray(rows)) return 0;
+  let added = 0;
+  for (const r of rows) {
+    if (!r || !r.address) continue;
+    const idx = results.findIndex(x => x.address === r.address);
+    if (idx !== -1) { results[idx] = r; }
+    else { results.push(r); added++; }
+  }
+  return added;
+}
+
 // ─── Crash-Safe Results Persistence ────────────────────────────────────────
 // Write to temp file then rename (atomic on most filesystems).
 // Also continuously save to the active run directory so a kill never loses data.
@@ -1846,7 +1867,7 @@ export async function runSubPlanTest(planId, subscriptionId, granterAddr, state,
   state.balanceUdvpn = parseInt(balRes?.amount || '0', 10);
   state.balance = `${(state.balanceUdvpn / 1_000_000).toFixed(4)} P2P`;
   state.spentUdvpn = 0;
-  state.runSpentUdvpn = 0; // fresh pass — cumulative run spend
+  if (!resume) state.runSpentUdvpn = 0; // preserve cumulative run spend across resume (parity with runAudit:641)
   broadcast('state', { state });
 
   // Pre-broadcast fee grant verification — abort with structured error if missing/expired.
