@@ -2291,6 +2291,19 @@ function trimRowDiag(r) {
   };
 }
 
+// Strip the state fields the admin browser never consumes from a LIVE event's
+// state payload. admin.html DOES read walletAddress + balance (the wallet
+// header in applyState, kept current via `Object.assign(state, msg.state)` on
+// progress/result events) — those MUST keep flowing. But balanceUdvpn and
+// spentUdvpn are read NOWHERE in admin.html, and runGranter (subscription
+// granter address) is server-internal. Non-mutating: rest-spread a clone so the
+// global `state` is never touched.
+function sanitizeAdminState(s) {
+  if (!s || typeof s !== 'object') return s;
+  const { balanceUdvpn, spentUdvpn, runGranter, ...rest } = s;
+  return rest;
+}
+
 const rlAdminSse = sseLimit({ maxPerIp: 10, bucket: 'admin-sse' });
 app.get('/api/events', adminOnly, rlAdminSse, (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -2310,23 +2323,23 @@ app.get('/api/events', adminOnly, rlAdminSse, (req, res) => {
   const ADMIN_BLOCK = /^(loop:|iteration:|batch:)/;
   const handler = (data) => {
     if (data && typeof data.type === 'string' && ADMIN_BLOCK.test(data.type)) return;
-    // Strip runGranter from any state payload before sending — even the admin
-    // browser doesn't need the granter address; it's purely server-internal.
-    if (data && data.type === 'state' && data.state && typeof data.state === 'object') {
-      const { runGranter, ...safeState } = data.state;
-      // state events also carry results[] (broadcastStateFresh) — trim each
-      // row's diag here too. New array of clones; do not mutate data.results.
-      const safeResults = Array.isArray(data.results) ? data.results.map(trimRowDiag) : data.results;
-      send({ ...data, state: safeState, results: safeResults });
-      return;
+    let out = data;
+    // ANY live event carrying a state payload (state, result, progress) gets the
+    // unconsumed wallet internals + server-internal granter stripped uniformly.
+    if (data && data.state && typeof data.state === 'object') {
+      out = { ...out, state: sanitizeAdminState(data.state) };
     }
     // result events forward the same row object insertBatchResult persists to
-    // raw_json — clone+trim for the wire, leave data.result untouched.
+    // raw_json — clone+trim its diag for the wire, leave data.result untouched.
     if (data && data.type === 'result' && data.result && typeof data.result === 'object') {
-      send({ ...data, result: trimRowDiag(data.result) });
-      return;
+      out = { ...out, result: trimRowDiag(data.result) };
     }
-    send(data);
+    // state events also carry results[] (broadcastStateFresh) — trim each row's
+    // diag too. New array of clones; do not mutate data.results.
+    if (out && Array.isArray(out.results)) {
+      out = { ...out, results: out.results.map(trimRowDiag) };
+    }
+    send(out);
   };
   emitter.on('update', handler);
   // 20s heartbeat comment-line — keeps the TCP connection alive through proxies

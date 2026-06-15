@@ -78,6 +78,9 @@ vm.createContext(sandbox);
 vm.runInContext(
   mustExtract(extractFn(src, 'trimRowDiag'), 'trimRowDiag', '}', 'v2rayPort'),
   sandbox);
+vm.runInContext(
+  mustExtract(extractFn(src, 'sanitizeAdminState'), 'sanitizeAdminState', '}', 'runGranter'),
+  sandbox);
 
 const KEPT = ['v2rayProto', 'v2rayTransport', 'v2raySecurity', 'v2rayPort'];
 const SENSITIVE = [
@@ -172,6 +175,73 @@ console.log('[4] rows with a falsy diag pass through unchanged');
   // non-object inputs are returned untouched (defensive)
   ok(vm.runInContext('trimRowDiag(null)', sandbox) === null, 'null row → null');
   ok(vm.runInContext('trimRowDiag(undefined)', sandbox) === undefined, 'undefined row → undefined');
+}
+
+// ─── 5. sanitizeAdminState: strip wallet internals, KEEP walletAddress/balance ─
+console.log('[5] sanitizeAdminState strips balanceUdvpn/spentUdvpn/runGranter, keeps the rest');
+{
+  const original = {
+    status: 'running', totalNodes: 120,
+    walletAddress: 'sent1wallet', balance: '12.5',
+    // unconsumed / server-internal — must be stripped:
+    balanceUdvpn: 12500000, spentUdvpn: 4200000, runGranter: 'sent1granter',
+  };
+  sandbox._state = original;
+  const safe = vm.runInContext('sanitizeAdminState(_state)', sandbox);
+
+  ok(!Object.prototype.hasOwnProperty.call(safe, 'balanceUdvpn'),
+     'DROPS balanceUdvpn (regression guard)');
+  ok(!Object.prototype.hasOwnProperty.call(safe, 'spentUdvpn'),
+     'DROPS spentUdvpn (regression guard)');
+  ok(!Object.prototype.hasOwnProperty.call(safe, 'runGranter'),
+     'DROPS runGranter (regression guard)');
+
+  // admin.html DOES read these — they MUST survive
+  ok(safe.walletAddress === 'sent1wallet', 'KEEPS walletAddress (wallet header)');
+  ok(safe.balance === '12.5', 'KEEPS balance (wallet header)');
+  ok(safe.status === 'running', 'KEEPS status');
+  ok(safe.totalNodes === 120, 'KEEPS totalNodes');
+
+  // ─── NON-MUTATION ─────────────────────────────────────────────────────────
+  ok(safe !== original, 'returns a NEW state object (not the same reference)');
+  ok(original.balanceUdvpn === 12500000, 'original balanceUdvpn UNTOUCHED');
+  ok(original.spentUdvpn === 4200000, 'original spentUdvpn UNTOUCHED');
+  ok(original.runGranter === 'sent1granter', 'original runGranter UNTOUCHED');
+}
+{
+  // non-object inputs pass through untouched (defensive)
+  ok(vm.runInContext('sanitizeAdminState(null)', sandbox) === null, 'null state → null');
+  ok(vm.runInContext('sanitizeAdminState(undefined)', sandbox) === undefined, 'undefined state → undefined');
+  ok(vm.runInContext('sanitizeAdminState("x")', sandbox) === 'x', 'non-object state passes through');
+}
+
+// ─── 6. wiring: the /api/events handler routes every payload through the sanitizers ─
+console.log('[6] /api/events handler wires sanitizeAdminState + trimRowDiag on the live path');
+{
+  // Isolate the ADMIN handler body so the init-send (its own 5-field
+  // destructure, not the helper) — and the unrelated /live handler, which also
+  // matches `const handler = (data) =>` — can't satisfy these substring checks.
+  // Anchor at the admin route then find the handler that follows it.
+  const route = src.indexOf("app.get('/api/events'");
+  ok(route !== -1, 'found the /api/events admin route in server.js');
+  const hm = /const handler = \(data\) => \{/.exec(src.slice(route));
+  ok(!!hm, 'found the live-event handler in /api/events');
+  const startAbs = route + hm.index;
+  let depth = 0, started = false, j = startAbs, body = '';
+  for (; j < src.length; j++) {
+    const c = src[j];
+    if (c === '{') { depth++; started = true; }
+    else if (c === '}') { depth--; if (started && depth === 0) { j++; break; } }
+  }
+  body = src.slice(startAbs, j);
+
+  ok(body.includes('sanitizeAdminState('),
+     'handler routes the state path through sanitizeAdminState (regression guard)');
+  // trimRowDiag must apply to BOTH the single result row and the results[] array
+  ok(/result:\s*trimRowDiag\(/.test(body),
+     'handler trims data.result via trimRowDiag (result events)');
+  ok(/\.map\(trimRowDiag\)/.test(body),
+     'handler trims results[] via trimRowDiag (state events)');
 }
 
 console.log(`\n${'='.repeat(60)}\nRESULTS: ${out.pass} passed, ${out.fail} failed (${out.pass + out.fail} total)`);
