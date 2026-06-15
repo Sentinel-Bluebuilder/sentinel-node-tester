@@ -632,6 +632,14 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
     state.passedBaseline = 0;
     state.nodeSpeedHistory = [];
     state.baselineHistory = [];
+    // A fresh run's sweep total isn't known until after the online scan
+    // (set at line ~760). Until then totalNodes must read 0, NOT the prior
+    // run's value — several broadcast('state') calls fire before the scan
+    // (balance, baseline, node-fetch), each carrying the new activeRunNumber.
+    // /live now prefers state.totalNodes as its "X / Y nodes tested"
+    // denominator, so a lingering prior-run total would flash a wrong "Y"
+    // (e.g. "0 / 1040") until the scan completes. Zero falls back to "—".
+    state.totalNodes = 0;
     saveResults(state);
   }
 

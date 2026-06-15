@@ -1606,8 +1606,30 @@
       }, 1000);
     }
 
+    // Single source of truth for the run-wide sweep denominator (the "Y" in
+    // "X / Y nodes tested" and "X / Y Nodes"). Prefer state.totalNodes — the
+    // full per-run sweep the pipeline maintains across stop→resume and
+    // broadcasts via the `state` event — over _cb.snapshotSize. The latter is
+    // the *per-batch* count, and on a RESUMED batch (continuous.js emits
+    // `snapshotSize: viableNodes.length`) it is only the remaining-untested
+    // nodes. The tested count (X = deduped resultsArr.length) is cumulative
+    // across the whole run, including pre-resume rows replayed on `init`, so
+    // pairing it with a remainder-only denominator made "X / Y" lag (showing
+    // the previous run's total) until the next full batch:start landed. Three
+    // callers (cbRender, renderLiveStats, applyHeaderStatsFromState) computed
+    // this independently with divergent priority; routing them through one
+    // helper keeps them from drifting again. Falls back to the per-batch
+    // snapshot, then the row count, when the run total isn't known yet.
+    function runTotalNodes() {
+      const total = _liveState && Number(_liveState.totalNodes);
+      if (total > 0) return total;
+      if (_cb.snapshotSize > 0) return _cb.snapshotSize;
+      const arr = Array.isArray(resultsArr) ? resultsArr : [];
+      return arr.length || 0;
+    }
+
     function cbRender() {
-      const snap   = _cb.snapshotSize;
+      const snap   = runTotalNodes();
       // Single source of truth: the deduped resultsArr (rows upserted by
       // address) — same approach admin.html uses for its Tested tile. Server
       // `state.testedNodes` can double-count retries / counter-increment
@@ -1685,12 +1707,11 @@
       const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
 
       const arr      = Array.isArray(resultsArr) ? resultsArr : [];
-      // Snapshot total for THIS run. Prefer the current-batch snapshot from
-      // `batch:start` and `state.totalNodes` (admin's per-run snapshot). Both
-      // reflect the size of the active sweep, not the chain-wide node count.
-      const snap     = _cb.snapshotSize ||
-                       (_liveState && Number(_liveState.totalNodes)) ||
-                       arr.length || 0;
+      // Run-wide sweep total for THIS run (the "Y" denominator). See
+      // runTotalNodes() — prefers state.totalNodes so a resumed batch's
+      // remainder-only snapshotSize can't shrink the denominator below the
+      // cumulative tested count.
+      const snap     = runTotalNodes();
 
       // "Connected" = node returned mbps>0 (handshake + speed both succeeded).
       const connected = arr.filter(r => r.actualMbps != null && r.actualMbps > 0).length;
@@ -1939,12 +1960,9 @@
       } else {
         setHeaderBaseline(null);
       }
-      // Network Nodes — total snapshot size for current batch (state.totalNodes
-      // tracks scanned/online; fall back to _cb.snapshotSize, then resultsArr.)
-      const totalNodes =
-        (_liveState && _liveState.totalNodes) ||
-        _cb.snapshotSize ||
-        resultsArr.length;
+      // Network Nodes — run-wide sweep total. Shared denominator (prefers
+      // state.totalNodes, falls back to _cb.snapshotSize, then resultsArr).
+      const totalNodes = runTotalNodes();
       // Only overwrite if we actually have a live value; otherwise leave
       // whatever loadHeaderStats() painted from /api/public/stats.
       if (totalNodes) set('hdrNetworkNodes', Number(totalNodes).toLocaleString());
@@ -2071,6 +2089,11 @@
         _cb.passed = 0;
         _cb.failed = 0;
         _cb.snapshotSize = 0;
+        // Drop the prior run's sweep total too: runTotalNodes() now prefers
+        // _liveState.totalNodes, so leaving it set would carry the old "Y" into
+        // the new run until the next state event overwrites it. The immediately
+        // following mergeLiveState() repopulates it from the fresh run's state.
+        if (_liveState) _liveState.totalNodes = 0;
         cbRender();
         try { localStorage.removeItem(LIVE_CACHE_KEY); } catch {}
       } catch {}
