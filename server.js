@@ -1889,38 +1889,27 @@ function _redactPublicError(v, max = 200) {
   return String(v).replace(_PUBLIC_ADDR_RE, '[addr]').slice(0, max);
 }
 
-// Keep only the counters / progress fields a public viewer needs.
-// Strips wallet, balance*, spent*, MNEMONIC-derived data, errorMessage internals.
+// Keep only the state fields /live actually reads. Strips wallet, balance*,
+// spent*, MNEMONIC-derived data, errorMessage internals, and any counter or
+// progress field the public surfaces never consume.
+// Each key below is verified read by live.html:
+//   - status / totalNodes / testRun / runMode / runPlanId / pricingMode /
+//     activeRunNumber are read directly off _liveState.
+//   - baselineMbps / baselineHistory feed computeBaselineAvg(_liveState) for
+//     the Server-Baseline header tile.
+//   - activeSDK ('js' | 'tkd' | 'csharp') surfaces next to the run-mode label;
+//     display name + version are joined client-side via /api/public/sdk-info.
 const PUBLIC_STATE_KEYS = [
   'status',
   'totalNodes',
-  'testedNodes',
-  'failedNodes',
-  'skippedNodes',
-  'passed10',
-  'passed15',
-  'passedBaseline',
   'baselineMbps',
   'baselineHistory',
-  'nodeSpeedHistory',
-  'currentNode',
-  'currentType',
-  'currentLocation',
-  'startedAt',
-  'completedAt',
-  'activeRunNumber',
   'testRun',
-  'continuousLoop',
-  'pricingMode',
-  // Surfaces the active mode + plan id so /live can render the same
-  // "Plan #N / P2P / Test Run" badge the admin shows.
   'runMode',
   'runPlanId',
-  'estimatedTotalCost',
-  // SDK key the tester is currently using ('js' | 'tkd' | 'csharp'). Surfaces
-  // on /live next to the run-mode label so viewers see which client produced
-  // the numbers. Display name + version are joined client-side via /api/public/sdk-info.
+  'pricingMode',
   'activeSDK',
+  'activeRunNumber',
 ];
 function sanitizePublicState(s) {
   if (!s || typeof s !== 'object') return {};
@@ -1938,7 +1927,6 @@ function sanitizePublicResult(r) {
     countryCode: r.countryCode,
     city: r.city,
     actualMbps: r.actualMbps,
-    advertisedMbps: r.advertisedMbps,
     peers: r.peers,
     maxPeers: r.maxPeers,
     errorCode: r.errorCode,
@@ -1947,11 +1935,6 @@ function sanitizePublicResult(r) {
     inPlan: r.inPlan === true ? true : undefined,
     testedAt: r.testedAt,
     baselineAtTest: r.baselineAtTest,
-    dynamicThreshold: r.dynamicThreshold,
-    pass10mbps: r.pass10mbps,
-    latencyMs: r.latencyMs,
-    handshakeMs: r.handshakeMs,
-    sessionMs: r.sessionMs,
   };
 }
 function sanitizeForPublic(evt) {
@@ -1963,10 +1946,8 @@ function sanitizeForPublic(evt) {
     if (sr) safe.result = sr;
   }
   if (evt.iteration != null)   safe.iteration   = evt.iteration;
-  if (evt.mode != null)        safe.mode        = evt.mode;
   if (evt.passed != null)      safe.passed      = evt.passed;
   if (evt.failed != null)      safe.failed      = evt.failed;
-  if (evt.durationMs != null)  safe.durationMs  = evt.durationMs;
   if (evt.error != null)       safe.error       = _redactPublicError(evt.error);
   // batch:* event fields — only public-safe node-level data
   if (evt.batchId != null)      safe.batchId      = evt.batchId;
