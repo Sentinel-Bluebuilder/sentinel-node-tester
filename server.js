@@ -310,7 +310,7 @@ function classifyLogCategory(msg) {
 // diagnostics are hidden from spectators (the admin dashboard still shows all).
 // Filters the rolling string buffer for the public log endpoints.
 function publicLogBuffer() {
-  return logBuffer.filter(m => classifyLogCategory(m) === 'node');
+  return logBuffer.filter(e => classifyLogCategory(e.msg) === 'node');
 }
 
 // EVENTS persist to a file (separate from per-run runs/test-NNN/audit.log), with
@@ -337,10 +337,15 @@ function appendEventLog(msg) {
 function broadcast(type, data = {}) {
   if (type === 'log' && data.msg) {
     // Tag the live SSE 'log' event with a category so admin/live can filter
-    // without re-deriving it. logBuffer stays an array of strings (the client
-    // re-classifies replayed init lines). Set BEFORE emitter.emit below.
+    // without re-deriving it. Set BEFORE emitter.emit below.
     data.cat = data.cat || classifyLogCategory(data.msg);
-    logBuffer.push(data.msg);
+    // Stamp emission time ONCE, here, so every surface shows WHEN a line was
+    // produced — not when the client rendered/replayed it. The ts rides on the
+    // live SSE event (data.ts), the in-memory buffer ({ts,msg}), and — via the
+    // pipeline's ISO-prefixed logLine — the on-disk audit log, so it survives a
+    // restart too. Buffer entries are {ts,msg} objects; consumers read .msg.
+    if (data.ts == null) data.ts = Date.now();
+    logBuffer.push({ ts: data.ts, msg: data.msg });
     if (logBuffer.length > LOG_BUFFER_MAX) logBuffer.shift();
     if (data.cat === 'events') appendEventLog(data.msg);
   }
@@ -560,13 +565,26 @@ try { state.activeSDK = _rfs(SDK_PREF_FILE, 'utf8').trim() || 'js'; } catch { st
 // boot (after snapshot restore) and on /api/resume so the SSE init replay
 // always carries the in-flight run's full prior log history — not the last
 // few lines, and not a different file's contents.
+// Parse one on-disk audit line back into a {ts,msg} buffer entry. Lines are
+// written as `[<ISO>] <msg>` by audit/pipeline.js logLine. Recover the emission
+// timestamp when the prefix is present; lines from older runs (no prefix) yield
+// ts:null so the client renders a BLANK time rather than a misleading one.
+function parseLogLine(line) {
+  const m = /^\[(\d{4}-\d\d-\d\dT[\d:.]+Z)\]\s([\s\S]*)$/.exec(line);
+  if (m) {
+    const t = Date.parse(m[1]);
+    return { ts: Number.isNaN(t) ? null : t, msg: m[2] };
+  }
+  return { ts: null, msg: line };
+}
+
 function hydrateLogBufferFromFile(filePath) {
   try {
     const txt = _rfs(filePath, 'utf8');
     const lines = txt.split('\n').filter(l => l.trim());
     const tail = lines.slice(-LOG_BUFFER_MAX);
     logBuffer.length = 0;
-    logBuffer.push(...tail);
+    logBuffer.push(...tail.map(parseLogLine));
     return tail.length;
   } catch { return 0; }
 }
@@ -1959,6 +1977,9 @@ function sanitizeForPublic(evt) {
   if (evt.testedAt != null)   safe.testedAt   = evt.testedAt;
   if (evt.msg != null)        safe.msg        = String(evt.msg).slice(0, 400);
   if (evt.cat != null)        safe.cat        = evt.cat;
+  // Emission timestamp — lets /live show WHEN a line was produced, not when it
+  // was rendered (matters for the seeded backlog + reconnect replay).
+  if (evt.ts != null)         safe.ts         = evt.ts;
   if (evt.baselineMbps != null) safe.baselineMbps = evt.baselineMbps;
   if (evt.skipped === true)   safe.skipped    = true;
   if (evt.inPlan === true)    safe.inPlan     = true;

@@ -603,7 +603,12 @@ export async function runAudit(resume, state, broadcast, preloadedNodes = null, 
     auditLogPath = path.join(PROJECT_ROOT, 'results', `audit-${logTs}.log`);
     state.auditLogPath = auditLogPath;
   }
-  const logLine = (msg) => { try { appendFileSync(auditLogPath, msg + '\n', 'utf8'); } catch {} };
+  // Prefix each persisted line with an ISO emission timestamp (`[<ISO>] <msg>`)
+  // so the server can recover WHEN a line was produced when it rehydrates the
+  // log buffer from disk after a restart — see server.js parseLogLine. Written
+  // at logLine-call time, which is ≈ emission (the broadcast tee fires it
+  // synchronously right after the line is emitted).
+  const logLine = (msg) => { try { appendFileSync(auditLogPath, `[${new Date().toISOString()}] ${msg}\n`, 'utf8'); } catch {} };
   if (resume) {
     logLine(`${'='.repeat(32)}`);
     logLine(`RESUMED: ${new Date().toISOString()}`);

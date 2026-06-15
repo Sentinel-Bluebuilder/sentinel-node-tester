@@ -1387,6 +1387,19 @@
       const body = document.getElementById('logBody');
       if (!body) return;
 
+      // Buffer/replay + raw 'log' SSE lines arrive as { ts, msg } (server-stamped
+      // emission time). They behave like plain string lines (classify by message
+      // shape) but carry their own time. Distinguish them from the rich
+      // structured lifecycle objects — which always carry tag/cat/status — by
+      // shape, unwrap to the string path, and remember the emission ts.
+      let _emitTs = null;   // emission time in ms, or null = unknown → blank
+      let _haveTs = false;  // entry specified its own time (vs. happening now)
+      if (opts && typeof opts === 'object' && ('msg' in opts) && !('tag' in opts) && !('cat' in opts) && !('status' in opts)) {
+        _emitTs = (typeof opts.ts === 'number') ? opts.ts : null;
+        _haveTs = true;
+        opts = String(opts.msg == null ? '' : opts.msg);
+      }
+
       let o;
       if (typeof opts === 'string') {
         // Derive cat/tag from the message shape so historical/backfilled
@@ -1434,7 +1447,11 @@
       div.className = 'log-entry ' + cls;
       div.dataset.cat = o.cat || 'sys';
 
-      const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+      // A normalised { ts, msg } entry uses its STORED emission time (null →
+      // blank, never a misleading now); live structured lifecycle objects are
+      // happening now.
+      const tsMs = _haveTs ? _emitTs : Date.now();
+      const ts = tsMs != null ? new Date(tsMs).toLocaleTimeString('en-US', { hour12: false }) : '';
       const parts = [`<span class="log-time">${ts}</span>`];
 
       // Tag pill
@@ -2340,7 +2357,8 @@
           break;
         }
         case 'log': {
-          if (d.msg) appendLog(d.msg);
+          // Carry the server's emission ts so the line shows WHEN it happened.
+          if (d.msg) appendLog({ ts: d.ts, msg: d.msg });
           break;
         }
         case 'state': {

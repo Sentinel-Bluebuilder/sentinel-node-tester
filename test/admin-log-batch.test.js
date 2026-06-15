@@ -43,7 +43,7 @@ function extractFn(src, name) {
   return src.slice(m.index, j);
 }
 
-const FNS = ['escHtml', 'logCategory', '_logEntryMatches', '_buildLogEntry', 'appendLog', 'appendLogBatch'];
+const FNS = ['escHtml', 'logCategory', '_logEntryMatches', '_logEntryFields', '_buildLogEntry', 'appendLog', 'appendLogBatch'];
 const extracted = FNS.map(n => extractFn(html, n)).join('\n\n');
 
 // ─── Fake DOM ──────────────────────────────────────────────────────────────
@@ -143,6 +143,37 @@ for (let i = 0; i < 600; i++) {
 }
 ok(logBody.children.length === LOG_DOM_MAX,
    `single-line appends trim to ${LOG_DOM_MAX} (got ${logBody.children.length})`);
+
+// ─── 5. Emission-time: replay uses stored ts, never render-time ──────────────
+console.log('[5] replay shows EMISSION time, live shows current time');
+logBody._children = [];
+const T = Date.parse('2026-06-15T08:30:45.000Z');
+const expectedTs = new Date(T).toLocaleTimeString('en-US', { hour12: false });
+vm.runInContext('appendLogBatch(globalThis.__tsEntries)',
+  Object.assign(sandbox, { __tsEntries: [{ ts: T, msg: 'restored line' }] }));
+const tsRow = logBody.children[0].innerHTML;
+ok(tsRow.includes(`<span class="log-time">${expectedTs}</span>`),
+   `replayed { ts, msg } renders its EMISSION time (${expectedTs})`);
+
+// A bare string (unknown emission time) renders a BLANK time, not a fake now.
+logBody._children = [];
+vm.runInContext('appendLogBatch(["legacy bare line"])', sandbox);
+ok(logBody.children[0].innerHTML.includes('<span class="log-time"></span>'),
+   'replayed bare string (no ts) renders a BLANK time, not render-time');
+
+// A direct live string append is happening NOW → non-empty current time.
+logBody._children = [];
+vm.runInContext('appendLog("live line happening now")', sandbox);
+const liveTime = /<span class="log-time">([^<]+)<\/span>/.exec(logBody.children[0].innerHTML);
+ok(liveTime && liveTime[1].trim().length > 0,
+   'live string append stamps the current time (non-blank)');
+
+// A live object entry { ts, msg } (e.g. a 'log' SSE line) uses its server ts.
+logBody._children = [];
+vm.runInContext('appendLog(globalThis.__liveObj)',
+  Object.assign(sandbox, { __liveObj: { ts: T, msg: 'sse live line' } }));
+ok(logBody.children[0].innerHTML.includes(`<span class="log-time">${expectedTs}</span>`),
+   'live { ts, msg } SSE line uses the server emission ts');
 
 console.log(`\n${'='.repeat(60)}\nRESULTS: ${out.pass} passed, ${out.fail} failed (${out.pass + out.fail} total)`);
 if (out.errors.length) for (const e of out.errors) console.log(`  FAIL: ${e}`);

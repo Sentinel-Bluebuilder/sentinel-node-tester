@@ -1465,8 +1465,9 @@
           if (msg.result) { upsertLocal(msg.result); addSingleRow(msg.result); }
           applyState();
         } else if (msg.type === 'log') {
-          // Live lines carry a server-sent category; prefer it over re-deriving.
-          appendLog(msg.msg, msg.cat);
+          // Live lines carry a server-sent category + emission ts; prefer both
+          // over re-deriving/now.
+          appendLog({ ts: msg.ts, msg: msg.msg }, msg.cat);
         }
       };
       eventSource.onerror = () => {
@@ -2103,13 +2104,27 @@
     // trim away — see appendLogBatch for why that mattered.
     const LOG_DOM_MAX = 500;
 
+    // Normalise a log entry to { msg, ts }. Buffer/replay entries arrive as
+    // { ts, msg } (server-stamped emission time); older payloads / direct calls
+    // may be bare strings (ts unknown → null).
+    function _logEntryFields(entry) {
+      if (entry && typeof entry === 'object') {
+        return { msg: String(entry.msg == null ? '' : entry.msg), ts: typeof entry.ts === 'number' ? entry.ts : null };
+      }
+      return { msg: String(entry == null ? '' : entry), ts: null };
+    }
+
     // Build ONE log-entry div — no DOM insertion, no scroll, no reflow. Shared
     // by the live single-line appendLog and the batched init replay so
     // categorization / escaping / linkification stay byte-identical between the
     // two paths.
     // `cat` is the server-sent category for live SSE lines; replayed init buffer
-    // lines arrive as plain strings (no cat), so re-derive via logCategory().
-    function _buildLogEntry(msg, cat) {
+    // lines arrive with no cat, so re-derive via logCategory().
+    // `tsMs` is the EMISSION time in ms — shows WHEN the line was produced, not
+    // when it rendered. null → blank time (genuinely unknown emission time, e.g.
+    // a pre-timestamp line from an older on-disk run); callers pass Date.now()
+    // for lines happening live.
+    function _buildLogEntry(msg, cat, tsMs) {
       const div = document.createElement('div');
       let cls = '';
       if (/⚠|warn|pause|insufficient/i.test(msg)) cls = 'log-warn';
@@ -2117,7 +2132,7 @@
       else if (/error|fail|ERR/i.test(msg)) cls = 'log-err';
       div.className = 'log-entry ' + cls;
       div.dataset.cat = cat || logCategory(msg);
-      const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+      const ts = tsMs != null ? new Date(tsMs).toLocaleTimeString('en-US', { hour12: false }) : '';
       // Escape all five HTML-significant chars (incl. " and ') BEFORE linkifying.
       // Without quote-escaping, an attacker-controlled URL containing a double
       // quote (e.g. from an untrusted node operator's remote_addrs) would break
@@ -2129,10 +2144,14 @@
       return div;
     }
 
-    // Live single-line append: one row, one reflow — fine at live cadence.
-    function appendLog(msg, cat) {
+    // Live single-line append: one row, one reflow — fine at live cadence. A
+    // direct string call is a line happening NOW; an object entry carries its
+    // own emission ts.
+    function appendLog(entry, cat) {
       const body = document.getElementById('logBody');
-      body.appendChild(_buildLogEntry(msg, cat));
+      const { msg, ts } = _logEntryFields(entry);
+      const tsMs = (entry && typeof entry === 'object') ? ts : Date.now();
+      body.appendChild(_buildLogEntry(msg, cat, tsMs));
       body.scrollTop = body.scrollHeight;
       if (body.children.length > LOG_DOM_MAX) body.removeChild(body.firstChild);
     }
@@ -2145,12 +2164,16 @@
     // appendLog enforces anyway, so the visible result is identical), (b) build
     // them into a single DocumentFragment, and (c) insert + scroll exactly once.
     // One reflow instead of thousands.
-    function appendLogBatch(msgs) {
-      if (!Array.isArray(msgs) || msgs.length === 0) return;
+    function appendLogBatch(entries) {
+      if (!Array.isArray(entries) || entries.length === 0) return;
       const body = document.getElementById('logBody');
-      const tail = msgs.length > LOG_DOM_MAX ? msgs.slice(-LOG_DOM_MAX) : msgs;
+      const tail = entries.length > LOG_DOM_MAX ? entries.slice(-LOG_DOM_MAX) : entries;
       const frag = document.createDocumentFragment();
-      for (const m of tail) frag.appendChild(_buildLogEntry(m));
+      // Replay uses each line's STORED emission ts (null → blank) — never now.
+      for (const e of tail) {
+        const { msg, ts } = _logEntryFields(e);
+        frag.appendChild(_buildLogEntry(msg, undefined, ts));
+      }
       body.appendChild(frag);
       body.scrollTop = body.scrollHeight;
       while (body.children.length > LOG_DOM_MAX) body.removeChild(body.firstChild);
