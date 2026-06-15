@@ -21,6 +21,35 @@ import { RAW_DIR, DEFAULT_BATCH_RETENTION } from './constants.js';
 // going forward; readers transparently rehydrate from the file so the REST
 // contract (er.raw_json as a JSON string) stays byte-identical.
 
+/**
+ * True when both ids are safe integer keys. result_id may arrive as a BigInt
+ * (better-sqlite3 lastInsertRowid), so coerce via Number() for the check —
+ * `Number.isInteger(Number(5n))` is true — while callers keep the original
+ * value for the path string (BigInt stringifies cleanly). Guards against any
+ * non-integer ever being interpolated into a filesystem path (defense-in-depth:
+ * no `../` traversal if a stray string ever reaches these helpers).
+ */
+function _validRawJsonIds(run_id, result_id) {
+  return Number.isInteger(Number(run_id)) && Number.isInteger(Number(result_id));
+}
+
+/**
+ * True when the handle is an in-memory better-sqlite3 DB. `db.memory` is the
+ * documented boolean (verified true for `new Database(':memory:')`, false for a
+ * file path in this better-sqlite3 version); we fall back to the `:memory:`
+ * name only if `db.memory` is somehow undefined on a future build.
+ *
+ * Why it matters: the raw_json file offload writes to a FIXED RAW_DIR that is
+ * independent of which handle is active. An in-memory test DB issuing
+ * (run_id, result_id) keys that collide with a real DB's rowids would overwrite
+ * (or be served in place of) prod diagnostic blobs. In-memory handles therefore
+ * keep raw_json inline and write no file at all.
+ */
+function _isMemoryDb(db) {
+  if (db && typeof db.memory === 'boolean') return db.memory;
+  return !!(db && db.name === ':memory:');
+}
+
 /** Deterministic path to a result's raw-json file. */
 function rawJsonPath(run_id, result_id) {
   return path.join(RAW_DIR, `run-${run_id}`, `${result_id}.json`);
@@ -43,6 +72,10 @@ function rawJsonPath(run_id, result_id) {
  * @param {string} json - the JSON.stringify(result) string
  */
 function writeRawJson(run_id, result_id, json) {
+  if (!_validRawJsonIds(run_id, result_id)) {
+    console.error(`[db] raw_json file write skipped: non-integer key (run_id=${run_id}, result_id=${result_id})`);
+    return;
+  }
   try {
     const dir = path.join(RAW_DIR, `run-${run_id}`);
     mkdirSync(dir, { recursive: true });
@@ -61,6 +94,7 @@ function writeRawJson(run_id, result_id, json) {
  */
 export function readRawJson(run_id, result_id) {
   if (run_id == null || result_id == null) return null;
+  if (!_validRawJsonIds(run_id, result_id)) return null;
   try {
     return readFileSync(rawJsonPath(run_id, result_id), 'utf8');
   } catch (e) {
@@ -606,9 +640,15 @@ function mapResultToRow(run_id, r) {
     error_code:      r.errorCode || null,
     error_message:   r.error || null,
     tested_at,
-    // raw_json is offloaded to a per-run file after insert; the column is
-    // bound NULL going forward. _rawJson carries the blob to the writer but is
-    // NOT a column param (SQLite ignores extra named props it doesn't bind).
+    // The writer decides how raw_json is persisted based on the active handle:
+    //   - file-backed DB  → column bound NULL, blob offloaded to a per-run file
+    //     (shrinks on-disk audit.db; readers rehydrate from the file).
+    //   - in-memory DB     → blob bound to the column inline, NO file written
+    //     (offload is pointless for :memory:, and a FIXED RAW_DIR shared across
+    //     handles would let test fixtures collide with / overwrite prod blobs).
+    // _rawJson carries the blob to the writer but is NEVER a column param —
+    // only the resolved `raw_json` value is bound (extra named props are
+    // ignored by better-sqlite3, but we strip it explicitly below).
     raw_json:        null,
     _rawJson:        JSON.stringify(r),
     pass,
@@ -640,10 +680,16 @@ const _insertResultSql = `
  */
 export function insertResult(run_id, result, which) {
   const db = getDb(which);
+  const memory = _isMemoryDb(db);
   const row = mapResultToRow(run_id, result);
   const { _rawJson, ...bind } = row;
+  // In-memory DB: keep the blob inline in the column, write no file. The RAW_DIR
+  // offload exists only to shrink the on-DISK audit.db, which is moot for a
+  // :memory: handle — and a fixed RAW_DIR shared across handles would let test
+  // fixtures collide with prod blobs under the same (run_id, result_id) key.
+  if (memory) bind.raw_json = _rawJson;
   const info = db.prepare(_insertResultSql).run(bind);
-  writeRawJson(run_id, info.lastInsertRowid, _rawJson);
+  if (!memory) writeRawJson(run_id, info.lastInsertRowid, _rawJson);
   return info.lastInsertRowid;
 }
 
@@ -656,12 +702,16 @@ export function insertResult(run_id, result, which) {
  */
 export function insertResultsBatch(run_id, results, which) {
   const db = getDb(which);
+  const memory = _isMemoryDb(db);
   const stmt = db.prepare(_insertResultSql);
   const insert = db.transaction((rows) => {
     for (const row of rows) {
       const { _rawJson, ...bind } = row;
+      // See insertResult: in-memory keeps the blob inline (no file); file-backed
+      // NULLs the column and offloads to a per-run file.
+      if (memory) bind.raw_json = _rawJson;
       const info = stmt.run(bind);
-      writeRawJson(run_id, info.lastInsertRowid, _rawJson);
+      if (!memory) writeRawJson(run_id, info.lastInsertRowid, _rawJson);
     }
   });
   insert(results.map(r => mapResultToRow(run_id, r)));

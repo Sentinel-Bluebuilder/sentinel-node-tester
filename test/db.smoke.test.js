@@ -6,11 +6,14 @@
  * Exit 0 = all pass, exit 1 = failures.
  */
 
+import path from 'path';
+import { existsSync } from 'fs';
 import { getDb, useDb, insertRun, updateRunOnFinish, insertResult, insertResultsBatch,
   getRun, findRunByKey, listRuns, getLatestResultPerNode,
   getNodeHistory, getNetworkStats, insertErrorLog, getNodeErrors, closeDb,
   insertBatch, insertBatchResult, updateBatchOnFinish, getBatchResults,
   getActiveBatch, getLastBatch, pruneBatchResults } from '../core/db.js';
+import { RAW_DIR } from '../core/constants.js';
 
 // ─── Use a fresh in-memory DB for this test run ───────────────────────────────
 // `useDb` sets the module singleton so all exported helpers target this handle.
@@ -267,6 +270,29 @@ eq(summary.deletedBatchResults, 2, 'deletedBatchResults = 2');
 assert(db.prepare('PRAGMA foreign_key_check').all().length === 0, 'foreign_key_check clean after prune');
 // Active batch never deleted as a parent even if outside window — already
 // asserted via b6 survival above.
+
+// 15. in-memory DB keeps raw_json INLINE in the column and writes NO file.
+//     Regression guard: the per-run file offload (results/raw/run-<id>/<id>.json)
+//     uses a FIXED RAW_DIR independent of the active handle. An in-memory test
+//     DB must NOT write there (cross-DB blob collision / prod pollution). The
+//     fix binds raw_json inline for :memory: and skips the file entirely.
+console.log('15. in-memory raw_json stays inline (no file)...');
+{
+  const memRunId = Number(insertRun({ started_at: NOW - 3_000, mode: 'p2p' }));
+  const memResId = Number(insertResult(memRunId, { ...SAMPLE_PASS, address: 'sentnode1mem999' }));
+  assert(memResId > 0, 'in-memory insertResult returns id');
+  // Column populated (readers return it as-is; no rehydrate-from-file needed).
+  const memHist = getNodeHistory('sentnode1mem999', { limit: 1 });
+  assert(memHist.length === 1, 'in-memory node history has 1 row');
+  assert(memHist[0].raw_json != null, 'in-memory raw_json column is populated (not NULL)');
+  const memParsed = JSON.parse(memHist[0].raw_json);
+  eq(memParsed.address, 'sentnode1mem999', 'in-memory raw_json round-trips via the column');
+  // No file written for this (run_id, result_id) under RAW_DIR.
+  const rawFile = path.join(RAW_DIR, `run-${memRunId}`, `${memResId}.json`);
+  assert(!existsSync(rawFile), `in-memory insert wrote NO file (${rawFile})`);
+  // And the RAW_DIR root itself was not created by any :memory: insert so far.
+  assert(!existsSync(RAW_DIR), `RAW_DIR not created by :memory: tests (${RAW_DIR})`);
+}
 
 // ─── Results ──────────────────────────────────────────────────────────────────
 
