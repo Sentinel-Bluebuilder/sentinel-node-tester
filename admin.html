@@ -2410,13 +2410,15 @@
       const existing = document.getElementById('p2pSettingsBackdrop');
       if (existing) { if (existing._onEsc) document.removeEventListener('keydown', existing._onEsc); existing.remove(); }
 
-      let payload = { settings: {}, defaults: {} };
-      try {
-        const res = await fetch('/api/settings');
-        if (res.ok) payload = await res.json();
-      } catch {}
-      const s = payload.settings || {};
-      const d = payload.defaults || {};
+      // Build + show the popup SYNCHRONOUSLY so it appears the instant the user
+      // clicks — do NOT await the network first (during an active audit the Node
+      // event loop is busy and even a trivial /api/settings GET can lag, which is
+      // what made this popup feel slow). s/d start empty (template renders the
+      // coded fallbacks as placeholders); real values populate once the fetch
+      // resolves, via the load block at the bottom. s/d are `let` so the
+      // reset/save closures below see the loaded values.
+      let s = {};
+      let d = {};
 
       const backdrop = document.createElement('div');
       backdrop.id = 'p2pSettingsBackdrop';
@@ -2446,37 +2448,37 @@
 
           <label style="display:flex;flex-direction:column;gap:4px">
             <span style="font-weight:700;letter-spacing:0.4px">Gigabytes per node
-              <span style="color:var(--text-muted);font-weight:400">(deposit size; 1–100, default ${_esc(d.gigabytes ?? 1)})</span></span>
-            <input id="setGigs" type="number" min="1" max="100" step="1" value="${_esc(s.gigabytes ?? 1)}"
+              <span style="color:var(--text-muted);font-weight:400">(deposit size; 1–100, default <span id="p2pDefGigs">${_esc(d.gigabytes ?? 1)}</span>)</span></span>
+            <input id="setGigs" type="number" min="1" max="100" step="1" value="${_esc(s.gigabytes ?? 1)}" disabled
               style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font:inherit;font-size:12px"/>
           </label>
 
           <label style="display:flex;flex-direction:column;gap:4px">
             <span style="font-weight:700;letter-spacing:0.4px">Batch size
               <span style="color:var(--text-muted);font-weight:400">(messages per TX; 1–5, default ${_esc(d.batchSize ?? 5)})</span></span>
-            <input id="setBatch" type="number" min="1" max="5" step="1" value="${_esc(s.batchSize ?? 5)}"
+            <input id="setBatch" type="number" min="1" max="5" step="1" value="${_esc(s.batchSize ?? 5)}" disabled
               style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font:inherit;font-size:12px"/>
           </label>
 
           <label style="display:flex;flex-direction:column;gap:4px">
             <span style="font-weight:700;letter-spacing:0.4px">Max price (udvpn / GB)
               <span style="color:var(--text-muted);font-weight:400">(0 = no cap)</span></span>
-            <input id="setMaxPrice" type="number" min="0" max="1000000000" step="1" value="${_esc(s.maxPriceUdvpn ?? 0)}"
+            <input id="setMaxPrice" type="number" min="0" max="1000000000" step="1" value="${_esc(s.maxPriceUdvpn ?? 0)}" disabled
               style="background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font:inherit;font-size:12px"/>
             <span style="color:var(--text-muted);font-weight:400;font-size:11px">Skips any node priced above this. Real cheapest mainnet node is ≈ 4,000,000 udvpn/GB.</span>
           </label>
 
           <label style="display:flex;align-items:flex-start;gap:8px;padding:10px;border:1px solid var(--border);border-radius:6px;cursor:pointer">
-            <input id="setAutoCancel" type="checkbox" ${s.autoCancelAfterTest ? 'checked' : ''} style="accent-color:var(--accent);margin-top:2px;cursor:pointer"/>
+            <input id="setAutoCancel" type="checkbox" ${s.autoCancelAfterTest ? 'checked' : ''} disabled style="accent-color:var(--accent);margin-top:2px;cursor:pointer"/>
             <span style="display:flex;flex-direction:column;gap:3px">
               <span style="font-weight:700;letter-spacing:0.4px">Auto-cancel sessions after each batch</span>
-              <span style="color:var(--text-muted);font-weight:400;font-size:11px">After a batch finishes testing, broadcast a single TX with up to ${_esc(s.batchSize ?? 5)} <code style="color:var(--accent)">MsgCancelSession</code> messages so the chain settles each session and refunds any unused balance to this wallet. Verified live (Apr 2026 mainnet): the cancel TX emits only <code style="color:var(--accent)">EventUpdateStatus</code>; the chain sets <code style="color:var(--accent)">inactive_at = status_at + 2h</code>, refund is credited at that block. If the node never reported usage, 100% of the deposit is refundable.</span>
+              <span style="color:var(--text-muted);font-weight:400;font-size:11px">After a batch finishes testing, broadcast a single TX with up to <span id="p2pBatchEcho">${_esc(s.batchSize ?? 5)}</span> <code style="color:var(--accent)">MsgCancelSession</code> messages so the chain settles each session and refunds any unused balance to this wallet. Verified live (Apr 2026 mainnet): the cancel TX emits only <code style="color:var(--accent)">EventUpdateStatus</code>; the chain sets <code style="color:var(--accent)">inactive_at = status_at + 2h</code>, refund is credited at that block. If the node never reported usage, 100% of the deposit is refundable.</span>
             </span>
           </label>
 
           <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
-            <button id="p2pSettingsReset" type="button" style="background:transparent;color:var(--text-dim);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font:inherit;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer">RESET DEFAULTS</button>
-            <button id="p2pSettingsSave" type="button" style="background:var(--accent);color:var(--bg-card-solid);border:0;border-radius:6px;padding:6px 14px;font:inherit;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer">SAVE</button>
+            <button id="p2pSettingsReset" type="button" disabled style="background:transparent;color:var(--text-dim);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font:inherit;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer">RESET DEFAULTS</button>
+            <button id="p2pSettingsSave" type="button" disabled style="background:var(--accent);color:var(--bg-card-solid);border:0;border-radius:6px;padding:6px 14px;font:inherit;font-size:11px;font-weight:700;letter-spacing:0.5px;cursor:pointer">SAVE</button>
           </div>
 
           <div id="p2pSettingsMsg" style="font-size:11px;color:var(--text-muted);min-height:14px"></div>
@@ -2525,6 +2527,32 @@
           setMsg('Save failed: ' + (err && err.message ? err.message : err), true);
         }
       });
+
+      // Load current settings AFTER the popup is on screen, then populate the
+      // (disabled) inputs and enable them. Keeps the open instantaneous.
+      const _inputs = ['#setGigs', '#setBatch', '#setMaxPrice', '#setAutoCancel'].map(sel => panel.querySelector(sel));
+      const _btns = ['#p2pSettingsReset', '#p2pSettingsSave'].map(sel => panel.querySelector(sel));
+      const _setEnabled = (on) => { [..._inputs, ..._btns].forEach(el => { if (el) el.disabled = !on; }); };
+      setMsg('Loading current settings…', false);
+      try {
+        const res = await fetch('/api/settings');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const payload = await res.json();
+        s = payload.settings || {};
+        d = payload.defaults || {};
+        panel.querySelector('#setGigs').value = s.gigabytes ?? d.gigabytes ?? 1;
+        panel.querySelector('#setBatch').value = s.batchSize ?? d.batchSize ?? 5;
+        panel.querySelector('#setMaxPrice').value = s.maxPriceUdvpn ?? d.maxPriceUdvpn ?? 0;
+        panel.querySelector('#setAutoCancel').checked = !!s.autoCancelAfterTest;
+        panel.querySelector('#p2pDefGigs').textContent = _esc(d.gigabytes ?? 1);
+        panel.querySelector('#p2pBatchEcho').textContent = _esc(s.batchSize ?? 5);
+        _setEnabled(true);
+        setMsg('', false);
+      } catch (err) {
+        // Couldn't load — still let the operator work from the placeholder defaults.
+        _setEnabled(true);
+        setMsg('Could not load saved settings; showing defaults.', true);
+      }
     }
 
     async function openOnchainPopup() {
