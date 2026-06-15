@@ -2262,6 +2262,35 @@ app.get('/api/onchain-reports', rlOnchainReports, async (req, res) => {
   }
 });
 
+// Trim a result row's `diag` blob down to the only 4 subfields the admin
+// dashboard reads off a LIVE SSE row (the results-table transport-detail
+// renderer: v2rayProto / v2rayTransport / v2raySecurity / v2rayPort). The full
+// diag carries internal/sensitive diagnostics — the V2Ray credential
+// `v2rayUUID`, raw `v2rayConfig` / `hsConfig`, process `v2rayStdout` /
+// `v2rayStderr`, `wgServerEndpoint`, etc. — that never need to reach the
+// browser. The rich node-detail drawer + failure-report builder source diag
+// from the persisted error-log over REST (`er.raw_json`), NOT from the SSE row,
+// so trimming the SSE row does not regress them.
+//
+// MUST be non-mutating: result rows are SHARED references with DB persistence
+// (insertBatchResult → raw_json) and the in-memory state (getResults()). Return
+// a shallow CLONE with a fresh trimmed diag; never touch the original row, its
+// diag, or the getResults() arrays — mutating would strip the diag the
+// drawer/persistence depend on. Rows without a diag (skips, wireguard-only)
+// pass through untouched; we do NOT fabricate an empty diag key.
+function trimRowDiag(r) {
+  if (!r || typeof r !== 'object' || !r.diag || typeof r.diag !== 'object') return r;
+  return {
+    ...r,
+    diag: {
+      v2rayProto: r.diag.v2rayProto,
+      v2rayTransport: r.diag.v2rayTransport,
+      v2raySecurity: r.diag.v2raySecurity,
+      v2rayPort: r.diag.v2rayPort,
+    },
+  };
+}
+
 const rlAdminSse = sseLimit({ maxPerIp: 10, bucket: 'admin-sse' });
 app.get('/api/events', adminOnly, rlAdminSse, (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -2274,7 +2303,10 @@ app.get('/api/events', adminOnly, rlAdminSse, (req, res) => {
   // Strip wallet + balance internals AND runGranter (subscription granter
   // address — operator-internal, never needs to leave the server).
   const { walletAddress, balance, balanceUdvpn, spentUdvpn, runGranter, ...stateForSse } = state;
-  send({ type: 'init', state: stateForSse, results, logs: logBuffer.slice() });
+  // Trim each result row's diag to the 4 fields the dashboard reads (drop the
+  // credential/config/stdout blob). New array of clones — getResults() returns
+  // the shared in-memory state rows; never mutate them.
+  send({ type: 'init', state: stateForSse, results: results.map(trimRowDiag), logs: logBuffer.slice() });
   const ADMIN_BLOCK = /^(loop:|iteration:|batch:)/;
   const handler = (data) => {
     if (data && typeof data.type === 'string' && ADMIN_BLOCK.test(data.type)) return;
@@ -2282,7 +2314,16 @@ app.get('/api/events', adminOnly, rlAdminSse, (req, res) => {
     // browser doesn't need the granter address; it's purely server-internal.
     if (data && data.type === 'state' && data.state && typeof data.state === 'object') {
       const { runGranter, ...safeState } = data.state;
-      send({ ...data, state: safeState });
+      // state events also carry results[] (broadcastStateFresh) — trim each
+      // row's diag here too. New array of clones; do not mutate data.results.
+      const safeResults = Array.isArray(data.results) ? data.results.map(trimRowDiag) : data.results;
+      send({ ...data, state: safeState, results: safeResults });
+      return;
+    }
+    // result events forward the same row object insertBatchResult persists to
+    // raw_json — clone+trim for the wire, leave data.result untouched.
+    if (data && data.type === 'result' && data.result && typeof data.result === 'object') {
+      send({ ...data, result: trimRowDiag(data.result) });
       return;
     }
     send(data);
