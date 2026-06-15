@@ -867,7 +867,9 @@
         const notice = document.getElementById('broadcastOffNotice');
         if (_broadcastLive) {
           if (notice) notice.style.display = 'none';
-          // Reconcile against current admin status; idle = still paused.
+          // Reconcile the overlay against admin status. On the cold-load pass
+          // this no-ops until _liveStateResolved (set by the REST seed / SSE)
+          // so we don't flash "paused" before the real run status is known.
           applyPauseFromState();
           if (!wasLive) {
             connectSSE();
@@ -940,6 +942,10 @@
       // Seed full live state + results via REST so refresh paints the same
       // dashboard the operator sees, even before the SSE init message lands.
       if (_broadcastLive) await seedLiveStateFromRest();
+      // The authoritative REST round-trip is done (or broadcast is off). Even if
+      // it carried no state (genuinely no active run), let the final reconcile
+      // below decide the overlay rather than leaving it pending forever.
+      _liveStateResolved = true;
       loadCurrentBatch();
       loadHeaderStats();
       applyPauseFromState();
@@ -1893,6 +1899,12 @@
     const LIVE_CACHE_KEY = 'live:snapshot:v1';
     const LIVE_CACHE_TTL_MS = 60 * 60 * 1000; // 1h — enough to survive a reload
     let _liveState = {};
+    // True once we've received an AUTHORITATIVE run status — either the REST
+    // live-state seed or an SSE state/init. Until then, applyPauseFromState must
+    // NOT decide "paused" from the empty/cached defaults: on a cold load the
+    // status is unknown and _cb.batchId is null, which would flash the "Testing
+    // Has Been Paused" overlay on for an active run before the real state lands.
+    let _liveStateResolved = false;
     let _persistTimer = null;
     function schedulePersist() {
       if (_persistTimer) return;
@@ -1946,6 +1958,9 @@
     // the header derived from current-batch values.
     function mergeLiveState(s) {
       if (!s || typeof s !== 'object') return;
+      // An authoritative run status has landed (REST live-state seed or SSE
+      // state/init) — applyPauseFromState may now decide the overlay.
+      _liveStateResolved = true;
       _liveState = { ..._liveState, ...s };
       applyHeaderStatsFromState();
       applyPauseFromState();
@@ -1957,10 +1972,17 @@
     // and there is no in-flight batch. Public visitors should see paused, not
     // a frozen stale dashboard.
     function applyPauseFromState() {
+      // Broadcast off is authoritative — there is no active run to show, so the
+      // overlay goes up immediately regardless of how much state we've loaded.
+      if (!_broadcastLive) { showPaused(true); return; }
+      // Broadcast on, but we haven't confirmed the run status yet (cold-load
+      // async window). Don't decide "paused" from empty/cached defaults — that
+      // flashed the overlay on for an active run before the real state arrived.
+      // Leave the overlay at its current state until authoritative state lands.
+      if (!_liveStateResolved) return;
       const status = _liveState && _liveState.status;
       const running = status === 'running' || status === 'paused';
       const midBatch = !!(_cb && _cb.batchId);
-      if (!_broadcastLive) { showPaused(true); return; }
       showPaused(!running && !midBatch);
     }
 
