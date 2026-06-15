@@ -15,19 +15,15 @@
  *      SAME sequence and shape, simulating one full iteration.
  *   3. Reads back the rows and asserts schema + content match.
  *
- * Then it cross-checks the production audit.db — proving prior continuous
- * runs wrote real data through this same path.
+ * Hermetic and deterministic — uses only an in-memory DB. The read-only
+ * cross-check of the live production audit.db that used to follow these steps
+ * has moved to scripts/verify-prod-db.mjs: it asserted facts about whatever
+ * audit.db was on disk, so it could only pass on a populated production DB and
+ * failed on dev/CI/fresh clones. That is an operational health check, not a
+ * regression test.
  *
  * Run: NODE_ENV=test node test/continuous.live-db-write.test.js
  */
-
-import path from 'path';
-import { fileURLToPath } from 'url';
-import Database from 'better-sqlite3';
-import { existsSync } from 'fs';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROD_DB = path.join(__dirname, '..', 'data', 'audit.db');
 
 const out = { pass: 0, fail: 0, errors: [] };
 function ok(cond, name) {
@@ -121,53 +117,11 @@ async function main() {
   ok(closedRow.failed === 1, 'batches.failed=1');
   ok(closedRow.snapshot_size === 3, 'batches.snapshot_size unchanged');
 
-  // ─── 4. Cross-check production DB — prove this same code path ran live ──
-  console.log('[4] Cross-check production audit.db (read-only)');
-  if (!existsSync(PROD_DB)) {
-    console.log('  SKIP  prod audit.db not present');
-  } else {
-    const prod = new Database(PROD_DB, { readonly: true });
-    try {
-      // Most recent finished batch
-      const last = prod.prepare(`
-        SELECT id, started_at, finished_at, snapshot_size, passed, failed, mode,
-               (SELECT COUNT(*) FROM batch_results WHERE batch_id = batches.id) AS rows_count
-        FROM batches WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1
-      `).get();
-      ok(last && last.id > 0, `prod has finished batches (most recent id=${last?.id})`);
-      ok(last && last.finished_at > last.started_at, 'prod batch finished_at > started_at');
-      ok(last && (last.passed + last.failed) > 0, `prod batch has passed+failed > 0 (${last?.passed}+${last?.failed})`);
-      ok(last && last.rows_count > 0, `prod batch has batch_results rows (${last?.rows_count})`);
-
-      // Aggregate
-      const agg = prod.prepare(`
-        SELECT COUNT(DISTINCT b.id) AS batches,
-               COUNT(br.id)         AS results,
-               COUNT(DISTINCT br.node_address) AS distinct_nodes
-        FROM batches b LEFT JOIN batch_results br ON br.batch_id = b.id
-      `).get();
-      ok(agg.batches > 0, `prod has ${agg.batches} batches recorded`);
-      ok(agg.results > 0, `prod has ${agg.results} batch_results rows`);
-      ok(agg.distinct_nodes > 100,
-         `prod has ${agg.distinct_nodes} distinct nodes tested across all batches`);
-
-      // Schema sanity — error_code distinct values prove failure-log path works
-      const codes = prod.prepare(`
-        SELECT error_code, COUNT(*) c FROM batch_results
-        WHERE error_code IS NOT NULL GROUP BY error_code ORDER BY c DESC LIMIT 5
-      `).all();
-      console.log('  prod error_code distribution (top 5):');
-      for (const r of codes) console.log(`    ${r.error_code.padEnd(30)} ${r.c}`);
-      ok(codes.length > 0, 'prod batch_results contains failure rows with error codes');
-
-      // Mode distribution
-      const modes = prod.prepare(`SELECT mode, COUNT(*) c FROM batches GROUP BY mode`).all();
-      console.log('  prod batch mode distribution:');
-      for (const m of modes) console.log(`    ${m.mode.padEnd(15)} ${m.c}`);
-    } finally {
-      prod.close();
-    }
-  }
+  // The prod-DB cross-check that used to live here (Part 4) has moved to
+  // scripts/verify-prod-db.mjs — it asserted facts about whatever audit.db was
+  // on disk (distinct_nodes > 100, etc.), so it could only pass on a populated
+  // production DB and failed on dev/CI/fresh clones. That is an operational
+  // health check, not a regression test; this file stays hermetic.
 
   console.log(`\n${'='.repeat(60)}\nRESULTS: ${out.pass} passed, ${out.fail} failed`);
   if (out.errors.length) for (const e of out.errors) console.log(`  FAIL: ${e}`);

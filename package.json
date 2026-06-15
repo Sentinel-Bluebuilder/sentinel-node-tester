@@ -41,6 +41,7 @@
     "test": "node test/smoke.test.js && node test/db.smoke.test.js && node test/continuous.smoke.test.js && node test/security.test.js && node test/failure-log-ux.test.js && node test/public-no-action-buttons.test.js && node test/onchain-decode.test.js",
     "test:ui": "node test/ui.smoke.test.js",
     "test:integration": "node test/continuous.audit-integration.test.js && node test/continuous.live-db-write.test.js && node test/node-detail.smoke.test.js",
+    "verify:prod-db": "node scripts/verify-prod-db.mjs",
     "cleanup": "node scripts/cleanup.mjs"
   },
   "keywords": [
