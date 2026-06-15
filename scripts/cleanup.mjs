@@ -19,6 +19,13 @@
  *                               · register orphan snapshot dirs (no fabricated spend)
  *                               · prune runaway 'continuous-loop iteration%' rows
  *                               · backfill file snapshots missing from SQLite
+ *                               · DB slim-down (one-time backfill for legacy data):
+ *                                   – offload inline results.raw_json blobs to
+ *                                     results/raw/run-<run_id>/<id>.json, then NULL
+ *                                     the column (write+verify BEFORE null = no loss)
+ *                                   – cap legacy error_logs.log_snippet at 16 KB tail
+ *                                     (idempotent backstop to migration v11)
+ *                                   – prune batch_results to DEFAULT_BATCH_RETENTION
  *   --purge-orphan-logs       (with --fix) quarantine orphan audit logs into
  *                             results/.cleanup-trash/<ts>/ (move, not delete;
  *                             never the active or a recently-written log).
@@ -40,6 +47,7 @@ import Database from 'better-sqlite3';
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, renameSync, mkdirSync, copyFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { RAW_DIR, DEFAULT_BATCH_RETENTION } from '../core/constants.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -56,6 +64,17 @@ const MATCH_TOLERANCE_MS = 15_000;
 const BACKFILL_TOLERANCE_MS = 60_000; // wider dedup window for backfill (save-time skew)
 const RECENT_LOG_MS = 24 * 60 * 60 * 1000;       // never purge a log written in the last day
 const RUNAWAY_NOTES = 'continuous-loop iteration%';
+const LOG_SNIPPET_CAP = 16384;                    // bytes — mirrors core/db.js insertErrorLog + migration v11
+
+// Human-readable byte size for the slim-down report.
+const humanBytes = n => {
+  if (n == null || !Number.isFinite(Number(n))) return '0 B';
+  let b = Number(n);
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+  return `${b.toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
+};
 
 // ─── reporter ─────────────────────────────────────────────────────────────────
 // hard      = cannot be auto-fixed (integrity / schema / unparseable / write failures)
@@ -207,6 +226,43 @@ if (existsSync(RESULTS_DIR)) {
   else { info(`${orphanLogs.length} orphan log file(s): ${orphanLogs.slice(0, 5).join(', ')}${orphanLogs.length > 5 ? ' …' : ''}`); if (PURGE_LOGS && !FIX) console.log(C.dim('    (--purge-orphan-logs needs --fix to take effect — ignored)')); else if (!(FIX && PURGE_LOGS)) console.log(C.dim('    (pass --fix --purge-orphan-logs to quarantine these)')); }
 }
 
+// ─── 6. DB slim-down (one-time backfill for legacy data) ──────────────────────
+// These mirror the forward-going behaviour that core/db.js now applies on every
+// insert: raw_json blobs offloaded to per-run files, log_snippet capped at 16 KB,
+// batch_results bounded. Existing rows from before those commits still carry the
+// inline blob / oversized snippet / unbounded batch history; this section reports
+// (and, under --fix, performs) the one-time migration of that legacy data.
+section('6. DB slim-down (legacy backfill)');
+let rawJsonRows = 0;          // results rows still holding an inline raw_json blob
+let logSnippetRows = 0;       // error_logs rows whose snippet exceeds the 16 KB cap
+let batchCount = 0;           // total batches
+let batchResultRows = 0;      // total batch_results rows
+if (rdb) {
+  try {
+    const r = rdb.prepare('SELECT COUNT(*) AS c, COALESCE(SUM(length(raw_json)), 0) AS bytes FROM results WHERE raw_json IS NOT NULL').get();
+    rawJsonRows = r.c;
+    rawJsonRows > 0
+      ? repairable(`${rawJsonRows.toLocaleString()} results row(s) still hold an inline raw_json blob (~${humanBytes(r.bytes)} reclaimable → offload to results/raw/run-*/<id>.json + NULL column)`)
+      : ok('no inline raw_json blobs (already offloaded)');
+  } catch (e) { hard(`raw_json scan failed: ${e.message}`); }
+
+  try {
+    logSnippetRows = rdb.prepare(`SELECT COUNT(*) AS c FROM error_logs WHERE log_snippet IS NOT NULL AND length(log_snippet) > ${LOG_SNIPPET_CAP}`).get().c;
+    logSnippetRows > 0
+      ? repairable(`${logSnippetRows.toLocaleString()} error_logs row(s) exceed the 16 KB log_snippet cap (would truncate to tail)`)
+      : ok('no oversized log_snippet rows (migration v11 already applied)');
+  } catch (e) { hard(`log_snippet scan failed: ${e.message}`); }
+
+  try {
+    batchCount = rdb.prepare('SELECT COUNT(*) AS c FROM batches').get().c;
+    batchResultRows = rdb.prepare('SELECT COUNT(*) AS c FROM batch_results').get().c;
+    const overRetention = Math.max(0, batchCount - DEFAULT_BATCH_RETENTION);
+    overRetention > 0
+      ? repairable(`${batchCount.toLocaleString()} batch(es) / ${batchResultRows.toLocaleString()} batch_results row(s); ~${overRetention.toLocaleString()} batch(es) over the ${DEFAULT_BATCH_RETENTION} retention cap (would prune)`)
+      : ok(`${batchCount.toLocaleString()} batch(es) / ${batchResultRows.toLocaleString()} batch_results row(s) — within the ${DEFAULT_BATCH_RETENTION} retention cap`);
+  } catch (e) { hard(`batch_results scan failed: ${e.message}`); }
+}
+
 // Close our OWN read-only handle before mutating: if it stays open, the WAL
 // checkpoint below can report `busy` and falsely abort the whole --fix on a
 // perfectly healthy, server-stopped box.
@@ -295,6 +351,71 @@ if (FIX) {
       added ? fixd(`backfilled ${added} file run(s) into SQLite`) : console.log(`  ${C.dim('↳ backfill: SQLite already has every file run')}`);
     } catch (e) { hard(`SQLite backfill failed: ${e.message}`); }
   } else console.log(`  ${C.dim('↳ backfill skipped (DB writes disabled)')}`);
+
+  // ── DB slim-down (one-time legacy backfill) ───────────────────────────────
+  // Gated on dbWriteOk (audit.db backed up + WAL checkpoint succeeded → server
+  // stopped). Mirrors core/db.js forward behaviour for pre-slim-down rows.
+  if (dbWriteOk) {
+    try {
+      const { getDb, readRawJson, pruneBatchResults } = await import('../core/db.js');
+      const sdb = getDb();
+
+      // Action 1: offload inline raw_json blobs to per-run files, then NULL the
+      // column. Order is write+verify BEFORE null so a crash mid-pass never
+      // loses a blob — a re-run just re-offloads any row whose column is still
+      // set. writeRawJson is not exported from core/db.js, so replicate its exact
+      // path + write (mkdirSync recursive + writeFileSync) inline.
+      const blobRows = sdb.prepare('SELECT id, run_id, raw_json FROM results WHERE raw_json IS NOT NULL').all();
+      if (!blobRows.length) console.log(`  ${C.dim('↳ raw_json offload: no inline blobs to migrate')}`);
+      else {
+        const nullStmt = sdb.prepare('UPDATE results SET raw_json = NULL WHERE id = ?');
+        let offloaded = 0, skippedWrite = 0;
+        // Stage writes first (file I/O outside the txn), collecting the ids whose
+        // file is confirmed on disk; null only those, inside a single txn.
+        const ready = [];
+        for (const row of blobRows) {
+          const dir = path.join(RAW_DIR, `run-${row.run_id}`);
+          const file = path.join(dir, `${row.id}.json`);
+          try {
+            mkdirSync(dir, { recursive: true });
+            writeFileSync(file, row.raw_json);
+            // VERIFY before we agree to null: file exists and is non-empty.
+            const st = statSync(file);
+            if (st.size > 0) ready.push(row.id);
+            else { skippedWrite++; hard(`raw_json offload: ${file} wrote 0 bytes — left column intact for result ${row.id}`); }
+          } catch (e) { skippedWrite++; hard(`raw_json offload: write failed for result ${row.id} — left column intact: ${e.message}`); }
+        }
+        if (ready.length) {
+          sdb.transaction(() => { for (const id of ready) { nullStmt.run(id); offloaded++; } })();
+        }
+        // Sanity sample: rehydrate the first migrated row from disk.
+        if (ready.length) {
+          const sample = blobRows.find(r => r.id === ready[0]);
+          const back = readRawJson(sample.run_id, sample.id);
+          if (back == null) hard(`raw_json offload: verify-read of run-${sample.run_id}/${sample.id}.json returned null after write`);
+        }
+        fixd(`offloaded ${offloaded.toLocaleString()} raw_json blob(s) to results/raw/run-*/<id>.json + NULLed column${skippedWrite ? ` (${skippedWrite} skipped — column left intact, no data loss)` : ''}`);
+      }
+
+      // Action 2: cap legacy oversized log_snippet (idempotent backstop to v11).
+      const capRes = sdb.prepare(
+        `UPDATE error_logs SET log_snippet = substr(log_snippet, length(log_snippet) - ${LOG_SNIPPET_CAP} + 1) WHERE log_snippet IS NOT NULL AND length(log_snippet) > ${LOG_SNIPPET_CAP}`,
+      ).run();
+      capRes.changes > 0
+        ? fixd(`capped ${capRes.changes.toLocaleString()} oversized log_snippet row(s) to 16 KB tail`)
+        : console.log(`  ${C.dim('↳ log_snippet cap: nothing to truncate (v11 already applied)')}`);
+
+      // Action 3: prune batch_results to retention (reuse core/db.js keep-set).
+      const pr = pruneBatchResults({ keepBatches: DEFAULT_BATCH_RETENTION });
+      (pr.deletedBatchResults || pr.deletedBatches)
+        ? fixd(`pruned ${pr.deletedBatchResults.toLocaleString()} batch_results row(s) + ${pr.deletedBatches.toLocaleString()} batch(es) (kept ${pr.keptBatches.toLocaleString()})`)
+        : console.log(`  ${C.dim(`↳ batch_results prune: within retention (kept ${pr.keptBatches.toLocaleString()})`)}`);
+
+      // Reclaim freed pages and flush the WAL.
+      try { sdb.pragma('wal_checkpoint(TRUNCATE)'); }
+      catch (e) { hard(`slim-down checkpoint failed: ${e.message}`); }
+    } catch (e) { hard(`DB slim-down failed (restore audit.db from the backup): ${e.message}`); }
+  } else console.log(`  ${C.dim('↳ slim-down skipped (DB writes disabled)')}`);
 
   if (PURGE_LOGS && orphanLogs.length && !abortAll) {
     const trash = path.join(RESULTS_DIR, '.cleanup-trash', String(ts));
