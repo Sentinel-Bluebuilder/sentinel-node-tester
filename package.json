@@ -1,6 +1,6 @@
 {
   "name": "sentinel-node-tester",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Network audit dashboard for Sentinel dVPN — test every node on the blockchain for real VPN throughput across multiple SDKs (Blue JS, Blue C#, TKD Official)",
   "type": "module",
   "main": "index.js",
