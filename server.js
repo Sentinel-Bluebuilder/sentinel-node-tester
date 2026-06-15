@@ -348,6 +348,36 @@ function appendEventLog(msg) {
   }
 }
 
+// ─── Server-authoritative ETA (windowed real-throughput) ───────────────────
+// Both admin.html and live.html used to compute ETA independently from
+// different inputs, so they disagreed. The server now owns the single source
+// of truth: it keeps a rolling window of the last ETA_WINDOW node-completion
+// timestamps, derives the current completion RATE (nodes/ms), and broadcasts
+// an ABSOLUTE finish epoch (`etaFinishAtMs`). Clients render
+// max(0, etaFinishAtMs - Date.now()) as HH:MM:SS, ticking every second. This
+// is throughput-based (parallelism-aware), not per-node-duration based.
+const ETA_WINDOW = 12;
+let _etaCompletions = [];   // recent node-completion epoch ms (rolling, current pass)
+let _etaLastDone = -1;      // last seen completed-count, to detect a new pass
+
+function computeEtaFinishAt(st) {
+  if (!st || typeof st !== 'object') return null;
+  // Only meaningful while a pass is actively running. done/idle/paused_* → null.
+  if (st.status !== 'running') return null;
+  const done = (st.testedNodes || 0) + (st.failedNodes || 0) + (st.skippedNodes || 0);
+  const total = st.totalNodes || 0;
+  if (total <= 0) return null;
+  const remaining = total - done;
+  if (remaining <= 0) return Date.now(); // finish now → renders 00:00:00
+  if (_etaCompletions.length < 2) return null; // not enough data → client shows "Calculating…"
+  const span = _etaCompletions[_etaCompletions.length - 1] - _etaCompletions[0];
+  if (span <= 0) return null;
+  const n = _etaCompletions.length - 1; // intervals across the window
+  const ratePerMs = n / span;
+  const etaMs = remaining / ratePerMs;
+  return Date.now() + Math.round(etaMs);
+}
+
 function broadcast(type, data = {}) {
   if (type === 'log' && data.msg) {
     // Tag the live SSE 'log' event with a category so admin/live can filter
@@ -364,6 +394,30 @@ function broadcast(type, data = {}) {
     if (data.cat === 'events') appendEventLog(data.msg);
   }
   if (type === 'state' || type === 'result') saveStateSnapshot();
+  // ─── ETA bookkeeping ──────────────────────────────────────────────────────
+  // Record the just-finished node FIRST (so it's in the window), then compute
+  // the absolute finish epoch and stamp it onto any state payload so admin
+  // (which ticks on 'result' events) and live (which ticks on 'state') both
+  // render the same value.
+  if (type === 'result') {
+    _etaCompletions.push(Date.now());
+    if (_etaCompletions.length > ETA_WINDOW) {
+      _etaCompletions = _etaCompletions.slice(-ETA_WINDOW);
+    }
+  }
+  if (data && data.state && typeof data.state === 'object') {
+    const s = data.state;
+    const done = (s.testedNodes || 0) + (s.failedNodes || 0) + (s.skippedNodes || 0);
+    if (done < _etaLastDone) _etaCompletions = []; // counters reset → new pass
+    _etaLastDone = done;
+    // NOTE: for most callers data.state IS the long-lived global `state` object,
+    // so this assignment MUTATES the global in place — etaFinishAtMs is not a
+    // per-payload-only field. That's fine: it's recomputed on every broadcast,
+    // and computeEtaFinishAt SELF-CLEARS it to null whenever status !== 'running'
+    // (done/idle/paused_*), so a stale value can never linger on the global.
+    // saveStateSnapshot's allowlist also excludes it, so it never persists.
+    data.state.etaFinishAtMs = computeEtaFinishAt(data.state);
+  }
   // NOTE: spread `data` FIRST so a payload field named `type` (e.g. the node's
   // service-type like 'wireguard') cannot clobber the SSE event type. The
   // event type is the dispatch key — clients switch on d.type — so it must win.
@@ -1900,9 +1954,13 @@ function _redactPublicError(v, max = 200) {
 //     the Server-Baseline header tile.
 //   - activeSDK ('js' | 'tkd' | 'csharp') surfaces next to the run-mode label;
 //     display name + version are joined client-side via /api/public/sdk-info.
+//   - etaFinishAtMs is the server-authoritative absolute finish epoch (ms);
+//     live.html renders max(0, etaFinishAtMs - Date.now()) as a ticking ETA so
+//     it matches admin.html exactly.
 const PUBLIC_STATE_KEYS = [
   'status',
   'totalNodes',
+  'etaFinishAtMs',
   'baselineMbps',
   'baselineHistory',
   'testRun',
@@ -2316,6 +2374,10 @@ app.get('/api/events', adminOnly, rlAdminSse, (req, res) => {
   // Strip wallet + balance internals AND runGranter (subscription granter
   // address — operator-internal, never needs to leave the server).
   const { walletAddress, balance, balanceUdvpn, spentUdvpn, runGranter, ...stateForSse } = state;
+  // The global `state` doesn't carry a fresh etaFinishAtMs (it's stamped onto
+  // broadcast payloads, not the global), so a freshly-connected admin would be
+  // blank until the next event. Compute it once here for the init frame.
+  stateForSse.etaFinishAtMs = computeEtaFinishAt(state);
   // Trim each result row's diag to the 4 fields the dashboard reads (drop the
   // credential/config/stdout blob). New array of clones — getResults() returns
   // the shared in-memory state rows; never mutate them.

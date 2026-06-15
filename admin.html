@@ -1488,25 +1488,20 @@
     }
 
     function updateETA() {
+      // Server-authoritative ETA: the server computes ONE absolute finish epoch
+      // (state.etaFinishAtMs) from a windowed real-throughput estimate and
+      // broadcasts it. Both admin and live render the same value — we just
+      // count down to it. See computeEtaFinishAt() in server.js.
       const el = document.getElementById('etaTime');
-      if (state.status !== 'running' || !state.startedAt) {
-        if (state.status === 'done') el.textContent = '00:00:00';
-        return;
-      }
-      let done, total;
-      if (state.retestMode) {
-        done = state.retestTested || 0;
-        total = state.retestTotal || 0;
+      if (state.status === 'done') { el.textContent = '00:00:00'; return; }
+      if (state.status !== 'running') return;
+      if (Number.isFinite(state.etaFinishAtMs)) {
+        const rem = Math.max(0, state.etaFinishAtMs - Date.now());
+        const h = Math.floor(rem / 3600000), m = Math.floor((rem % 3600000) / 60000), s = Math.floor((rem % 60000) / 1000);
+        el.textContent = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
       } else {
-        done = (state.testedNodes || 0) + (state.failedNodes || 0) + (state.skippedNodes || 0);
-        total = state.totalNodes || 0;
+        el.textContent = 'Calculating...';
       }
-      const remaining = total - done;
-      if (done === 0 || remaining <= 0) { el.textContent = 'Calculating...'; return; }
-      const elapsed = Date.now() - new Date(state.startedAt).getTime();
-      const ms = remaining * (elapsed / done);
-      const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000), s = Math.floor((ms % 60000) / 1000);
-      el.textContent = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
     }
 
     function applyState() {
