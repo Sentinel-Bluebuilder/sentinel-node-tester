@@ -27,6 +27,10 @@
  *                                     16384-char tail (UTF-8 byte size varies;
  *                                     idempotent backstop to migration v11)
  *                                   – prune batch_results to DEFAULT_BATCH_RETENTION
+ *                               · truncate oversized audit-*.log files to their
+ *                                 last LOG_BUFFER_MAX (5000) lines — the only
+ *                                 tail the logBuffer/SSE init ever replays — after
+ *                                 backing the full file up to <name>.bak-<ts>
  *   --purge-orphan-logs       (with --fix) quarantine orphan audit logs into
  *                             results/.cleanup-trash/<ts>/ (move, not delete;
  *                             never the active or a recently-written log).
@@ -66,6 +70,11 @@ const BACKFILL_TOLERANCE_MS = 60_000; // wider dedup window for backfill (save-t
 const RECENT_LOG_MS = 24 * 60 * 60 * 1000;       // never purge a log written in the last day
 const RUNAWAY_NOTES = 'continuous-loop iteration%';
 const LOG_SNIPPET_CAP = 16384;                    // 16384 chars (UTF-8 byte size varies) — mirrors core/db.js insertErrorLog + migration v11
+const LOG_BUFFER_MAX = 5000;                      // lines — mirrors server.js logBuffer cap. On boot/resume the logBuffer
+                                                  // hydrates from an audit-*.log via lines.slice(-LOG_BUFFER_MAX) (server.js
+                                                  // ~692), and the SSE init frame replays at most INIT_LOG_REPLAY of those.
+                                                  // Anything beyond the last LOG_BUFFER_MAX lines is never read back, so an
+                                                  // audit log longer than this carries a permanently-unused head.
 
 // Human-readable byte size for the slim-down report.
 const humanBytes = n => {
@@ -318,6 +327,36 @@ if (!existsSync(RAW_DIR)) {
   else { repairable(`${orphanRawDirs.length} orphan raw dir(s), ${humanBytes(orphanRawBytes)} total reclaimable`); if (!FIX) console.log(C.dim('    (pass --fix to rm -rf these orphan dirs)')); }
 }
 
+// ─── 8. Oversized audit logs (truncate head, keep last LOG_BUFFER_MAX lines) ──
+// The logBuffer (and thus the SSE init frame) only ever reads the TAIL of an
+// audit-*.log — resume hydrates via lines.slice(-LOG_BUFFER_MAX) (server.js
+// ~692). A log longer than LOG_BUFFER_MAX lines therefore has a head that is
+// never replayed; capping it to the last LOG_BUFFER_MAX lines loses nothing the
+// app consumes (the active/in-flight log included — resume slices identically).
+// The full pre-truncation file is backed up to <name>.bak-<ts> before the
+// rewrite, so historical context is preserved for manual review/deletion.
+section('8. Oversized audit logs');
+let oversizedLogs = [];   // { name, lines }
+if (existsSync(RESULTS_DIR)) {
+  const logs = readdirSync(RESULTS_DIR).filter(f => /^(audit|retest)-.*\.log$/.test(f));
+  for (const f of logs) {
+    let lines = 0;
+    try {
+      // Count newlines without holding a split array: cheap and bounded-memory
+      // enough for the occasional server-stopped cleanup run.
+      const buf = readFileSync(path.join(RESULTS_DIR, f));
+      for (let i = 0; i < buf.length; i++) if (buf[i] === 0x0a) lines++;
+      if (buf.length && buf[buf.length - 1] !== 0x0a) lines++; // last line w/o trailing \n
+    } catch (e) { hard(`could not read ${f} for line count: ${e.message}`); continue; }
+    if (lines > LOG_BUFFER_MAX) oversizedLogs.push({ name: f, lines });
+  }
+  if (!oversizedLogs.length) ok(`no oversized audit logs (${logs.length} log file(s), all ≤ ${LOG_BUFFER_MAX.toLocaleString()} lines)`);
+  else {
+    for (const o of oversizedLogs) repairable(`${o.name}: ${o.lines.toLocaleString()} lines > ${LOG_BUFFER_MAX.toLocaleString()} cap (would keep last ${LOG_BUFFER_MAX.toLocaleString()}; head is never replayed)`);
+    if (!FIX) console.log(C.dim(`    (pass --fix to truncate to the last ${LOG_BUFFER_MAX.toLocaleString()} lines — full file backed up first)`));
+  }
+}
+
 // Close our OWN read-only handle before mutating: if it stays open, the WAL
 // checkpoint below can report `busy` and falsely abort the whole --fix on a
 // perfectly healthy, server-stopped box.
@@ -508,6 +547,33 @@ if (FIX) {
       else fixd(`reclaimed ${removed} orphan raw dir(s), ${humanBytes(reclaimed)} freed`);
     } catch (e) { hard(`orphan raw-dir reclaim failed: ${e.message}`); }
   } else if (!dbWriteOk) console.log(`  ${C.dim('↳ orphan raw-dir reclaim skipped (DB writes disabled)')}`);
+
+  // ── Truncate oversized audit logs to their last LOG_BUFFER_MAX lines ──────
+  // Gated on !abortAll (a blocked WAL checkpoint means the server is running and
+  // may be appending to the active log — never rewrite a log under it). Back the
+  // full file up to <name>.bak-<ts> BEFORE the rewrite, so a crash mid-write or a
+  // later "wanted that history" leaves the original recoverable. Logs already
+  // being quarantined wholesale by --purge-orphan-logs are skipped (the move
+  // takes the whole file; truncating it first would be wasted work).
+  if (oversizedLogs.length && !abortAll) {
+    const purgeSet = (PURGE_LOGS) ? new Set(orphanLogs) : new Set();
+    for (const o of oversizedLogs) {
+      if (purgeSet.has(o.name)) { console.log(`  ${C.dim(`↳ ${o.name}: skipped truncate (being quarantined by --purge-orphan-logs)`)}`); continue; }
+      const src = path.join(RESULTS_DIR, o.name);
+      try {
+        const lines = readFileSync(src, 'utf8').split('\n');
+        // split('\n') on a trailing-newline file yields a final '' element; drop
+        // it so the kept count is real lines, then re-add one trailing newline.
+        if (lines.length && lines[lines.length - 1] === '') lines.pop();
+        const kept = lines.slice(-LOG_BUFFER_MAX);
+        copyFileSync(src, `${src}.bak-${ts}`);
+        writeFileSync(src, kept.join('\n') + '\n', 'utf8');
+        fixd(`truncated ${o.name} → last ${kept.length.toLocaleString()} lines (was ${o.lines.toLocaleString()}; full file → ${o.name}.bak-${ts})`);
+      } catch (e) { hard(`could not truncate ${o.name}: ${e.message}`); }
+    }
+  } else if (oversizedLogs.length && abortAll) {
+    console.log(`  ${C.dim('↳ oversized-log truncate skipped (server appears to be running)')}`);
+  }
 
   if (PURGE_LOGS && orphanLogs.length && !abortAll) {
     const trash = path.join(RESULTS_DIR, '.cleanup-trash', String(ts));

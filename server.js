@@ -219,6 +219,15 @@ emitter.setMaxListeners(100);
 // live so a refresh / reconnect / resume sees the run's full prior history,
 // not just the last few lines.
 const LOG_BUFFER_MAX = 5000;
+// The full LOG_BUFFER_MAX backlog is kept server-side, but the SSE `init`
+// bootstrap frame replays only the most recent INIT_LOG_REPLAY lines. A fresh
+// tab needs recent context, not 5000 lines — replaying the whole buffer made
+// the init frame hundreds of KB. /live is unaffected: it separately refetches
+// the full backlog from GET /api/public/logs (live.html), which still returns
+// the whole (filtered) buffer. admin.html relies on the init replay, so the
+// admin log pane shows the most recent INIT_LOG_REPLAY lines on a fresh
+// connect/refresh; subsequent live lines stream in normally as events arrive.
+const INIT_LOG_REPLAY = 500;
 const logBuffer = [];
 
 // ─── State Snapshot (persists volatile fields across restarts) ───────────────
@@ -2135,7 +2144,7 @@ app.get('/api/public/events', attachAdminFlag, rlPublicSse, (req, res) => {
     // Persisted log backlog so /live shows full history on refresh, not a blank
     // panel — but ONLY during an active run. logBuffer is hydrated from
     // results/audit-*.log on boot, so an idle page would otherwise leak it.
-    logs: workOn ? publicLogBuffer() : [],
+    logs: workOn ? publicLogBuffer().slice(-INIT_LOG_REPLAY) : [],
     state: initState,
     results: initResults,
     // Report effective-live so the admin's own /live page flips into live mode
@@ -2431,7 +2440,7 @@ app.get('/api/events', adminOnly, rlAdminSse, (req, res) => {
   // Trim each result row's diag to the 4 fields the dashboard reads (drop the
   // credential/config/stdout blob). New array of clones — getResults() returns
   // the shared in-memory state rows; never mutate them.
-  send({ type: 'init', state: stateForSse, results: results.map(trimRowDiag), logs: logBuffer.slice() });
+  send({ type: 'init', state: stateForSse, results: results.map(trimRowDiag), logs: logBuffer.slice(-INIT_LOG_REPLAY) });
   const ADMIN_BLOCK = /^(loop:|iteration:|batch:)/;
   const handler = (data) => {
     if (data && typeof data.type === 'string' && ADMIN_BLOCK.test(data.type)) return;
