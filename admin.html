@@ -3801,7 +3801,12 @@ Record (28 bytes × count)
       if (q) params.set('q', q);
       try {
         const res = await fetch('/api/public/nodes?' + params.toString());
-        _nsAllNodes = (await res.json()).nodes || [];
+        // /api/public/nodes returns the array under `results` (one row per
+        // UNIQUE node = its latest test, aggregated across ALL runs — no runId
+        // filter here). Read `results` first; tolerate `nodes`/bare-array too so
+        // the table never silently empties on a response-shape change.
+        const data = await res.json();
+        _nsAllNodes = (Array.isArray(data) ? data : (data.results || data.nodes)) || [];
         _nsPage = 1;
         nsRenderPage();
       } catch (e) {
@@ -3831,13 +3836,25 @@ Record (28 bytes × count)
       const start = (_nsPage - 1) * NS_PAGE_SIZE;
       const slice = _nsAllNodes.slice(start, start + NS_PAGE_SIZE);
       tbody.innerHTML = slice.map(function(n) {
-        const addrFull = n.addr || '';
+        // /api/public/nodes → searchNodes() returns snake_case fields per UNIQUE
+        // node (its latest test, aggregated across ALL runs): node_addr /
+        // latest_tested_at / latest_mbps / pass_bar / latest_error_code. Read
+        // those; tolerate the older addr/last_*/actual_mbps aliases as a fallback.
+        const addrFull = n.node_addr || n.addr || '';
         const addrShort = addrFull ? addrFull.slice(0, 14) + '…' + addrFull.slice(-5) : '—';
-        const lastTested = n.last_tested ? new Date(n.last_tested).toLocaleString() : '—';
-        const badge = n.last_pass == null ? '<span class="badge badge-skip">N/A</span>'
-          : n.last_pass ? '<span class="badge badge-pass">PASS</span>'
+        const lastTestedRaw = n.latest_tested_at ?? n.last_tested ?? null;
+        const lastTested = lastTestedRaw ? new Date(lastTestedRaw).toLocaleString() : '—';
+        // Latest pass = last non-null entry of pass_bar (oldest→newest); fall back
+        // to "produced a speed" when the window has no recorded pass/fail.
+        const bar = Array.isArray(n.pass_bar) ? n.pass_bar : null;
+        let lastPass = null;
+        if (bar) { for (let i = bar.length - 1; i >= 0; i--) { if (bar[i] != null) { lastPass = bar[i]; break; } } }
+        const mbpsVal = n.latest_mbps ?? n.actual_mbps ?? null;
+        if (lastPass == null && mbpsVal != null) lastPass = 1;
+        const badge = lastPass == null ? '<span class="badge badge-skip">N/A</span>'
+          : lastPass ? '<span class="badge badge-pass">PASS</span>'
           : '<span class="badge badge-fail">FAIL</span>';
-        const mbps = n.actual_mbps != null ? n.actual_mbps.toFixed(2) + ' Mbps' : '—';
+        const mbps = mbpsVal != null ? mbpsVal.toFixed(2) + ' Mbps' : '—';
         return '<tr style="cursor:pointer" data-addr="' + escHtml(addrFull) + '" onclick="nsOpenDrawerFromRow(event)"'
           + ' onmouseover="[].forEach.call(this.cells,function(c){c.style.background=\'var(--bg-input)\'})"'
           + ' onmouseout="[].forEach.call(this.cells,function(c){c.style.background=\'\'})">'
