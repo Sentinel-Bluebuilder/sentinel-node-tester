@@ -456,7 +456,7 @@ function recomputeCounters(state) {
 function classifyProbeError(err) {
   const msg = (err?.message || String(err || '')).toLowerCase();
   const code = err?.code || '';
-  if (msg.includes('timeout') || code === 'ETIMEDOUT' || code === 'ECONNABORTED') return 'TIMEOUT';
+  if (msg.includes('timeout') || msg.includes('timed out') || code === 'ETIMEDOUT' || code === 'ECONNABORTED') return 'TIMEOUT';
   if (code === 'ENOTFOUND' || msg.includes('getaddrinfo') || msg.includes('enotfound')) return 'DNS_FAIL';
   if (code === 'ECONNREFUSED' || msg.includes('econnrefused')) return 'TCP_REFUSED';
   if (code === 'ECONNRESET' || msg.includes('econnreset')) return 'TCP_RESET';
@@ -554,7 +554,15 @@ function buildFailResult(node, status, state, errMsg, diag = {}) {
     sdk: state.activeSDK || 'js',
     os: process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux',
     error: errMsg,
-    timedOut: /timeout/i.test(errMsg),
+    // Classify the failure into a stable code so batch_results.error_code and
+    // error_logs.error_code carry a real value (HOST_UNREACH / TIMEOUT /
+    // HTTP_ERROR / …) instead of NULL / 'UNKNOWN'. Node connect errors embed the
+    // OS code in the message ("connect EHOSTUNREACH …"); diag.code covers the
+    // rest. Without this the per-row failure-copy block (a product MUST) shows
+    // "Error code: UNKNOWN" for every failure. classifyProbeError never returns
+    // null (worst case 'OTHER'), so every failure row gets a non-empty code.
+    errorCode: classifyProbeError({ message: errMsg, code: diag?.code }),
+    timedOut: /timeout|timed out/i.test(errMsg),
     diag,
   };
 }
