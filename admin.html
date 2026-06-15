@@ -586,11 +586,15 @@
     .log-filter-btn:hover { color: var(--text); }
     .log-filter-btn.active { background: var(--bg-input); color: var(--text); }
 
-    .table-wrap { overflow-y: auto; scrollbar-gutter: stable; flex: 1; min-height: 0; padding: 0 8px 8px 8px; }
+    /* overflow-x pinned to hidden: setting only overflow-y makes the spec
+       compute overflow-x to `auto`, which let the results table scroll
+       sideways. The table fits its column (cells ellipsis-truncate); only the
+       log panel scrolls horizontally. */
+    .table-wrap { overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; flex: 1; min-height: 0; padding: 0 8px 8px 8px; }
     /* Fixed header table (outside the scroll area). scrollbar-gutter:stable on
        both wraps reserves an equal right-side gutter so the header columns line
        up with the scrolling body even when its scrollbar appears. */
-    .results-head-wrap { overflow-y: auto; scrollbar-gutter: stable; flex-shrink: 0; padding: 0 8px; margin-top: 8px; }
+    .results-head-wrap { overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; flex-shrink: 0; padding: 0 8px; margin-top: 8px; }
 
     table { width: 100%; border-collapse: separate; border-spacing: 0 4px; table-layout: fixed; }
 

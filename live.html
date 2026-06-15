@@ -325,7 +325,11 @@
       text-transform: uppercase;
     }
 
-    .table-wrap { overflow-y: auto; flex: 1 1 auto; min-height: 0; padding: 0 8px 8px 8px; margin-top: 8px; }
+    /* overflow-x pinned to hidden: with only overflow-y set, the spec computes
+       overflow-x to `auto`, which made the results table scroll sideways. The
+       table is meant to fit its column (cells ellipsis-truncate); only the log
+       panel scrolls horizontally. */
+    .table-wrap { overflow-y: auto; overflow-x: hidden; flex: 1 1 auto; min-height: 0; padding: 0 8px 8px 8px; margin-top: 8px; }
 
     table { width: 100%; border-collapse: separate; border-spacing: 0 4px; table-layout: fixed; }
     td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
