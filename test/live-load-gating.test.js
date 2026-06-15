@@ -9,12 +9,19 @@
  * broadcast left on after a run finished, live-state still returns the last
  * run's results, so seed/rehydrate flashed a stale snapshot behind the overlay.
  *
- * Fix: gate every paint path on there being an ACTIVE run to show —
+ * Fix: NOTHING paints before the server confirms an active run. DOMContentLoaded
+ * no longer optimistically rehydrates from the localStorage snapshot at all — a
+ * snapshot persisted mid-run keeps status:'running' after the run is stopped, so
+ * trusting it flashed the last run's rows (and fired /sdk-info) while paused.
+ * Painting happens ONLY inside connectLiveWork, which runs only once the
+ * /api/broadcast poll reports activeRun. As defense-in-depth the two paint
+ * functions still self-gate on an active run:
  *   - rehydrateFromCache repaints cached rows ONLY when the cached snapshot was
  *     an active run (status running/paused or a live batchId).
  *   - seedLiveStateFromRest paints rows ONLY when the seeded status is active.
- *   - (DOMContentLoaded resolves broadcast before any paint — covered by the
- *     pause-overlay suite; this suite locks the two paint-gate functions.)
+ *   - (The paused-overlay decision is covered by the pause-overlay suite, and
+ *     the single-poll gate by live-single-poll-gate; this suite locks the two
+ *     paint-gate functions.)
  *
  * This runs the REAL rehydrateFromCache + seedLiveStateFromRest extracted from
  * live.html against a fake localStorage / fetch / DOM and counts paints.
@@ -48,8 +55,18 @@ function extractFn(src, name) {
   return src.slice(m.index, j);
 }
 
-const extracted = ['_cachedRunActive', 'rehydrateFromCache', 'seedLiveStateFromRest']
+const extracted = ['rehydrateFromCache', 'seedLiveStateFromRest']
   .map(n => extractFn(html, n)).join('\n\n');
+
+// Guard: the speculative pre-broadcast reveal must stay gone. If a future edit
+// reintroduces a _cachedRunActive() optimistic paint in DOMContentLoaded, a
+// paused hard-refresh would flash stale cached rows behind the overlay again.
+if (/function\s+_cachedRunActive\s*\(/.test(html)) {
+  console.error('REGRESSION: _cachedRunActive() is back in live.html — the ' +
+    'speculative pre-broadcast cache reveal was removed on purpose (it flashed ' +
+    'stale rows + fired /sdk-info while paused). Paint only via connectLiveWork.');
+  process.exit(1);
+}
 
 // ─── Fake environment ────────────────────────────────────────────────────────
 let addSingleRowCount = 0; // rehydrate row paints
@@ -110,27 +127,11 @@ const idleSnap = {
 };
 
 console.log('\n/live load-sequence gating — stopped-flash regression\n');
-
-// ─── 0. _cachedRunActive: synchronous overlay decision (no network) ──────────
-console.log('[0] _cachedRunActive drives the synchronous overlay decision');
-function cachedActive(snap) {
-  const sb = makeSandbox();
-  sb.localStorage = fakeLocalStorage(snap);
-  return vm.runInContext('_cachedRunActive()', sb);
-}
-ok(cachedActive(activeSnap('running')) === true,
-   'broadcasting + running cache → active (reveal work synchronously)');
-ok(cachedActive({ ts: NOW, broadcastLive: true, state: {}, cb: { batchId: 9 }, results: [] }) === true,
-   'broadcasting + live batchId → active');
-ok(cachedActive(idleSnap) === false,
-   'broadcasting + done status → NOT active (overlay stays up)');
-ok(cachedActive({ ...activeSnap('running'), broadcastLive: false }) === false,
-   'last session not broadcasting → NOT active even if status running');
-ok(cachedActive(null) === false, 'no cache → not active (default to overlay)');
-{
-  const stale = activeSnap('running'); stale.ts = NOW - (2 * 60 * 60 * 1000);
-  ok(cachedActive(stale) === false, 'expired cache → not active');
-}
+console.log('[0] _cachedRunActive removed — no speculative pre-broadcast paint');
+ok(!/function\s+_cachedRunActive\s*\(/.test(html),
+   'live.html has no _cachedRunActive (paint only via connectLiveWork)');
+ok(!/if\s*\(\s*_cachedRunActive\(\)\s*\)/.test(html),
+   'DOMContentLoaded does not optimistically reveal from cache');
 
 // ─── 1. rehydrateFromCache: active cache repaints, idle cache does NOT ────────
 console.log('[1] rehydrateFromCache gates row paint on a cached ACTIVE run');

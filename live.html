@@ -964,21 +964,18 @@
       if (_liveResultsNext) _liveResultsNext.addEventListener('click', () => liveGoPage(1));
       const _liveSearchInput = document.getElementById('liveSearchInput');
       if (_liveSearchInput) _liveSearchInput.addEventListener('input', (e) => setLiveSearch(e.target.value));
-      // Decide the overlay SYNCHRONOUSLY from the last-known snapshot — BEFORE the
-      // async broadcast check — so the page never flashes the live shell while
-      // that fetch is in flight. The overlay ships SHOWN in the markup, so a
-      // stopped page stays fully covered from the very first paint. Only when the
-      // cached snapshot was an active run (operator refreshing mid-run) do we
-      // paint it and reveal the work up-front; the single poll below confirms or
-      // corrects, and fans out to the work endpoints only if a run is live.
-      if (_cachedRunActive()) {
-        rehydrateFromCache();
-        renderTable();
-        renderLiveStats();
-        showPaused(false);
-      }
-      // One call. If a run is live it fans out (SSE + live-state + logs + runs +
-      // stats); if paused it does nothing else and the page stays on the overlay.
+      // NOTHING is painted before the server confirms an active run. We do NOT
+      // optimistically rehydrate from the localStorage snapshot: a snapshot
+      // persisted mid-run keeps status:'running' after the run is stopped
+      // (persistence halts on stop, so the cache never updates to a terminal
+      // state). Trusting it flashed the last run's rows behind the paused
+      // overlay AND triggered a /sdk-info fetch while paused. The overlay ships
+      // SHOWN in the markup, so a paused page stays fully covered and data-free
+      // from the very first paint until the poll below proves a run is live.
+      // One call. If a run is live, checkBroadcastState fans out via
+      // connectLiveWork (cache rehydrate → SSE + live-state + logs + batch +
+      // stats) and drops the overlay; if paused it paints nothing and the page
+      // stays on the overlay.
       await checkBroadcastState();
       // Re-poll the single endpoint so a run that STARTS while we're paused flips
       // the page to live within ~10s — without any traffic in the meantime.
@@ -1976,17 +1973,6 @@
     // session leave an ACTIVE, broadcasting run? Used at load to decide the
     // overlay before the async broadcast check, so a stopped page never flashes
     // the live shell and an operator's mid-run refresh reveals the work instantly.
-    function _cachedRunActive() {
-      try {
-        const raw = localStorage.getItem(LIVE_CACHE_KEY);
-        if (!raw) return false;
-        const snap = JSON.parse(raw);
-        if (!snap || !snap.ts || (Date.now() - snap.ts) > LIVE_CACHE_TTL_MS) return false;
-        if (!snap.broadcastLive) return false;
-        const s = snap.state && snap.state.status;
-        return s === 'running' || s === 'paused' || !!(snap.cb && snap.cb.batchId);
-      } catch { return false; }
-    }
     function rehydrateFromCache() {
       try {
         const raw = localStorage.getItem(LIVE_CACHE_KEY);
