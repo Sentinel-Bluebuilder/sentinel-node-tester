@@ -1324,7 +1324,7 @@
     onReady(() => {
       // Load stats instantly (tiny payload, no results)
       fetch('/api/stats').then(r => r.json()).then(d => {
-        if (d.state) { state = Object.assign(state, d.state); applyState(); }
+        if (d.state) { state = Object.assign(state, d.state); anchorEta(); applyState(); }
       }).catch(() => {});
       loadSdkVersions();
       connectSSE();
@@ -1449,6 +1449,7 @@
         const msg = JSON.parse(e.data);
         if (msg.type === 'init' || msg.type === 'state') {
           state = Object.assign(state, msg.state);
+          anchorEta(); // re-anchor the skew-immune ETA on every state update
           if (msg.results) { resultsArr = msg.results; renderTable(); }
           // Restore logs from server buffer on init — batch-render in a single
           // DocumentFragment so a full 5000-line buffer doesn't trigger one
@@ -1469,9 +1470,10 @@
           }
           applyState();
         } else if (msg.type === 'progress') {
-          state = Object.assign(state, msg.state); applyState();
+          state = Object.assign(state, msg.state); anchorEta(); applyState();
         } else if (msg.type === 'result') {
           state = Object.assign(state, msg.state);
+          anchorEta(); // result events carry fresh counters → fresh etaRemainingMs
           if (msg.result) { upsertLocal(msg.result); addSingleRow(msg.result); }
           applyState();
         } else if (msg.type === 'log') {
@@ -1487,16 +1489,30 @@
       };
     }
 
+    // Skew-immune ETA anchor. The server broadcasts a REMAINING DURATION
+    // (state.etaRemainingMs), not an absolute epoch. We snapshot it against THIS
+    // client's own clock the instant a state update lands, then the 1s ticker
+    // counts it down using only our clock — so a skewed browser clock can't
+    // distort the ETA. A new server value RE-ANCHORS (server corrections land);
+    // between updates we just tick our anchor down. null clears the anchor.
+    let _etaAnchor = null; // { remainingMs, at } or null
+    function anchorEta() {
+      if (Number.isFinite(state.etaRemainingMs)) {
+        _etaAnchor = { remainingMs: state.etaRemainingMs, at: Date.now() };
+      } else {
+        _etaAnchor = null;
+      }
+    }
+
     function updateETA() {
-      // Server-authoritative ETA: the server computes ONE absolute finish epoch
-      // (state.etaFinishAtMs) from a windowed real-throughput estimate and
-      // broadcasts it. Both admin and live render the same value — we just
-      // count down to it. See computeEtaFinishAt() in server.js.
+      // Render the anchored remaining duration, decremented by the time elapsed
+      // on OUR clock since the anchor was set. See computeEtaRemainingMs() +
+      // the etaRemainingMs broadcast in server.js.
       const el = document.getElementById('etaTime');
       if (state.status === 'done') { el.textContent = '00:00:00'; return; }
       if (state.status !== 'running') return;
-      if (Number.isFinite(state.etaFinishAtMs)) {
-        const rem = Math.max(0, state.etaFinishAtMs - Date.now());
+      if (_etaAnchor) {
+        const rem = Math.max(0, _etaAnchor.remainingMs - (Date.now() - _etaAnchor.at));
         const h = Math.floor(rem / 3600000), m = Math.floor((rem % 3600000) / 60000), s = Math.floor((rem % 60000) / 1000);
         el.textContent = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
       } else {

@@ -303,6 +303,21 @@ async function _runOnePass(loopState, batchId, frozenNodes = null, resume = fals
     _emitScoped('result', { result: raw, batchId });
     const payload = _sanitizeBatchNodeResult(raw, batchId);
     _emitScoped('batch:node:result', payload);
+    // ETA staleness fix: the pipeline only emits a per-node `state` event on
+    // SUCCESS (it gates that broadcast on actualMbps != null — pipeline.js:978),
+    // and batchBroadcast forwards that success `state` via the type==='state'
+    // branch above. During a failing streak no `state` reaches the bus and the
+    // server's windowed ETA (etaRemainingMs) never refreshes — clients tick
+    // their anchor down to 0 and sit there. So forward the loop's current state
+    // (carried on the result payload, with up-to-date counters) as a lightweight
+    // `state` event ONLY for nodes the pipeline skipped its state emit on
+    // (actualMbps == null: failures + skips). Successful nodes already got their
+    // state above; emitting again here would double every success frame. Net:
+    // exactly one `state` per completed node, pass/fail alike — and the server
+    // recomputes etaRemainingMs each time. No new fields, no public-payload bloat.
+    if (data.state && typeof data.state === 'object' && raw.actualMbps == null) {
+      _emitScoped('state', { state: data.state });
+    }
     // Persist to batch_results (non-blocking, non-fatal). Guard on batchId > 0:
     // if insertBatch failed upstream (logged, non-fatal) currentBatchId stays 0,
     // and writing insertBatchResult(0, …) would violate the FK to a non-existent

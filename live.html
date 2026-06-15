@@ -1650,9 +1650,9 @@
       if (hdrDot) hdrDot.className = 'pulse-dot';
       // Log-panel header label: 'stopped' / 'complete' / 'error' / 'idle'.
       setStatus(status === 'done' ? 'complete' : status);
-      // cbRender recomputes the ETA: with startedAt now null it resolves to
-      // "ETA 00:00:00" (all tested) or "ETA —" (stopped mid-run), never a
-      // climbing number.
+      // cbRender recomputes the ETA: a 'done' run reads "ETA 00:00:00" (matches
+      // admin), any other terminal/stopped status with no anchor reads "ETA —",
+      // never a climbing number.
       cbRender();
     }
 
@@ -1718,14 +1718,23 @@
 
       const etaEl = _cbEl('cbEta');
       if (etaEl) {
-        // Server-authoritative ETA: the server computes ONE absolute finish
-        // epoch (_liveState.etaFinishAtMs) from a windowed real-throughput
-        // estimate and broadcasts it. We just count down to it — so this page
-        // and admin.html always show the same value. The old elapsed/tested
-        // per-node math (which diverged from admin's) is gone.
-        const finishAt = Number(_liveState && _liveState.etaFinishAtMs);
-        if (Number.isFinite(finishAt) && finishAt > 0) {
-          const rem = Math.max(0, finishAt - Date.now());
+        // Skew-immune ETA: the server broadcasts a REMAINING DURATION
+        // (_liveState.etaRemainingMs), not an absolute epoch. We anchor it to
+        // THIS client's own clock at receipt (see mergeLiveState → _etaAnchor)
+        // and count it down using only our clock — so a skewed browser clock
+        // can't distort the ETA. This page and admin.html show the same value.
+        // Parity with admin.html (updateETA): a terminal 'done' run shows a
+        // zeroed clock — "ETA 00:00:00" — NOT "ETA —". The server stops
+        // broadcasting a positive etaRemainingMs once status leaves 'running'
+        // (computeEtaRemainingMs returns null), so _etaAnchor is already cleared
+        // by the time a run reads 'done'; without this branch a completed run
+        // would show "ETA —" here while admin shows "00:00:00". "ETA —" stays
+        // reserved for genuinely unknown / stopped-mid-run states (no anchor,
+        // not done).
+        if (_liveState && _liveState.status === 'done') {
+          etaEl.textContent = 'ETA 00:00:00';
+        } else if (_etaAnchor) {
+          const rem = Math.max(0, _etaAnchor.remainingMs - (Date.now() - _etaAnchor.at));
           const h = Math.floor(rem / 3600000);
           const m = Math.floor((rem % 3600000) / 60000);
           const s = Math.floor((rem % 60000) / 1000);
@@ -1890,11 +1899,11 @@
       applyHeaderStatsFromState();
     }, 5000);
 
-    // Dedicated 1s ETA ticker. The ETA is now a countdown to the
-    // server-broadcast absolute finish epoch (_liveState.etaFinishAtMs), so it
-    // must re-render every second to tick down between server events. Gated on
-    // _cb.startedAt (cbFreeze nulls it on stop/done/error/idle) so a finished
-    // run's ETA freezes instead of marching.
+    // Dedicated 1s ETA ticker. The ETA is a countdown of the server-broadcast
+    // REMAINING DURATION (_etaAnchor, anchored to our own clock in
+    // mergeLiveState), so it must re-render every second to tick the anchor down
+    // between server events. Gated on _cb.startedAt (cbFreeze nulls it on
+    // stop/done/error/idle) so a finished run's ETA freezes instead of marching.
     setInterval(() => {
       if (_cb.startedAt) cbRender();
     }, 1000);
@@ -1914,6 +1923,17 @@
     const LIVE_CACHE_KEY = 'live:snapshot:v1';
     const LIVE_CACHE_TTL_MS = 60 * 60 * 1000; // 1h — enough to survive a reload
     let _liveState = {};
+    // Skew-immune ETA anchor. The server broadcasts a REMAINING DURATION
+    // (_liveState.etaRemainingMs); we snapshot it against THIS client's own
+    // clock the instant a state update lands (mergeLiveState), then cbRender's
+    // 1s ticker counts it down using only our clock. A new server value
+    // re-anchors; null clears it (cbRender shows "ETA —").
+    let _etaAnchor = null; // { remainingMs, at } or null
+    function anchorEta() {
+      const rem = Number(_liveState && _liveState.etaRemainingMs);
+      if (Number.isFinite(rem)) _etaAnchor = { remainingMs: rem, at: Date.now() };
+      else _etaAnchor = null;
+    }
     // True once we've received an AUTHORITATIVE run status — either the REST
     // live-state seed or an SSE state/init. Until then, applyPauseFromState must
     // NOT decide "paused" from the empty/cached defaults: on a cold load the
@@ -1988,6 +2008,7 @@
       // state/init) — applyPauseFromState may now decide the overlay.
       _liveStateResolved = true;
       _liveState = { ..._liveState, ...s };
+      anchorEta(); // re-anchor the skew-immune ETA on every state update
       applyHeaderStatsFromState();
       applyPauseFromState();
       schedulePersist();
@@ -2448,8 +2469,9 @@
               // paused_balance / paused_internet — show a friendly 'paused' label.
               // Not terminal: don't cbFreeze (keep startedAt so the resumed run's
               // ETA continues). The ETA is frozen meanwhile by the server:
-              // computeEtaFinishAt returns null when status !== 'running', so the
-              // broadcast etaFinishAtMs goes null and cbRender shows "ETA —".
+              // computeEtaRemainingMs returns null when status !== 'running', so
+              // the broadcast etaRemainingMs goes null, anchorEta clears
+              // _etaAnchor, and cbRender shows "ETA —".
               setStatus('paused');
             }
             renderLiveStats();

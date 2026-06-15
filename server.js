@@ -353,29 +353,56 @@ function appendEventLog(msg) {
 // different inputs, so they disagreed. The server now owns the single source
 // of truth: it keeps a rolling window of the last ETA_WINDOW node-completion
 // timestamps, derives the current completion RATE (nodes/ms), and broadcasts
-// an ABSOLUTE finish epoch (`etaFinishAtMs`). Clients render
-// max(0, etaFinishAtMs - Date.now()) as HH:MM:SS, ticking every second. This
+// a REMAINING DURATION (`etaRemainingMs`) — NOT an absolute epoch. Each client
+// anchors that duration to its OWN clock at receipt and counts it down, so a
+// skewed browser clock can't distort the ETA (an absolute server epoch rendered
+// against a skewed client Date.now() drifted by the offset — minutes). The math
 // is throughput-based (parallelism-aware), not per-node-duration based.
 const ETA_WINDOW = 12;
 let _etaCompletions = [];   // recent node-completion epoch ms (rolling, current pass)
 let _etaLastDone = -1;      // last seen completed-count, to detect a new pass
+let _etaPrevStatus = null;  // last seen status, to detect a fresh →running transition
 
-function computeEtaFinishAt(st) {
+// Resolve the (done, total) pair the ETA should measure against. During a
+// retest (runRetestSkips), every node already has a result row so the whole-run
+// counters are saturated (done ≈ total) and remaining ≤ 0 — the ETA would pin
+// at 00:00:00 for the entire retest. The retest's REAL progress lives in
+// separate fields (retestTested / retestPassed+retestFailed / retestTotal), so
+// when retestMode is set with a usable retestTotal we measure against those
+// instead. Falls back to the whole-run counters whenever the retest fields are
+// absent or non-positive (defensive — never let a missing field zero the ETA).
+function etaProgress(st) {
+  if (st.retestMode && Number(st.retestTotal) > 0) {
+    // retestTested already counts every retested node (pass + fail), so it is
+    // the authoritative "done" for the retest pass; fall back to summing
+    // retestPassed+retestFailed if retestTested is somehow absent.
+    let done = Number(st.retestTested);
+    if (!(done >= 0)) done = (Number(st.retestPassed) || 0) + (Number(st.retestFailed) || 0);
+    return { done, total: Number(st.retestTotal) };
+  }
+  const done = (st.testedNodes || 0) + (st.failedNodes || 0) + (st.skippedNodes || 0);
+  const total = st.totalNodes || 0;
+  return { done, total };
+}
+
+// Returns the REMAINING milliseconds until the active pass completes, or null
+// when not computable (not running / <2 completions / total<=0). 0 when there
+// is no work left. Clients anchor this to their own clock and tick it down.
+function computeEtaRemainingMs(st) {
   if (!st || typeof st !== 'object') return null;
   // Only meaningful while a pass is actively running. done/idle/paused_* → null.
   if (st.status !== 'running') return null;
-  const done = (st.testedNodes || 0) + (st.failedNodes || 0) + (st.skippedNodes || 0);
-  const total = st.totalNodes || 0;
+  const { done, total } = etaProgress(st);
   if (total <= 0) return null;
   const remaining = total - done;
-  if (remaining <= 0) return Date.now(); // finish now → renders 00:00:00
+  if (remaining <= 0) return 0; // no work left → renders 00:00:00
   if (_etaCompletions.length < 2) return null; // not enough data → client shows "Calculating…"
   const span = _etaCompletions[_etaCompletions.length - 1] - _etaCompletions[0];
   if (span <= 0) return null;
   const n = _etaCompletions.length - 1; // intervals across the window
   const ratePerMs = n / span;
   const etaMs = remaining / ratePerMs;
-  return Date.now() + Math.round(etaMs);
+  return Math.round(etaMs);
 }
 
 function broadcast(type, data = {}) {
@@ -396,9 +423,9 @@ function broadcast(type, data = {}) {
   if (type === 'state' || type === 'result') saveStateSnapshot();
   // ─── ETA bookkeeping ──────────────────────────────────────────────────────
   // Record the just-finished node FIRST (so it's in the window), then compute
-  // the absolute finish epoch and stamp it onto any state payload so admin
-  // (which ticks on 'result' events) and live (which ticks on 'state') both
-  // render the same value.
+  // the remaining duration and stamp it onto any state payload so admin (which
+  // ticks on 'result' events) and live (which ticks on 'state') both anchor the
+  // same value to their own clocks.
   if (type === 'result') {
     _etaCompletions.push(Date.now());
     if (_etaCompletions.length > ETA_WINDOW) {
@@ -407,16 +434,28 @@ function broadcast(type, data = {}) {
   }
   if (data && data.state && typeof data.state === 'object') {
     const s = data.state;
-    const done = (s.testedNodes || 0) + (s.failedNodes || 0) + (s.skippedNodes || 0);
-    if (done < _etaLastDone) _etaCompletions = []; // counters reset → new pass
+    // Explicit fresh-run ring reset: when status transitions INTO 'running' from
+    // any non-running status, wipe the window so a new run can never inherit the
+    // prior run's completion timestamps. This no longer relies on an incidental
+    // zero-`done` broadcast landing before the first result of the new run.
+    if (s.status === 'running' && _etaPrevStatus !== 'running') {
+      _etaCompletions = [];
+      _etaLastDone = -1;
+    }
+    _etaPrevStatus = s.status;
+    const { done } = etaProgress(s);
+    // Belt-and-suspenders per-pass reset within a continuous loop: each
+    // iteration's counters reset to 0, so a drop below the last-seen done count
+    // means a new pass started — clear the window.
+    if (done < _etaLastDone) _etaCompletions = [];
     _etaLastDone = done;
     // NOTE: for most callers data.state IS the long-lived global `state` object,
-    // so this assignment MUTATES the global in place — etaFinishAtMs is not a
+    // so this assignment MUTATES the global in place — etaRemainingMs is not a
     // per-payload-only field. That's fine: it's recomputed on every broadcast,
-    // and computeEtaFinishAt SELF-CLEARS it to null whenever status !== 'running'
-    // (done/idle/paused_*), so a stale value can never linger on the global.
-    // saveStateSnapshot's allowlist also excludes it, so it never persists.
-    data.state.etaFinishAtMs = computeEtaFinishAt(data.state);
+    // and computeEtaRemainingMs SELF-CLEARS it to null whenever status !==
+    // 'running' (done/idle/paused_*), so a stale value can never linger on the
+    // global. saveStateSnapshot's allowlist also excludes it, so it never persists.
+    data.state.etaRemainingMs = computeEtaRemainingMs(data.state);
   }
   // NOTE: spread `data` FIRST so a payload field named `type` (e.g. the node's
   // service-type like 'wireguard') cannot clobber the SSE event type. The
@@ -1954,13 +1993,13 @@ function _redactPublicError(v, max = 200) {
 //     the Server-Baseline header tile.
 //   - activeSDK ('js' | 'tkd' | 'csharp') surfaces next to the run-mode label;
 //     display name + version are joined client-side via /api/public/sdk-info.
-//   - etaFinishAtMs is the server-authoritative absolute finish epoch (ms);
-//     live.html renders max(0, etaFinishAtMs - Date.now()) as a ticking ETA so
-//     it matches admin.html exactly.
+//   - etaRemainingMs is the server-authoritative REMAINING duration (ms);
+//     live.html anchors it to its own clock at receipt and counts it down, so it
+//     matches admin.html without being distorted by client clock skew.
 const PUBLIC_STATE_KEYS = [
   'status',
   'totalNodes',
-  'etaFinishAtMs',
+  'etaRemainingMs',
   'baselineMbps',
   'baselineHistory',
   'testRun',
@@ -2374,10 +2413,10 @@ app.get('/api/events', adminOnly, rlAdminSse, (req, res) => {
   // Strip wallet + balance internals AND runGranter (subscription granter
   // address — operator-internal, never needs to leave the server).
   const { walletAddress, balance, balanceUdvpn, spentUdvpn, runGranter, ...stateForSse } = state;
-  // The global `state` doesn't carry a fresh etaFinishAtMs (it's stamped onto
+  // The global `state` doesn't carry a fresh etaRemainingMs (it's stamped onto
   // broadcast payloads, not the global), so a freshly-connected admin would be
   // blank until the next event. Compute it once here for the init frame.
-  stateForSse.etaFinishAtMs = computeEtaFinishAt(state);
+  stateForSse.etaRemainingMs = computeEtaRemainingMs(state);
   // Trim each result row's diag to the 4 fields the dashboard reads (drop the
   // credential/config/stdout blob). New array of clones — getResults() returns
   // the shared in-memory state rows; never mutate them.

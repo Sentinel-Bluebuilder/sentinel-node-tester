@@ -111,7 +111,7 @@ const REMOVED_RESULT_FIELDS = [
   'latencyMs', 'handshakeMs', 'sessionMs',
 ];
 const KEPT_STATE_KEYS = [
-  'status', 'totalNodes', 'etaFinishAtMs', 'baselineMbps', 'baselineHistory',
+  'status', 'totalNodes', 'etaRemainingMs', 'baselineMbps', 'baselineHistory',
   'testRun', 'runMode', 'runPlanId', 'pricingMode', 'activeSDK',
   'activeRunNumber',
 ];
