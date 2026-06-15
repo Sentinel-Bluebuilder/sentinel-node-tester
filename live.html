@@ -444,8 +444,8 @@
       padding: 5px 10px; background: var(--bg-input);
       border-radius: 4px; border-left: 2px solid var(--text-dim);
       color: var(--text); animation: slideIn 0.2s ease;
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-      display: flex; align-items: center; gap: 8px;
+      white-space: normal; overflow-wrap: anywhere;
+      display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px;
       font-variant-numeric: tabular-nums;
       flex: 0 0 auto;
     }
@@ -498,7 +498,7 @@
       color: var(--red); font-weight: 600;
       flex-shrink: 0;
     }
-    .log-entry .log-msg { color: var(--text); flex-shrink: 1; overflow: hidden; text-overflow: ellipsis; }
+    .log-entry .log-msg { color: var(--text); flex: 1 1 auto; min-width: 0; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
     .log-entry .log-copy {
       margin-left: auto; flex-shrink: 0;
       background: transparent; border: 1px solid var(--border);

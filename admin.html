@@ -726,6 +726,10 @@
       border-left: 2px solid var(--text-dim);
       color: var(--text);
       animation: slideIn 0.2s ease;
+      /* Wrap long lines to the next line instead of overflowing — long
+         unbroken tokens (addresses, base64 memos, URLs) break too. */
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     .log-warn { border-left-color: var(--text-muted); color: var(--text-dim); }
