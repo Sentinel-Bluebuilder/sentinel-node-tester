@@ -11,6 +11,10 @@
  * and inserts + scrolls exactly once. This test runs the REAL functions from
  * admin.html against a fake DOM and asserts the work is O(cap), single-reflow.
  *
+ * Logs are newest-first: appendLog prepends and trims the oldest off the tail;
+ * appendLogBatch builds the fragment newest→oldest and prepends it. The order
+ * assertions below lock that (newest at the head/top).
+ *
  * Run: node test/admin-log-batch.test.js
  */
 
@@ -63,12 +67,18 @@ function makeNode(tag) {
     __isFrag: tag === '#fragment',
     get children() { return this._children; },
     get firstChild() { return this._children[0]; },
+    get lastChild() { return this._children[this._children.length - 1]; },
     appendChild(c) {
       if (c && c.__isFrag) { for (const cc of c._children) this._children.push(cc); c._children = []; }
       else this._children.push(c);
       return c;
     },
-    insertBefore(c) { this._children.unshift(c); return c; },
+    // Prepend (newest-first). Expand a fragment at the front preserving order.
+    insertBefore(c) {
+      if (c && c.__isFrag) { this._children.unshift(...c._children); c._children = []; }
+      else this._children.unshift(c);
+      return c;
+    },
     removeChild(c) { const i = this._children.indexOf(c); if (i >= 0) this._children.splice(i, 1); return c; },
   };
   // Count writes to scrollTop — each write is a forced reflow in the browser.
@@ -115,10 +125,11 @@ ok(createElementCount === LOG_DOM_MAX,
    `builds only ${LOG_DOM_MAX} nodes, not 5000 (got ${createElementCount})`);
 ok(createFragCount === 1, `uses one DocumentFragment (got ${createFragCount})`);
 // Only the LAST 500 lines are kept (matches the cap the live path enforces).
-ok(logBody.children[logBody.children.length - 1].innerHTML.includes('line 4999'),
-   'keeps the newest line (4999) at the tail');
-ok(logBody.children[0].innerHTML.includes('line 4500'),
-   'oldest kept line is 4500 (last 500 of 5000)');
+// Newest-first: the newest line sits at the HEAD, oldest-kept at the tail.
+ok(logBody.children[0].innerHTML.includes('line 4999'),
+   'keeps the newest line (4999) at the head (top)');
+ok(logBody.children[logBody.children.length - 1].innerHTML.includes('line 4500'),
+   'oldest kept line is 4500 at the tail (last 500 of 5000)');
 
 // ─── 2. Small buffer: appends all, still single reflow ───────────────────────
 console.log('[2] appendLogBatch(small buffer) appends all, single reflow');
@@ -127,6 +138,10 @@ const small = ['alpha', 'bravo', 'charlie'];
 vm.runInContext('appendLogBatch(globalThis.__small)', Object.assign(sandbox, { __small: small }));
 ok(logBody.children.length === 3, `appended all 3 (got ${logBody.children.length})`);
 ok(logBody._scrollWrites === 1, `single reflow (got ${logBody._scrollWrites})`);
+// Newest-first: last-in (charlie) at the head, first-in (alpha) at the tail.
+ok(logBody.children[0].innerHTML.includes('charlie') &&
+   logBody.children[2].innerHTML.includes('alpha'),
+   'batch is newest-first (charlie at top, alpha at bottom)');
 
 // ─── 3. Guards ───────────────────────────────────────────────────────────────
 console.log('[3] guards: empty / non-array are no-ops');
@@ -143,6 +158,12 @@ for (let i = 0; i < 600; i++) {
 }
 ok(logBody.children.length === LOG_DOM_MAX,
    `single-line appends trim to ${LOG_DOM_MAX} (got ${logBody.children.length})`);
+// Newest-first: the last line appended (live 599) is at the head; the oldest
+// surviving line (live 100, after trimming 0–99) is at the tail.
+ok(logBody.children[0].innerHTML.includes('live 599'),
+   'newest single-line append is at the head (top)');
+ok(logBody.children[logBody.children.length - 1].innerHTML.includes('live 100'),
+   'oldest surviving line is at the tail (trimmed from the bottom)');
 
 // ─── 5. Emission-time: replay uses stored ts, never render-time ──────────────
 console.log('[5] replay shows EMISSION time, live shows current time');

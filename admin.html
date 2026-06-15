@@ -2101,7 +2101,7 @@
       for (const row of body.children) {
         row.style.display = _logEntryMatches(row, f) ? '' : 'none';
       }
-      body.scrollTop = body.scrollHeight;
+      body.scrollTop = 0;
     }
 
     function _logEntryMatches(row, f) {
@@ -2161,9 +2161,12 @@
       const body = document.getElementById('logBody');
       const { msg, ts } = _logEntryFields(entry);
       const tsMs = (entry && typeof entry === 'object') ? ts : Date.now();
-      body.appendChild(_buildLogEntry(msg, cat, tsMs));
-      body.scrollTop = body.scrollHeight;
-      if (body.children.length > LOG_DOM_MAX) body.removeChild(body.firstChild);
+      // Newest-first: prepend at the TOP, scroll to the top to keep it in view,
+      // and trim the OLDEST off the bottom. Writing scrollTop=0 (vs reading
+      // scrollHeight) avoids a forced synchronous layout — one cheap reflow.
+      body.insertBefore(_buildLogEntry(msg, cat, tsMs), body.firstChild);
+      body.scrollTop = 0;
+      if (body.children.length > LOG_DOM_MAX) body.removeChild(body.lastChild);
     }
 
     // Batch-replay the server's init log buffer (up to LOG_BUFFER_MAX=5000 lines)
@@ -2179,14 +2182,18 @@
       const body = document.getElementById('logBody');
       const tail = entries.length > LOG_DOM_MAX ? entries.slice(-LOG_DOM_MAX) : entries;
       const frag = document.createDocumentFragment();
-      // Replay uses each line's STORED emission ts (null → blank) — never now.
-      for (const e of tail) {
-        const { msg, ts } = _logEntryFields(e);
+      // Newest-first order: walk the tail newest→oldest so the fragment's first
+      // child is the newest line. Replay uses each line's STORED emission ts
+      // (null → blank) — never now.
+      for (let i = tail.length - 1; i >= 0; i--) {
+        const { msg, ts } = _logEntryFields(tail[i]);
         frag.appendChild(_buildLogEntry(msg, undefined, ts));
       }
-      body.appendChild(frag);
-      body.scrollTop = body.scrollHeight;
-      while (body.children.length > LOG_DOM_MAX) body.removeChild(body.firstChild);
+      // Prepend the whole batch above anything already shown, scroll to the top,
+      // and trim the OLDEST off the bottom.
+      body.insertBefore(frag, body.firstChild);
+      body.scrollTop = 0;
+      while (body.children.length > LOG_DOM_MAX) body.removeChild(body.lastChild);
     }
 
     // ─── Test Run Management ────────────────────────────────────────────────
