@@ -1,6 +1,6 @@
 # Sentinel Node Tester — Project Instructions
 
-> **New Claude session: read this file first, then `memory/handoff-node-tester.md` (current state), then `ARCH.md` (module map). Stop there.** Everything under `docs/` is reference material — open only when the task needs it. Files in `docs/archive/` are historical and may contradict current code; treat them as read-only context, never as source of truth. The user is `the operator`; the tester is their primary network audit instrument.
+> **New Claude session: read this file first, then `memory/handoff-node-tester.md` (current state), then `ARCH.md` (module map). Stop there.** Everything under `docs/` is reference material — open only when the task needs it. Files in `docs/archive/` are historical and may contradict current code; treat them as read-only context, never as source of truth. The user is the operator; the tester is their primary network audit instrument.
 
 ## What this is
 Standalone tool for stress-testing every node on the Sentinel chain. Runs sessions, measures speed/latency, persists results in `audit.db` (SQLite). Type 1 deployment (Node.js server + browser dashboard) per global CLAUDE.md categorization. Published to npm as `sentinel-node-tester`. Canonical repo: `Sentinel-Bluebuilder/sentinel-node-tester` (renamed from `Sentinel-Bluebuilder` on 2026-04-30 — old URLs auto-redirect but always use the new name in new code/docs).

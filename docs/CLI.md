@@ -132,8 +132,8 @@ sentinel-audit nodes --country DE --type wireguard --limit 5 --pretty
     {
       "address": "sentnode1abc123def456ghi789jkl012mno345pqr678stu",
       "moniker": "de-node-01",
-      "remoteUrl": "https://198.51.100.1:8080",
-      "remoteAddrs": ["198.51.100.1:8080"],
+      "remoteUrl": "https://198.51.100.42:8080",
+      "remoteAddrs": ["198.51.100.42:8080"],
       "country": "Germany",
       "countryCode": "DE",
       "city": "Frankfurt",
@@ -173,7 +173,7 @@ sentinel-audit node sentnode1abc123def456ghi789jkl012mno345pqr678stu --pretty
 {
   "address": "sentnode1abc123def456ghi789jkl012mno345pqr678stu",
   "moniker": "de-node-01",
-  "remoteUrl": "https://198.51.100.1:8080",
+  "remoteUrl": "https://198.51.100.42:8080",
   "type": "wireguard",
   "peers": 3,
   "bandwidth": {

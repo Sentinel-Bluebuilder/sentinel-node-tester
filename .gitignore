@@ -33,6 +33,7 @@ scripts/research/
 # Internal dev files (session handoff, internal suggestions)
 HANDOFF.md
 suggestions/
+memory/
 
 # C# bridge build artifacts
 csharp-bridge/bin/

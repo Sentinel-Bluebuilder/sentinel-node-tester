@@ -22,8 +22,12 @@ import { Tendermint37Client } from '@cosmjs/tendermint-rpc';
 import { QueryClient, setupBankExtension } from '@cosmjs/stargate';
 import { RPC_ENDPOINTS } from '../core/constants.js';
 
-const FUNDED_ADDR = process.argv[2] || 'sent1redactedwalletxxxxxxxxxxxxxxxxxxxxxxx';
+const FUNDED_ADDR = process.argv[2];
 const EXPECTED_UDVPN = process.argv[3] || '10000000000';
+if (!FUNDED_ADDR) {
+  console.error('Usage: node scripts/audit-rpc-endpoints.mjs <sent1-funded-address> [expected-udvpn]');
+  process.exit(1);
+}
 
 async function audit(url) {
   const t0 = Date.now();

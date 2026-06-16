@@ -245,17 +245,17 @@ volatile bool _stopRequested;
 
 ### WireGuard PASS
 ```json
-{"timestamp":"2026-03-24T01:15:04Z","address":"sentnode1redactedxxxxxxxxxxxxxxxxxxxxxxxxxxxx","type":"WireGuard","moniker":"example-node-01","country":"Australia","countryCode":"AU","city":"Sydney","peers":8,"actualMbps":45.2,"speedMethod":"multi-request","googleAccessible":true,"googleLatencyMs":145,"baselineAtTest":120.5,"pass10mbps":true,"pass15mbps":true,"error":null}
+{"timestamp":"2026-03-24T01:15:04Z","address":"sentnode1example0001xxxxxxxxxxxxxxxxxxxxxxxxxxx","type":"WireGuard","moniker":"example-node-01","country":"Australia","countryCode":"AU","city":"Sydney","peers":8,"actualMbps":45.2,"speedMethod":"multi-request","googleAccessible":true,"googleLatencyMs":145,"baselineAtTest":120.5,"pass10mbps":true,"pass15mbps":true,"error":null}
 ```
 
 ### V2Ray PASS
 ```json
-{"timestamp":"2026-03-24T02:31:48Z","address":"sentnode1redactedxxxxxxxxxxxxxxxxxxxxxxxxxxxx","type":"V2Ray","moniker":"example-node-02","country":"Chile","countryCode":"CL","city":"","peers":1,"actualMbps":12.8,"speedMethod":"multi-request","googleAccessible":true,"googleLatencyMs":230,"diag":{"v2rayTransport":"grpc","v2raySecurity":"none","v2rayPort":55215,"clockDriftSec":-1},"error":null}
+{"timestamp":"2026-03-24T02:31:48Z","address":"sentnode1example0002xxxxxxxxxxxxxxxxxxxxxxxxxxx","type":"V2Ray","moniker":"example-node-02","country":"Chile","countryCode":"CL","city":"","peers":1,"actualMbps":12.8,"speedMethod":"multi-request","googleAccessible":true,"googleLatencyMs":230,"diag":{"v2rayTransport":"grpc","v2raySecurity":"none","v2rayPort":55215,"clockDriftSec":-1},"error":null}
 ```
 
 ### V2Ray FAIL
 ```json
-{"timestamp":"2026-03-24T00:50:04Z","address":"sentnode1redactedxxxxxxxxxxxxxxxxxxxxxxxxxxxx","type":"V2Ray","moniker":"example-node-03","country":"Bahrain","countryCode":"BH","city":"","peers":8,"actualMbps":null,"googleAccessible":false,"error":"All V2Ray transports failed","diag":{"clockDriftSec":245,"v2rayMetadataCount":2}}
+{"timestamp":"2026-03-24T00:50:04Z","address":"sentnode1example0003xxxxxxxxxxxxxxxxxxxxxxxxxxx","type":"V2Ray","moniker":"example-node-03","country":"Bahrain","countryCode":"BH","city":"","peers":8,"actualMbps":null,"googleAccessible":false,"error":"All V2Ray transports failed","diag":{"clockDriftSec":245,"v2rayMetadataCount":2}}
 ```
 
 ---

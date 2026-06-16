@@ -5,6 +5,11 @@ results/
 HANDOFF.md
 suggestions/
 
+# Internal/stale docs — never ship to npm consumers (historical session
+# handoffs + internal audits; not consumer documentation)
+docs/archive/
+memory/
+
 # Build artifacts
 csharp-bridge/obj/
 csharp-bridge/bin/

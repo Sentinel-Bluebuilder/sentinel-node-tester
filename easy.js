@@ -110,7 +110,7 @@ export async function getNodes(opts = {}) {
  * @example
  *   const result = await testOne({
  *     mnemonic: 'your twelve words...',
- *     node: 'sentnode1redactedxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+ *     node: 'sentnode1abc123def456ghi789jkl012mno345pqr678stu',
  *   });
  *   console.log(result.pass ? `PASS: ${result.speed} Mbps` : `FAIL: ${result.error}`);
  */
