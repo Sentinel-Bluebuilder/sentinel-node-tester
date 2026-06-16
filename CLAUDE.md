@@ -38,7 +38,7 @@ This rule exists because we burned ~2 hours on 2026-04-30 untangling a 3-week-ol
 8. **`master` is always deployable.** No half-finished features behind feature flags counts — if it's on master, it ships. Use a runtime setting (like the `onchainEnabled` toggle) for opt-in features, NOT branch isolation.
 
 ### Allowed gh accounts
-Repo `Sentinel-Bluebuilder/sentinel-node-tester` requires `gh auth switch --user Sentinel-Bluebuilder` before push (default `non-org-account` gets 403).
+Repo `Sentinel-Bluebuilder/sentinel-node-tester` requires `gh auth switch --user Sentinel-Bluebuilder` before push (the default non-org gh account gets 403).
 
 ### When something gets weird
 - "Branch has 11 commits ahead of master, 2 behind, won't merge cleanly" → STOP. Ask before any rebase/merge. The right answer is usually "force-set master to branch tip and delete the branch," not "spend an hour resolving fake conflicts."
@@ -162,7 +162,7 @@ Every runner MUST pin `state.testRun` and `state.runMode` at its top so prior-ru
 ## Release status
 - npm: `sentinel-node-tester@1.4.0` (latest).
 - GitHub: `Sentinel-Bluebuilder/sentinel-node-tester` master + open PR #2 on `stop-and-error-popup` (PR #1 merged).
-- Pushes to that org require `gh auth switch --user Sentinel-Bluebuilder` first (default `non-org-account` gets 403).
+- Pushes to that org require `gh auth switch --user Sentinel-Bluebuilder` first (the default non-org gh account gets 403).
 
 ## Boot Path — DO NOT regress (post-2026-04-30)
 
