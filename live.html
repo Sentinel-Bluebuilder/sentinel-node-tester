@@ -440,77 +440,175 @@
     }
     .logs {
       flex: 1 1 auto; min-height: 0;
-      overflow-y: auto; overflow-x: auto; padding: 12px;
-      display: flex; flex-direction: column; gap: 4px;
+      /* Vertical scroll only. The row layout below is responsible for fitting
+         every line inside this width — never a horizontal scrollbar. */
+      overflow-y: auto; overflow-x: hidden; padding: 8px 0;
+      display: flex; flex-direction: column; gap: 0;
       font-family: var(--font-mono); font-size: 11px;
+      min-width: 0;
     }
+    /* ── Two-line terminal record ──
+       The narrow 380px log column can't show time + status + transport +
+       country + address + speed on ONE line without shredding every field to
+       2-3 chars. So each node event is a vertical record:
+         line 1 (.log-head):   TIME  TAG  XPORT  CC ················ RESULT
+         line 2 (.log-detail): node-address · moniker   (or message)
+       The head columns line up vertically across rows (terminal feel); the
+       detail line gets the full panel width so the address stays readable. */
     .log-entry {
-      padding: 5px 10px; background: var(--bg-input);
-      border-radius: 4px; border-left: 2px solid var(--text-dim);
-      color: var(--text); animation: slideIn 0.2s ease;
-      white-space: nowrap;
-      display: flex; align-items: baseline; gap: 8px;
+      padding: 5px 12px 6px; background: transparent;
+      border-radius: 0; border-left: 2px solid transparent;
+      color: var(--text); animation: slideIn 0.15s ease;
+      display: flex; flex-direction: column; gap: 1px;
       font-variant-numeric: tabular-nums;
       flex: 0 0 auto;
-      width: max-content; min-width: 100%;
+      width: 100%; min-width: 0;
+      line-height: 1.35;
+      overflow: hidden;
+      box-shadow: inset 0 -1px 0 var(--border);  /* hairline row separator */
+      transition: background 0.12s ease;
     }
-    .log-entry.log-ok  { border-left-color: var(--green); }
-    .log-entry.log-err { border-left-color: var(--red); }
-    .log-entry.log-warn{ border-left-color: var(--yellow); }
-    .log-entry .log-time { color: var(--text-muted); flex-shrink: 0; }
+    .log-entry.log-ok  { border-left-color: var(--green-dim); }
+    .log-entry.log-err { border-left-color: var(--red); background: var(--red-dim); }
+    .log-entry.log-warn{ border-left-color: var(--yellow-dim); }
+    .log-entry:hover { background: var(--bg-input); }
+    .log-entry.log-err:hover { background: var(--red-dim); }
+
+    /* ── HEAD: fixed-column GRID so every field aligns vertically across rows,
+       terminal-style. Columns never shift, whether SKIP is present or not.
+         TIME │ TAG │ XPORT │ CC │ ……RESULT (1fr, right-aligned) */
+    .log-head {
+      display: grid;
+      grid-template-columns: 42px 34px 22px 24px 1fr;
+      align-items: center; column-gap: 10px;
+      width: 100%; min-width: 0;
+    }
+    /* DETAIL: hangs under the TAG column so the address sits in a clean indented
+       band directly below — visually tied to its head, not floating mid-row. */
+    .log-detail {
+      display: flex; align-items: baseline; gap: 7px;
+      width: 100%; min-width: 0;
+      padding-left: 51px; margin-top: 1px;
+    }
+
+    .log-entry .log-time {
+      color: var(--text-muted);
+      font-size: 9px; letter-spacing: 0; font-variant-numeric: tabular-nums;
+      opacity: 0.65;
+    }
     .log-entry .log-tag {
       font-family: var(--font-display);
-      font-size: 9px; font-weight: 700; letter-spacing: 1px;
-      padding: 1px 6px; border-radius: 3px;
-      background: var(--bg-card); border: 1px solid var(--border);
+      font-size: 8px; font-weight: 700; letter-spacing: 0.3px;
+      padding: 2px 0; border-radius: 3px;
+      background: transparent; border: 1px solid var(--border);
       color: var(--text-dim);
-      flex-shrink: 0; min-width: 44px; text-align: center;
+      width: 34px; text-align: center;
+      box-sizing: border-box;
     }
-    .log-entry .log-tag.tag-batch { color: var(--accent); border-color: var(--accent); }
-    .log-entry .log-tag.tag-iter  { color: var(--text); border-color: var(--border-hover); }
-    .log-entry .log-tag.tag-node  { color: var(--text-dim); }
-    .log-entry .log-tag.tag-fail  { color: var(--red); border-color: var(--red); }
-    .log-entry .log-tag.tag-pass  { color: var(--green); border-color: var(--green); }
-    .log-entry .log-tag.tag-warn  { color: var(--yellow); border-color: var(--yellow); }
+    .log-entry .log-tag.tag-batch { color: var(--accent); border-color: var(--accent-dim); background: var(--accent-dim); }
+    .log-entry .log-tag.tag-iter  { color: var(--text-dim); border-color: var(--border-hover); }
+    .log-entry .log-tag.tag-node  { color: var(--text-muted); border-color: var(--border); }
+    .log-entry .log-tag.tag-fail  { color: var(--red-bright); border-color: var(--red-dim); background: var(--red-dim); }
+    .log-entry .log-tag.tag-pass  { color: var(--green-bright); border-color: var(--green-dim); background: var(--green-dim); }
+    .log-entry .log-tag.tag-warn  { color: var(--yellow-bright); border-color: var(--yellow-dim); background: var(--yellow-dim); }
     .log-entry .log-tag.tag-sys   { color: var(--text-muted); }
-    .log-entry .log-tag.tag-dry   { color: var(--yellow); border-color: var(--yellow); }
+    /* SKIP marker: a small inline glyph on the head RESULT slot, NOT a grid
+       column (kept out of the grid so it can't shove the other fields). */
+    .log-entry .skip-flag {
+      font-family: var(--font-display); font-size: 7.5px; font-weight: 700;
+      letter-spacing: 0.6px; color: var(--yellow-bright);
+      border: 1px solid var(--yellow-dim); border-radius: 4px;
+      padding: 2px 7px; flex: none; background: var(--yellow-dim);
+      line-height: 1; white-space: nowrap;
+    }
+
+    /* Transport: compact mono chip */
+    .log-entry .log-xport {
+      font-family: var(--font-mono); font-size: 8.5px; font-weight: 700;
+      color: var(--text-muted); text-align: center;
+      letter-spacing: 0.4px; opacity: 0.75;
+    }
     .log-entry .log-cc {
       font-family: var(--font-display);
-      font-size: 9px; font-weight: 600; letter-spacing: 0.6px;
-      color: var(--text-dim); flex-shrink: 0; min-width: 22px;
+      font-size: 9px; font-weight: 700; letter-spacing: 0.4px;
+      color: var(--text-muted);
+      display: inline-flex; align-items: center; justify-content: center;
     }
-    .log-entry .log-moniker {
-      color: var(--text); font-weight: 500;
-      overflow: hidden; text-overflow: ellipsis;
-      max-width: 200px; flex-shrink: 1;
+    /* Country flag glyph — small, crisp, subtly rounded, sits in the CC column */
+    .log-entry .log-cc .flag-img {
+      width: 16px; height: 11px; border-radius: 2px; object-fit: cover;
+      box-shadow: inset 0 0 0 1px var(--border); display: block;
     }
-    .log-entry .log-addr {
-      color: var(--text-muted); font-size: 10px; flex-shrink: 0;
+
+    /* RESULT — fills the final grid column, right-aligned verdict (speed/err). */
+    .log-entry .log-result {
+      min-width: 0; justify-self: end;
+      text-align: right; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis; max-width: 100%;
     }
-    .addr-copy {
-      cursor: pointer;
+    /* SKIP result wrapper must NOT clip — the chip is a fixed-width badge, not
+       truncatable text. overflow:hidden on .log-result was shearing it off. */
+    .log-entry .log-result.log-skip {
+      overflow: visible; display: inline-flex;
+      justify-content: flex-end; align-items: center;
     }
-    .addr-copy:hover {
-      color: var(--accent);
-    }
+    /* mbps verdict: number is the hero, unit hugs it as a small dim suffix.
+       tabular-nums keeps digit columns aligned row-to-row; baseline alignment
+       so the unit sits ON the number's baseline, not floating above it. */
     .log-entry .log-mbps {
-      color: var(--green); font-weight: 700;
-      flex-shrink: 0; min-width: 60px; text-align: right;
+      color: var(--green-bright); letter-spacing: -0.1px;
+      display: inline-flex; align-items: baseline;
+      justify-content: flex-end; gap: 3px;
     }
-    .log-entry .log-mbps.slow { color: var(--yellow); }
-    .log-entry .log-mbps.dead { color: var(--red); }
+    .log-entry .log-mbps .num {
+      font-weight: 600; font-size: 10px; font-variant-numeric: tabular-nums;
+    }
+    .log-entry .log-mbps .unit {
+      font-weight: 500; font-size: 7.5px; color: var(--text-muted);
+      letter-spacing: 0.3px; text-transform: uppercase; opacity: 0.6;
+    }
+    .log-entry .log-mbps.slow { color: var(--yellow-bright); }
+    .log-entry .log-mbps.dead { color: var(--red-bright); }
     .log-entry .log-err-code {
-      color: var(--red); font-weight: 600;
-      flex-shrink: 0;
+      color: var(--red-bright); font-weight: 600; font-size: 9px; letter-spacing: 0.3px;
+      font-family: var(--font-mono); opacity: 0.92;
     }
-    .log-entry .log-msg { color: var(--text); flex: 0 0 auto; white-space: nowrap; }
+
+    /* DETAIL line — node address is the anchor identity. Mono, dim so the
+       speed/verdict stays the hero; message/moniker truncate first. */
+    .log-entry .log-id {
+      flex: 0 0 auto; min-width: 0;
+      display: inline-flex; align-items: baseline; gap: 3px;
+      overflow: hidden;
+    }
+    .log-entry .addr-copy {
+      color: var(--text-dim); font-size: 10px; font-family: var(--font-mono);
+      letter-spacing: -0.2px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      min-width: 0; cursor: pointer;
+    }
+    .log-entry .addr-copy:hover { color: var(--accent); }
+    .log-entry .addr-explorer { flex: none; opacity: 0.4; font-size: 9.5px; }
+    .log-entry .addr-explorer:hover { opacity: 1; }
+    .log-entry .log-moniker {
+      color: var(--text-muted); font-weight: 400; font-size: 9.5px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      flex: 0 1 auto; min-width: 0;
+    }
+    .log-entry .log-msg {
+      color: var(--text-dim); font-size: 9.5px;
+      flex: 1 1 auto; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .log-detail .log-copy { flex: none; }
     .log-entry .log-copy {
       margin-left: auto; flex-shrink: 0;
       background: transparent; border: 1px solid var(--border);
-      color: var(--text-dim); font-size: 10px; line-height: 1;
-      padding: 2px 6px; border-radius: 3px; cursor: pointer;
+      color: var(--text-muted); font-size: 9px; line-height: 1;
+      padding: 2px 5px; border-radius: 4px; cursor: pointer;
+      transition: border-color 0.12s ease, color 0.12s ease;
     }
-    .log-entry .log-copy:hover { border-color: var(--text); color: var(--text); background: var(--bg-card); }
+    .log-entry .log-copy:hover { border-color: var(--border-hover); color: var(--text); background: var(--bg-card); }
     @keyframes slideIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
 
     /* ─── Toast ─── */
@@ -976,6 +1074,12 @@
       // connectLiveWork (cache rehydrate → SSE + live-state + logs + batch +
       // stats) and drops the overlay; if paused it paints nothing and the page
       // stays on the overlay.
+      // DEMO mode (?demo): skip ALL live wiring — no broadcast poll, no SSE, no
+      // backlog seed — so the injected sample rows are the only thing on screen
+      // and the real stream can't overwrite them.
+      const _demoMode = new URLSearchParams(location.search).has('demo');
+      if (_demoMode) { seedLogDemo(); return; }
+
       await checkBroadcastState();
       // Re-poll the single endpoint so a run that STARTS while we're paused flips
       // the page to live within ~10s — without any traffic in the meantime.
@@ -989,6 +1093,43 @@
         if (Date.now() - _lastBroadcastPollAt >= BROADCAST_POLL_MS) checkBroadcastState();
       });
     });
+
+    // ─── Live-log formatting demo (only via ?demo) ───
+    function seedLogDemo() {
+      showPaused(false);
+      document.body.classList.remove('boot-pending');
+      const body = document.getElementById('logBody');
+      if (body) body.innerHTML = '';
+      const LONG_ERR = 'connect ETIMEDOUT 86.125.226.235:50010 — all 3 transports failed (vless/tcp/tls:4876, vmess/grpc/none:3876, vmess/gun/none:3876); status-port fallback 6636 exhausted after 4 peers; node test timed out (2 retries)';
+      const LONG_MON = 'na-us-cal-12.suchnode.net-premium-gigabit-exit-relay-frankfurt-backup';
+      const LONG_ADDR = 'sentnode1s0axvguu24t6kq9w3e7r5y8u2i4o6p8a0sdfghjklqwertyuiop';
+      const pass = (cc, x, m, a, s) => appendLog({ cat: 'node', status: 'pass', tag: 'PASS', transport: x, cc, moniker: m, addr: a, mbps: s });
+      const fail = (cc, x, m, a, e, msg) => appendLog({ cat: 'fail', status: 'fail', tag: 'FAIL', transport: x, cc, moniker: m, addr: a, errCode: e, msg });
+      const skip = (cc, x, m, a) => appendLog({ cat: 'node', status: 'ok', tag: 'NODE', transport: x, cc, moniker: m, addr: a, errCode: 'TEST_RUN_SKIP', msg: 'skipped — test run (no payment, no measurement)' });
+      // Oldest first; newest-first renderer flips them so the lifecycle line ends on top.
+      appendLog('[174/1577] Testing sentnode1r3anj95tn6n9mu2k…');
+      pass('ch', 'WireGuard', 'zurich-init7', 'sentnode1s9aa12zxcv', 521.9);
+      fail('pl', 'V2Ray', 'warsaw-nask', 'sentnode1s9aa11ghjk', 'PRICE_UNAVAILABLE', 'node status query returned no price — /status endpoint 503 (node likely offline or mid-restart)');
+      pass('kr', 'WireGuard', 'seoul-kt-edge', 'sentnode1s9aa10asdf', 0.4);
+      skip('br', 'V2Ray', 'sao-paulo-exit', 'sentnode1s9aa09uiop');
+      pass('se', 'WireGuard', 'stockholm-31173', 'sentnode1s9aa08erty', 333.7);
+      fail('ru', 'V2Ray', 'moscow-selectel', 'sentnode1s9aa07klqw', 'TUNNEL_DEAD', 'tunnel established but 0 bytes transferred in 12s — node accepted payment then dropped traffic (peer stopped responding)');
+      pass('us', 'V2Ray', 'na-us-cal-12.suchnode.net', 'sentnode1s0axvguu24t', 24.8);
+      pass('ca', 'WireGuard', 'toronto-ovh-02', 'sentnode1s9aa06fghj', 245.1);
+      fail('in', 'V2Ray', 'mumbai-airtel-relay', 'sentnode1s9aa05a0sd', 'INSUFFICIENT_FUNDS', 'insufficient balance to start session: need 0.52 P2P, wallet has 0.08 P2P');
+      pass('tr', 'WireGuard', LONG_MON, LONG_ADDR, 908.9);
+      pass('fr', 'V2Ray', 'paris-online-net', 'sentnode1s9aa04o6p8', 61.0);
+      fail('au', 'WireGuard', 'mayfield-west-au', 'sentnode1s672825s9z5', 'HANDSHAKE_FAIL', 'WireGuard handshake timed out after 5s — no response from peer endpoint 203.0.113.44:51820 (3 retries)');
+      pass('jp', 'WireGuard', 'tokyo-bgp-edge', 'sentnode1s9aa03e7r5', 156.4);
+      pass('sg', 'V2Ray', 'jakarta.dvpn-x.com', 'sentnode1s4kluq448x6', 3.7);
+      fail('bg', 'V2Ray', LONG_MON, LONG_ADDR, 'SESSION_CONFLICT', '409 session exists on node (indexing race) — waited 15s then 20s, still 409; paying for FRESH session; old session stale on node');
+      skip('nl', 'V2Ray', 'amsterdam-exit', 'sentnode1saklnvuvh4m');
+      pass('gb', 'WireGuard', 'worcester-uk-relay', 'sentnode1s4a65jet2hx', 0.9);
+      pass('de', 'V2Ray', 'frankfurt-hetzner-01', 'sentnode1s9aa02vh4m', 88.2);
+      fail('ro', 'V2Ray', 'timisoara.busur.cc', 'sentnode138mmzp5ekg0', 'NODE_TIMEOUT', LONG_ERR);
+      pass('us', 'WireGuard', 'los-angeles-prime', 'sentnode1s9aa01u24t', 412.6);
+      showToast('Demo log seeded');
+    }
 
     // Normalize a node's serviceType into the lowercase string the row
     // renderer expects ('wireguard' | 'v2ray' | null). The sanitizer can hand
@@ -1164,7 +1305,7 @@
       const short = escHtml(shortAddr(addrFull));
       const explorerUrl = 'https://explorer.sentinel.co/address/' + encodeURIComponent(addrFull);
       return `<span class="addr-copy" data-addr="${full}" title="Click to copy ${full}" onclick="copyAddr(event, this)">${short}</span>`
-        + `<a class="addr-explorer" href="${escHtml(explorerUrl)}" target="_blank" rel="noopener noreferrer" title="Open in Sentinel Explorer" onclick="event.stopPropagation()" style="margin-left:6px;color:var(--accent);text-decoration:none;font-size:11px">↗</a>`;
+        + `<a class="addr-explorer" href="${escHtml(explorerUrl)}" target="_blank" rel="noopener noreferrer" title="Open in Sentinel Explorer" onclick="event.stopPropagation()" style="margin-left:5px;color:var(--accent);text-decoration:none">↗</a>`;
     }
     async function copyAddr(ev, el) {
       ev.stopPropagation();
@@ -1501,9 +1642,8 @@
       // happening now.
       const tsMs = _haveTs ? _emitTs : Date.now();
       const ts = tsMs != null ? new Date(tsMs).toLocaleTimeString('en-US', { hour12: false }) : '';
-      const parts = [`<span class="log-time">${ts}</span>`];
 
-      // Tag pill
+      // Tag pill ─ classification
       const tagText  = (o.tag || (o.cat === 'node' ? 'NODE' : o.cat === 'fail' ? 'FAIL' : 'SYS')).toUpperCase();
       const tagClass =
         o.cat === 'fail' ? 'tag-fail' :
@@ -1514,36 +1654,73 @@
         o.tag === 'ITER' ? 'tag-iter' :
         o.status === 'warn' ? 'tag-warn' :
         'tag-sys';
-      parts.push(`<span class="log-tag ${tagClass}">${escHtml(tagText)}</span>`);
 
-      if (o.errCode === 'TEST_RUN_SKIP') parts.push('<span class="log-tag tag-dry">DRY</span>');
+      // A row is "structured" when it carries node fields (transport / cc / addr
+      // / moniker / mbps). Those render as a two-line terminal record:
+      //   line 1 (head):   TIME  ⬤TAG  XPORT  CC ················· RESULT
+      //   line 2 (detail): node address · moniker  (or the message / err)
+      // Plain string lifecycle lines (e.g. "[842/1577] Testing sent1…") have
+      // none of those, so they stay a single dense line — head only.
+      const structured = !!(o.transport || o.cc || o.addr || o.moniker || o.mbps != null);
 
-      if (o.transport) {
-        const t = o.transport.toLowerCase().includes('wire') ? 'WG' : o.transport.toLowerCase().includes('v2') ? 'V2' : o.transport.toUpperCase();
-        parts.push(`<span class="log-tag">${escHtml(t)}</span>`);
-      }
+      // ── HEAD line ── ALWAYS emits the same 5 grid columns so fields align
+      //   vertically across every row: TIME · TAG · XPORT · CC · RESULT.
+      //   XPORT/CC render as empty placeholders when absent (non-structured
+      //   lifecycle lines) so the grid never collapses or shifts.
+      const isSkip = o.errCode === 'TEST_RUN_SKIP';
+      const head = [`<span class="log-time">${ts}</span>`];
+      head.push(`<span class="log-tag ${tagClass}">${escHtml(tagText)}</span>`);
 
-      if (o.cc) parts.push(`<span class="log-cc">${escHtml(String(o.cc).toUpperCase())}</span>`);
+      const xport = o.transport
+        ? (o.transport.toLowerCase().includes('wire') ? 'WG' : o.transport.toLowerCase().includes('v2') ? 'V2' : o.transport.toUpperCase().slice(0, 2))
+        : '';
+      head.push(`<span class="log-xport">${escHtml(xport)}</span>`);
+      // Country as a flag glyph (falls back to the 2-letter code if the flag
+      // image can't load — flagFor's onerror hides the img, alt keeps the code).
+      const flagHtml = o.cc ? flagFor(o.cc) : '';
+      head.push(`<span class="log-cc" title="${o.cc ? escHtml(String(o.cc).toUpperCase()) : ''}">${flagHtml || (o.cc ? escHtml(String(o.cc).toUpperCase()) : '')}</span>`);
 
-      if (o.moniker) parts.push(`<span class="log-moniker" title="${escHtml(o.moniker)}">${escHtml(o.moniker)}</span>`);
-
-      if (o.addr) parts.push(addrCopySpan(o.addr));
-
+      // RESULT — right-anchored verdict: speed (pass), err-code (fail), SKIP
+      // marker (test run), or the message itself (plain lifecycle line).
       if (o.mbps != null) {
         const v = Number(o.mbps);
-        const klass = v >= 10 ? '' : v > 0 ? 'slow' : 'dead';
-        parts.push(`<span class="log-mbps ${klass}">${v.toFixed(1)} Mbps</span>`);
-      }
-
-      if (o.msg) {
+        const mk = v >= 10 ? '' : v > 0 ? 'slow' : 'dead';
+        head.push(`<span class="log-result log-mbps ${mk}"><span class="num">${v.toFixed(1)}</span><span class="unit">Mbps</span></span>`);
+      } else if (isSkip) {
+        head.push(`<span class="log-result log-skip"><span class="skip-flag">SKIP</span></span>`);
+      } else if (o.cat === 'fail' && o.errCode) {
+        head.push(`<span class="log-result log-err-code" title="${escHtml(o.errCode)}">${escHtml(o.errCode)}</span>`);
+      } else if (!structured && o.msg) {
         const escaped = escHtml(o.msg);
         const linkified = escaped.replace(/(https?:\/\/[^\s<]+)/g, (u) => `<a href="${u}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">${u}</a>`);
-        parts.push(`<span class="log-msg">${linkified}</span>`);
+        head.push(`<span class="log-result log-msg" style="text-align:left" title="${escHtml(o.msg)}">${linkified}</span>`);
+      } else {
+        head.push('<span class="log-result"></span>');
       }
 
-      if (o.cat === 'fail' && o.addr) {
-        parts.push(`<button class="log-copy" title="Copy failure log" data-addr="${escHtml(o.addr)}" data-moniker="${escHtml(o.moniker || '')}" onclick="copyRowFailure(event)">⎘</button>`);
-        parts.push(`<button class="log-copy" title="View error details" data-addr="${escHtml(o.addr)}" data-moniker="${escHtml(o.moniker || '')}" onclick="showRowFailurePopup(event)" style="margin-left:4px">👁</button>`);
+      const parts = [`<div class="log-head">${head.join('')}</div>`];
+
+      // ── DETAIL line (structured rows only) ──
+      if (structured) {
+        const detail = [];
+        if (o.addr) detail.push(`<span class="log-id">${addrCopySpan(o.addr)}</span>`);
+        // On a failure the error message owns the detail line — the operator
+        // moniker is noise there (still in the copy payload + hover title). On a
+        // pass/skip the moniker is the useful human label, so keep it.
+        if (o.moniker && o.cat !== 'fail') detail.push(`<span class="log-moniker" title="${escHtml(o.moniker)}"><span style="color:var(--text-muted);opacity:0.4;margin:0 5px 0 2px">·</span>${escHtml(o.moniker)}</span>`);
+        // The longer human message lives on line 2 where it has full width
+        // (skip reason, full error prose). For fails the err-code is already in
+        // the head, so this is the verbose explanation.
+        if (o.msg) {
+          const escaped = escHtml(o.msg);
+          const linkified = escaped.replace(/(https?:\/\/[^\s<]+)/g, (u) => `<a href="${u}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">${u}</a>`);
+          detail.push(`<span class="log-msg" title="${escHtml(o.msg)}">${linkified}</span>`);
+        }
+        if (o.cat === 'fail' && o.addr) {
+          detail.push(`<button class="log-copy" title="Copy failure log" data-addr="${escHtml(o.addr)}" data-moniker="${escHtml(o.moniker || '')}" onclick="copyRowFailure(event)">⎘</button>`);
+          detail.push(`<button class="log-copy" title="View error details" data-addr="${escHtml(o.addr)}" data-moniker="${escHtml(o.moniker || '')}" onclick="showRowFailurePopup(event)">👁</button>`);
+        }
+        if (detail.length) parts.push(`<div class="log-detail">${detail.join('')}</div>`);
       }
 
       div.innerHTML = parts.join('');
