@@ -363,7 +363,7 @@
     }
 
     /* ─── Table ─── */
-    .table-container { display: flex; flex-direction: column; overflow: hidden; }
+    .table-container { display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
 
     /* ─── Live Log panel ─── */
     .log-container {
@@ -375,10 +375,17 @@
       align-self: start;
       position: sticky;
       top: 12px;
+      /* Grid items default to min-width:auto (content-based), so a long
+         unbreakable log token can blow this panel past its 380px track and
+         overflow the page. Pin to 0 so the track width wins. */
+      min-width: 0;
     }
     .log-container .logs {
       flex: 1 1 auto;
       min-height: 0;
+      /* Same trap one level down: flex item min-width defaults to auto. */
+      min-width: 0;
+      overflow-x: hidden;
       overflow-y: auto;
       padding: 10px 14px;
       font-family: var(--font-mono, ui-monospace, monospace);
@@ -389,7 +396,11 @@
     }
     .log-container .logs .log-line {
       white-space: pre-wrap;
+      /* break-word won't split a single long unbreakable token (node address,
+         base64 memo); anywhere will, keeping every line inside the panel. */
       word-break: break-word;
+      overflow-wrap: anywhere;
+      max-width: 100%;
       padding: 1px 0;
       border-bottom: 1px dashed transparent;
     }
